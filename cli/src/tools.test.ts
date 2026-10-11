@@ -17,6 +17,9 @@ beforeEach(() => {
   vi.stubEnv('HERMES_HOME', '');
   vi.stubEnv('PI_CODING_AGENT_DIR', '');
   vi.stubEnv('REASONIX_HOME', '');
+  // Reasonix keeps its home under %APPDATA% on Windows instead of ~/.reasonix;
+  // pin it so asPosix can map that home back to the POSIX golden (#1392).
+  if (process.platform === 'win32') vi.stubEnv('APPDATA', WIN_APPDATA);
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -45,9 +48,11 @@ const context: GenerateContext = {
 
 // Generated file paths come from the host's path.join, so on Windows the
 // separator is '\\' while the golden strings here are POSIX (#1392). Normalize
-// before comparing.
+// before comparing, and map the pinned Windows Reasonix home to ~/.reasonix.
+const WIN_APPDATA = 'C:\\Users\\tester\\AppData\\Roaming';
 function asPosix(p: string): string {
-  return process.platform === 'win32' ? p.replaceAll('\\', '/') : p;
+  if (process.platform !== 'win32') return p;
+  return p.replaceAll('\\', '/').replace('C:/Users/tester/AppData/Roaming/reasonix', '/home/tester/.reasonix');
 }
 
 // Snapshots embed the generated file paths verbatim; normalize them so the
@@ -349,8 +354,8 @@ describe('tool generators', () => {
     expect('reasoningEffort' in value['agent-default-model']).toBe(true);
     // DSH loads $DSH_HOME/.env as its user environment layer, which is how
     // `apiKeyEnv` resolves without an export.
-    expect(env).toMatchObject({
-      path: asPosix('/home/tester/.dsh/.env'),
+    expect({ ...env, path: asPosix(env.path) }).toMatchObject({
+      path: '/home/tester/.dsh/.env',
       format: 'env',
       sensitive: true,
       content: 'FREELLMAPI_API_KEY=freellmapi-test-key\n',
@@ -448,8 +453,8 @@ describe('tool generators', () => {
   it('honours OPENCLAW_CONFIG_PATH and OPENCLAW_STATE_DIR the way OpenClaw does', () => {
     vi.stubEnv('OPENCLAW_STATE_DIR', '/srv/claw');
     const [config, env] = tools.find(tool => tool.id === 'openclaw')!.generate(context).files;
-    expect(config.path).toBe('/srv/claw/openclaw.json');
-    expect(env.path).toBe('/srv/claw/.env');
+    expect(asPosix(config.path)).toBe('/srv/claw/openclaw.json');
+    expect(asPosix(env.path)).toBe('/srv/claw/.env');
     vi.stubEnv('OPENCLAW_CONFIG_PATH', '/etc/openclaw.json');
     expect(tools.find(tool => tool.id === 'openclaw')!.generate(context).files[0].path).toBe('/etc/openclaw.json');
   });
@@ -484,7 +489,7 @@ describe('tool generators', () => {
   it('gives a named Hermes profile a providers entry instead of the default model', () => {
     vi.stubEnv('HERMES_HOME', '/srv/hermes');
     const [config] = tools.find(tool => tool.id === 'hermes')!.generate({ ...context, profile: 'lab' }).files;
-    expect(config.path).toBe('/srv/hermes/config.yaml');
+    expect(asPosix(config.path)).toBe('/srv/hermes/config.yaml');
     const value = config.value as { model?: unknown; providers: Record<string, { api: string; default_model: string }> };
     expect(value.model).toBeUndefined();
     expect(value.providers['freellmapi-lab'].api).toBe('http://localhost:3000/v1');
@@ -538,7 +543,7 @@ describe('tool generators', () => {
     vi.stubEnv('PI_CODING_AGENT_DIR', '/srv/pi');
     const files = tools.find(tool => tool.id === 'pi')!.generate({ ...context, profile: 'Work Box' }).files;
     expect(files).toHaveLength(1);
-    expect(files[0].path).toBe('/srv/pi/models.json');
+    expect(asPosix(files[0].path)).toBe('/srv/pi/models.json');
     const providers = (files[0].value as { providers: Record<string, { name: string }> }).providers;
     expect(Object.keys(providers)).toEqual(['freellmapi-work-box']);
     expect(providers['freellmapi-work-box'].name).toBe('FreeLLMAPI (Work Box)');
@@ -549,7 +554,7 @@ describe('tool generators', () => {
     // .env beside it, which it loads itself. `default_model` is provider/model
     // and must sit in the root region, above the array entry.
     const [config, env] = tools.find(tool => tool.id === 'reasonix')!.generate(context).files;
-    expect(config.path).toBe('/home/tester/.reasonix/config.toml');
+    expect(asPosix(config.path)).toBe('/home/tester/.reasonix/config.toml');
     expect(config.format).toBe('toml');
     expect(config.sensitive).toBeUndefined();
     const lines = (config.content ?? '').split('\n');
@@ -563,7 +568,7 @@ describe('tool generators', () => {
     expect(lines).toContain('api_key_env = "FREELLMAPI_API_KEY"');
     expect(lines).toContain('context_window = 131072');
     expect(config.content).not.toContain('freellmapi-test-key');
-    expect(env).toEqual({
+    expect({ ...env, path: asPosix(env.path) }).toEqual({
       path: '/home/tester/.reasonix/.env',
       format: 'env',
       sensitive: true,
@@ -584,8 +589,8 @@ describe('tool generators', () => {
   it('gives a named Reasonix profile its own provider and leaves the default model alone', () => {
     vi.stubEnv('REASONIX_HOME', '/srv/reasonix');
     const [config, env] = tools.find(tool => tool.id === 'reasonix')!.generate({ ...context, profile: 'Work Box' }).files;
-    expect(config.path).toBe('/srv/reasonix/config.toml');
-    expect(env.path).toBe('/srv/reasonix/.env');
+    expect(asPosix(config.path)).toBe('/srv/reasonix/config.toml');
+    expect(asPosix(env.path)).toBe('/srv/reasonix/.env');
     expect(config.content).not.toContain('default_model');
     expect(config.content!.split('\n')[0]).toBe('[[providers]]');
     expect(config.content).toContain('name = "freellmapi-work-box"');
