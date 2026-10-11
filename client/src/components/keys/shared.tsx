@@ -47,6 +47,7 @@ export const PLATFORMS: { value: Platform; label: string; url: string; keyless?:
   { value: 'septor', label: 'Septor Labs (daily free-model quota)', url: 'https://septorlabs.com/dashboard' },
   { value: 'clod', label: 'CLōD (shared daily free requests)', url: 'https://newapp.clod.io' },
   { value: 'speechify', label: 'Speechify (monthly free TTS characters)', url: 'https://platform.speechify.ai' },
+  { value: 'freeai', label: 'Free.ai (shared daily free TTS tokens)', url: 'https://free.ai/account/#api-keys' },
   { value: 'blaze', label: 'BlazeAPI (daily free tokens; Discord verification)', url: 'https://blazeapi.org/dashboard' },
   { value: 'lucidity', label: 'Lucidity Composite (daily free-model requests)', url: 'https://composite.lucidity.sh' },
   { value: 'airforce', label: 'Api.Airforce (daily free requests; 1 per minute)', url: 'https://api.airforce' },
