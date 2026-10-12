@@ -19,6 +19,7 @@ import { customEndpointKeyIds } from './custom-endpoint.js';
 import type { Db } from '../db/types.js';
 import { SPEKA_BASE_URL } from '../providers/speka.js';
 import { ELECTRONHUB_BASE_URL } from '../providers/electronhub.js';
+import { INFERBASE_BASE_URL } from '../providers/inferbase.js';
 
 export interface EmbeddingModelRow {
   id: number;
@@ -117,6 +118,7 @@ export const EMBEDDING_PLATFORMS = new Set([
   'sealion',
   'speka',
   'electronhub',
+  'inferbase',
 ]);
 
 interface ProviderCallResult {
@@ -159,7 +161,7 @@ async function openAiStyleEmbed(
     usage?: { prompt_tokens?: number; total_tokens?: number };
   };
   const data = [...(j.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-  if (platform === 'electronhub' && (
+  if ((platform === 'electronhub' || platform === 'inferbase') && (
     j.model !== modelId || data.length !== inputs.length ||
     data.some((d, i) => d.index !== i || !Array.isArray(d.embedding) ||
       d.embedding.length !== (dimensions ?? expectedDimensions) ||
@@ -167,7 +169,8 @@ async function openAiStyleEmbed(
   )) {
     // A successful HTTP response is not enough: wrong model/dimension or
     // malformed vectors would corrupt the caller's embedding family.
-    throw new EmbeddingsError('ElectronHub returned mismatched or malformed embeddings', 502);
+    const provider = platform === 'electronhub' ? 'ElectronHub' : 'Inferbase';
+    throw new EmbeddingsError(`${provider} returned mismatched or malformed embeddings`, 502);
   }
   return {
     vectors: data.map(d => d.embedding),
@@ -283,6 +286,8 @@ async function callProvider(row: EmbeddingModelRow, credential: ProviderCredenti
       return openAiStyleEmbed(`${SPEKA_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions);
     case 'electronhub':
       return openAiStyleEmbed(`${ELECTRONHUB_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions, row.dimensions);
+    case 'inferbase':
+      return openAiStyleEmbed(`${INFERBASE_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions, row.dimensions);
     case 'cloudflare': {
       // Key is stored as "account_id:token".
       const sep = key.indexOf(':');
