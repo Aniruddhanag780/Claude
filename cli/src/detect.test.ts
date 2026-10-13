@@ -66,9 +66,9 @@ describe('clientNotes', () => {
     expect(notes.join('\n')).toContain('npm install -g @openai/codex');
   });
 
-  it('explains that the desktop app cannot use a custom gateway', () => {
+  it('points a desktop-only install at the Codex CLI', () => {
     const notes = clientNotes({ kind: 'desktop', desktopPath: '/Applications/ChatGPT.app' });
-    expect(notes.join('\n')).toContain('does not support custom API gateways');
+    expect(notes.join('\n')).toContain('this setup configures the Codex CLI');
   });
 
   it('names the CLI path when it is detected', () => {

@@ -1,11 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-// Client detection for the ChatGPT (formerly Codex) integration. `setup-codex`
-// only WRITES a config; this module tells the user WHICH client they actually
-// have so the setup note can say something true about their machine instead of
-// a generic "install X" line. Purely filesystem/PATH based — no network, no
-// spawning processes — so it stays fast and testable.
+// Client detection for the Codex CLI integration. `setup-codex` only WRITES a
+// config; this module tells the user WHICH client they actually have so the
+// setup note can say something true about their machine instead of a generic
+// "install X" line. Purely filesystem/PATH based — no network, no spawning
+// processes — so it stays fast and testable.
 
 export interface DetectedClient {
   /** `cli` — the `codex` binary is on PATH; `desktop` — the ChatGPT desktop
@@ -42,6 +42,9 @@ function executableOnPath(name: string): string | undefined {
   return undefined;
 }
 
+/** Detects the `codex` CLI on PATH and the ChatGPT desktop app on macOS.
+ *  Only the `codex` binary is probed: the CLI still ships and runs as
+ *  `codex`, and that is the only surface `setup-codex` configures. */
 export function detectChatGptClient(
   platform: string = process.platform,
 ): DetectedClient | undefined {
@@ -54,26 +57,26 @@ export function detectChatGptClient(
   return undefined;
 }
 
-/** Human-readable guidance appended to `setup-codex` output. The desktop app
- *  cannot point its API traffic at a custom gateway, so it is reported but
- *  never configured — the CLI is the only surface this gateway can serve. */
+/** Human-readable guidance appended to `setup-codex` output. This setup only
+ *  writes the Codex CLI config, so the desktop app is reported but never
+ *  configured. */
 export function clientNotes(client: DetectedClient | undefined): string[] {
   if (!client) {
     return [
-      'No ChatGPT (Codex) client detected on this machine.',
+      'No Codex CLI detected on this machine.',
       'Install the CLI with: npm install -g @openai/codex',
     ];
   }
   if (client.kind === 'desktop') {
     return [
-      `ChatGPT desktop app detected at ${client.desktopPath}; it does not support custom API gateways.`,
+      `ChatGPT desktop app detected at ${client.desktopPath}; this setup configures the Codex CLI.`,
       'The generated configuration targets the Codex CLI — install it with: npm install -g @openai/codex',
     ];
   }
   if (client.kind === 'both') {
     return [
       `Codex CLI detected at ${client.cliPath}; the configuration above applies to it.`,
-      'ChatGPT desktop app also detected; it does not support custom API gateways.',
+      'ChatGPT desktop app also detected; it is not configured by this setup.',
     ];
   }
   return [`Codex CLI detected at ${client.cliPath}; the configuration above applies to it.`];

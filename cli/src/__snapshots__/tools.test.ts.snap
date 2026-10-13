@@ -136,7 +136,7 @@ requires_openai_auth = false
     },
   ],
   "notes": [
-    "No ChatGPT (Codex) client detected on this machine.",
+    "No Codex CLI detected on this machine.",
     "Install the CLI with: npm install -g @openai/codex",
     "Export FREELLMAPI_API_KEY before running codex; the key is not written to config.toml.",
     "Selected fast-coder with a 131072 token context window.",
@@ -166,7 +166,7 @@ model_provider = "freellmapi"
     },
   ],
   "notes": [
-    "No ChatGPT (Codex) client detected on this machine.",
+    "No Codex CLI detected on this machine.",
     "Install the CLI with: npm install -g @openai/codex",
     "Export FREELLMAPI_API_KEY before running codex; the key is not written to config.toml.",
     "Activate this profile with: codex --profile work",

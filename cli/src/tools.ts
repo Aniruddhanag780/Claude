@@ -636,7 +636,7 @@ function generic(ctx: GenerateContext): Generation {
 
 const metadata = [
   ['claude', 'Claude Code', 'code', 'file', 'Anthropic Messages', 'root', 'setup-claude', 'https://docs.anthropic.com/en/docs/claude-code', claude],
-  ['codex', 'ChatGPT (Codex CLI)', 'code', 'file', 'OpenAI Responses', '/v1', 'setup-codex', 'https://developers.openai.com/codex', codex],
+  ['codex', 'Codex CLI', 'code', 'file', 'OpenAI Responses', '/v1', 'setup-codex', 'https://developers.openai.com/codex', codex],
   ['cline', 'Cline', 'code', 'file', 'OpenAI Chat', '/v1', 'setup-cline', 'https://docs.cline.bot', cline],
   ['continue', 'Continue', 'code', 'file', 'OpenAI Chat', '/v1', 'setup-continue', 'https://docs.continue.dev', continueDev],
   ['aider', 'Aider', 'code', 'file', 'OpenAI Chat', '/v1', 'setup-aider', 'https://aider.chat/docs', aider],

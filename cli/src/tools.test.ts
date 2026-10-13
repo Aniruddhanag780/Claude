@@ -11,7 +11,7 @@ import type { GenerateContext } from './types.js';
 vi.mock('./detect.js', () => ({
   detectChatGptClient: () => undefined,
   clientNotes: () => [
-    'No ChatGPT (Codex) client detected on this machine.',
+    'No Codex CLI detected on this machine.',
     'Install the CLI with: npm install -g @openai/codex',
   ],
 }));
