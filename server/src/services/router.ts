@@ -29,7 +29,7 @@ import {
 import { TIMEOUT_ERROR_MARKERS } from '../lib/error-classify.js';
 import { checkMonthlyBudget, reserveMonthlyBudget } from './key-budget.js';
 import { applyModelWeightOverride, getModelWeightOverrides } from './model-weight-overrides.js';
-import { modelsWithOverriddenField } from './model-state.js';
+import { modelsWithOverriddenField, getCatalogModelTombstone } from './model-state.js';
 import { parseBudget } from '../lib/budget.js';
 import { platformDropsResponseFormat } from '../lib/sampling-params.js';
 import { isUnifyEnabled, getModelGroups, resolveRequestedIdForDispatch } from './model-groups.js';
@@ -1844,9 +1844,24 @@ export function routePinnedModel(modelDbId: number, estimatedTokens = 1000, skip
   // pre-margin behavior was one dispatch attempt (a mid-chain context_too_large
   // 400 is classified and retried downstream). Nothing is multiplied here —
   // estimatedTokens already carries the exact capped output reserve (#470).
-  if (!fitsContextWindowStrict(entry.context_window, estimatedTokens)) return null;
-  if (entry.tpm_limit != null && estimatedTokens > entry.tpm_limit) return null;
+  if (!rowFitsRequestSize(entry, estimatedTokens)) return null;
   return selectKeyForModel(entry, estimatedTokens, skipKeys);
+}
+
+function rowFitsRequestSize(entry: ChainRow, estimatedTokens: number): boolean {
+  if (!fitsContextWindowStrict(entry.context_window, estimatedTokens)) return false;
+  return entry.tpm_limit == null || estimatedTokens <= entry.tpm_limit;
+}
+
+/**
+ * Whether a pinned model's known context window and TPM ceiling can hold a
+ * request this size. Lets a caller tell "routePinnedModel returned null because
+ * the request is too big" (permanent for this request) from "no key is free
+ * right now" (transient). An unknown model is not a size problem.
+ */
+export function pinnedModelFitsRequestSize(modelDbId: number, estimatedTokens: number): boolean {
+  const entry = getModelChainRow(getDb(), modelDbId);
+  return !entry || rowFitsRequestSize(entry, estimatedTokens);
 }
 
 /**
@@ -2156,8 +2171,19 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         FROM models m
         WHERE m.id = ? AND m.enabled = 1
       `).get(preferredModelDbId) as ChainRow | undefined;
-      
-      if (pinnedRow) {
+
+      // A model retired upstream (#634: 410 end-of-life) must not be re-added
+      // by a client pin — the row stays `models.enabled = 1` by design, but the
+      // chain tables are off and the provider answers 410 on every call. An
+      // explicit pin bypasses both chain tables, so skip the injection and let
+      // the request fall through to the rest of the chain (or the normal
+      // exhaustion error when nothing is left). A user tombstone still pins:
+      // that deletion is dashboard-managed, and the user asking by name is
+      // newer intent than their own earlier delete.
+      const retiredUpstream = pinnedRow
+        && getCatalogModelTombstone(db, 'chat', pinnedRow.platform, pinnedRow.model_id)?.source === 'upstream_eol';
+
+      if (pinnedRow && !retiredUpstream) {
         sortedChain.unshift(pinnedRow);
       }
     }

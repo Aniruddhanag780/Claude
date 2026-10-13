@@ -76,6 +76,9 @@ export type Platform =
   | 'typhoon'
   // Permanent free chat aliases, shared fair-use quota; signed catalog only.
   | 'plugsky'
+  // Catalog-only free chat gateways; shared monthly/daily account allowances.
+  | 'inferbase'
+  | 'simplellm'
   // Selected zero-priced routes have daily/rolling quotas without a top-up;
   // signed catalog only. The public roster also includes paid/promotional IDs.
   | 'llmtr'
@@ -94,6 +97,9 @@ export type Platform =
   | 'septor'
   | 'clod'
   | 'speechify'
+  // Self-hosted TTS: shared 30K tokens/day and 1K API requests/month, no card.
+  // Model rows arrive only through the signed, freshness-gated catalog.
+  | 'freeai'
   | 'blaze'
   // Lucidity Composite, Api.Airforce and DreamPrompting expose daily free
   // allowances; Waterfall and Logfare publish community / fair-use tiers.
