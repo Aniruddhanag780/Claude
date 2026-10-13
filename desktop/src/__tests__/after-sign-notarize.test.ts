@@ -73,7 +73,7 @@ describe('afterSign notarization', () => {
     await hook.default(context, { exec, env: apiEnv, ...quiet });
     expect(calls.some(c => c.startsWith('ditto -c -k'))).toBe(true);
     expect(calls.find(c => c.startsWith('xcrun notarytool submit'))).toContain('--key-id KEYID');
-    expect(calls).toContain('xcrun stapler staple /out/mac/FreeLLMAPI.app');
+    expect(calls).toContain(`xcrun stapler staple ${join('/out/mac', 'FreeLLMAPI.app')}`);
   });
 
   it('fails the build when Apple rejects the submission', async () => {
