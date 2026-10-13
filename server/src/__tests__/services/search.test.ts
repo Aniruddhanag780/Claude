@@ -9,6 +9,7 @@ import {
   updateSearchEngine,
   searchAnalytics,
   searchAvailable,
+  decodeEntities,
 } from '../../services/search.js';
 import { SEARCH_PLATFORMS as SHARED_SEARCH_PLATFORMS } from '../../../../shared/types.js';
 import { SEARCH_PLATFORMS } from '../../lib/search-platforms.js';
@@ -238,5 +239,14 @@ describe('search service', () => {
     expect(stats.byEngine).toEqual([{ engineId: 'exa-search', displayName: 'Exa Search', count: 2 }]);
     expect(stats.series).toHaveLength(1);
     expect(stats.series[0]).toMatchObject({ engineId: 'exa-search', count: 2 });
+  });
+});
+
+describe('decodeEntities', () => {
+  it('turns HTML entities in titles into plain text', () => {
+    expect(decodeEntities('Quelle est la capitale de l&#039;Australie ?')).toBe("Quelle est la capitale de l'Australie ?");
+    expect(decodeEntities('Tom &amp; Jerry &quot;live&quot; &#x2014; &nbsp;ok')).toBe('Tom & Jerry "live" \u2014  ok');
+    expect(decodeEntities('&bogus; stays')).toBe('&bogus; stays');
+    expect(decodeEntities('plain')).toBe('plain');
   });
 });

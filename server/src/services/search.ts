@@ -196,12 +196,27 @@ const clip = (v: string): string => (v.length > CONTENT_CHARS ? `${v.slice(0, CO
 /** Engines that do not score hits keep their own ranking: 1.0 down to ~0. */
 const rankScore = (i: number, n: number): number => Number((1 - i / Math.max(n, 1)).toFixed(3));
 
+// Some engines (Linkup) return page titles with their HTML entities intact
+// ("Quelle est la capitale de l&#039;Australie"). Decode the common ones so
+// every engine hands back plain text.
+const NAMED_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+export function decodeEntities(v: string): string {
+  if (!v.includes('&')) return v;
+  return v.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e: string) => {
+    if (e[0] === '#') {
+      const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : m;
+    }
+    return NAMED_ENTITIES[e.toLowerCase()] ?? m;
+  });
+}
+
 function keepHits(hits: Array<{ title: string; url: string; content: string; score?: number }>): SearchHit[] {
   const valid = hits.filter(h => h.url);
   return valid.map((h, i) => ({
-    title: h.title,
+    title: decodeEntities(h.title),
     url: h.url,
-    content: clip(h.content),
+    content: clip(decodeEntities(h.content)),
     score: typeof h.score === 'number' && Number.isFinite(h.score) ? h.score : rankScore(i, valid.length),
   }));
 }
