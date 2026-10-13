@@ -17,6 +17,7 @@ import { initDb, getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { encodeHitContent, filterHitsByDomain } from '../../lib/web-search-tool.js';
+import { seedSearchEngines } from '../helpers/search-engines.js';
 
 let app: Express;
 let dashToken = '';
@@ -97,6 +98,7 @@ describe('agent web search served from the search pool', () => {
   beforeAll(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
+    seedSearchEngines();
     app = createApp();
     dashToken = mintDashboardToken();
     setSetting('enable_mcp', '1');

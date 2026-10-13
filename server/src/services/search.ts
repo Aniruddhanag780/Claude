@@ -16,9 +16,9 @@ import { isOnCooldown, setCooldown } from './ratelimit.js';
 //
 // Search engines are media_models rows with modality = 'search' (model_id is
 // the engine id, e.g. 'tavily-search'). The catalog's `searchEngines` registry
-// maintains them (see catalog-sync), with a bundled baseline seeded by the
-// 20261013 migration; a user can also register a custom endpoint that speaks
-// Tavily's wire shape at POST {base_url}/search (POST /api/media/custom with
+// maintains them (see catalog-sync); nothing is bundled, so engines reach
+// Premium first and Free 30 days later like any catalog row. A user can also
+// register a custom endpoint that speaks Tavily's wire shape at POST {base_url}/search (POST /api/media/custom with
 // modality 'search'), which binds the row to that endpoint's key.
 //
 // Routing: custom endpoints first (the operator's explicit relays), then the

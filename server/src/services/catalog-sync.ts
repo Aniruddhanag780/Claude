@@ -588,7 +588,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     }
 
     // Search engines (#1174): their own optional full snapshot, exactly like
-    // video. A catalog without the key leaves the bundled baseline alone.
+    // video. A catalog without the key leaves existing engine rows alone.
     // A local disable survives (catalog enable never overrides it) and the
     // dashboard's local engine order lives in settings, not in `priority`.
     if (catalog.searchEngines) {

@@ -1,7 +1,6 @@
 import crypto from 'crypto';
 import type { Request, Response } from 'express';
-import { getDb } from '../db/index.js';
-import { runSearch, SearchError } from '../services/search.js';
+import { runSearch, SearchError, searchAvailable } from '../services/search.js';
 
 // Shared plumbing for answering an agent's built-in web search from the
 // gateway's own search pool (#1174): Codex's Responses `web_search` tool and
@@ -37,20 +36,12 @@ const RESULTS_PER_SEARCH = 5;
 const MAX_QUERY_CHARS = 400;
 const EXTRACT_CHARS = 1_200;
 
-// Search-only platforms. Custom endpoints are deliberately NOT counted: any
-// OpenAI-compatible chat relay is a `custom` key, and treating every one of
-// them as a search relay would intercept agents' web search for users who
-// have no search provider at all. /v1/search still tries them directly.
-const SEARCH_PLATFORMS = ['tavily', 'exa', 'firecrawl', 'linkup'] as const;
-
-/** True when at least one enabled, not-known-bad search-platform key exists. */
+/** True when at least one enabled search engine has a usable key — the same
+ *  check /v1/search routes with, so agents' web search only switches on when a
+ *  search can actually run. */
 export function hasSearchCapability(): boolean {
   try {
-    const placeholders = SEARCH_PLATFORMS.map(() => '?').join(',');
-    const row = getDb().prepare(
-      `SELECT 1 FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') AND platform IN (${placeholders}) LIMIT 1`,
-    ).get(...SEARCH_PLATFORMS);
-    return row != null;
+    return searchAvailable();
   } catch {
     return false;
   }

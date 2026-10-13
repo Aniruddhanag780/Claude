@@ -5,6 +5,7 @@ import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { clearAllCooldowns } from '../../services/ratelimit.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { seedSearchEngines } from '../helpers/search-engines.js';
 
 // HTTP surface of web search (#1174): POST /v1/search and GET
 // /v1/search/engines for API callers, /api/search/engines and
@@ -51,6 +52,7 @@ describe('search routes', () => {
   beforeEach(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
+    seedSearchEngines();
     clearAllCooldowns(Number.MAX_SAFE_INTEGER);
     app = createApp();
     dashToken = mintDashboardToken();

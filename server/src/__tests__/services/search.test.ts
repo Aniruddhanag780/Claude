@@ -12,6 +12,7 @@ import {
 } from '../../services/search.js';
 import { SEARCH_PLATFORMS as SHARED_SEARCH_PLATFORMS } from '../../../../shared/types.js';
 import { SEARCH_PLATFORMS } from '../../lib/search-platforms.js';
+import { seedSearchEngines } from '../helpers/search-engines.js';
 
 const realFetch = globalThis.fetch;
 
@@ -66,6 +67,7 @@ describe('search service', () => {
   beforeEach(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
+    seedSearchEngines();
     clearAllCooldowns(Number.MAX_SAFE_INTEGER);
   });
 
@@ -74,7 +76,7 @@ describe('search service', () => {
     vi.restoreAllMocks();
   });
 
-  it('seeds the four baseline engines in priority order', () => {
+  it('lists the catalog engines in priority order', () => {
     expect(listSearchEngines().map(e => e.engineId)).toEqual(['tavily-search', 'exa-search', 'firecrawl-search', 'linkup-search']);
     expect(searchAvailable()).toBe(false);
   });

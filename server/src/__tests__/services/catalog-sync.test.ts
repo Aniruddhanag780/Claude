@@ -773,18 +773,12 @@ describe('applyCatalog: searchEngines', () => {
     `).all() as any;
   }
 
-  it('ships the bundled baseline before any catalog carries the registry', () => {
-    expect(searchRows().map(r => r.model_id)).toEqual(['tavily-search', 'exa-search', 'firecrawl-search', 'linkup-search']);
-  });
-
-  it('keeps the baseline when a catalog omits the optional registry', () => {
-    applyCatalog(getDb(), searchCatalog(undefined));
-    expect(searchRows()).toHaveLength(4);
+  it('ships no search engines until a catalog carries the registry', () => {
+    expect(searchRows()).toEqual([]);
   });
 
   it('applies the registry as a full snapshot with metadata in meta_json', () => {
-    const counts = applyCatalog(getDb(), searchCatalog(searchRoster()));
-    expect(counts.removed).toBeGreaterThanOrEqual(2);
+    applyCatalog(getDb(), searchCatalog(searchRoster()));
     expect(searchRows().map(r => `${r.platform}:${r.model_id}`)).toEqual(['exa:exa-search', 'tavily:tavily-search']);
     expect(searchRows()[0].quota_label).toBe('$10/month in credits');
     expect(JSON.parse(searchRows()[1].meta_json!)).toEqual({
@@ -792,6 +786,19 @@ describe('applyCatalog: searchEngines', () => {
       features: { news: true, answer: true },
       premiumSince: '2026-10-13T00:00:00.000Z',
     });
+  });
+
+  it('keeps existing engines when a catalog omits the optional registry', () => {
+    applyCatalog(getDb(), searchCatalog(undefined));
+    expect(searchRows()).toHaveLength(2);
+  });
+
+  it('removes every engine when the registry is empty (a free catalog before an engine ages in)', () => {
+    const counts = applyCatalog(getDb(), searchCatalog([]));
+    expect(counts.removed).toBeGreaterThanOrEqual(2);
+    expect(searchRows()).toEqual([]);
+    applyCatalog(getDb(), searchCatalog(searchRoster()));
+    expect(searchRows()).toHaveLength(2);
   });
 
   it('keeps a local disable across catalog applies', () => {
