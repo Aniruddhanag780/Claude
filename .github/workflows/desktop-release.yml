@@ -90,6 +90,16 @@ jobs:
         with:
           node-version: '20'
 
+      # better-sqlite3 is rebuilt for Electron with node-gyp, which still
+      # imports Python's distutils (removed in 3.12). Some macos-15-intel images
+      # default to a Python without it, so the rebuild failed there
+      # intermittently ("No module named 'distutils'"). Pin a Python that has
+      # it on the macOS hosts instead of taking whatever the image ships.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: runner.os == 'macOS'
+        with:
+          python-version: '3.11'
+
       # #948: v0.8.2–v0.8.4 shipped installers stamped 0.8.1 because
       # desktop/package.json was never bumped after v0.8.1. electron-builder
       # reads that field for the artifact filenames AND the latest*.yml updater
