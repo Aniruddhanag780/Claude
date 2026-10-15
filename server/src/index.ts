@@ -1,11 +1,17 @@
 import './env.js';
 import type { Server } from 'http';
 import { createApp } from './app.js';
-import { initDb, closePostgresPool } from './db/index.js';
+import { initDb, getDb, closePostgresPool } from './db/index.js';
 import { initRoutingRegistry, stopRoutingRegistryScheduler } from './services/router-registry.js';
 import { analyticsAggregator } from './services/analytics-aggregator.js';
-import { startHealthChecker, stopHealthChecker } from './services/health.js';
+import { startHealthChecker, stopHealthChecker, checkAllKeys } from './services/health.js';
 import { startCatalogSync, stopCatalogSync } from './services/catalog-sync.js';
+import { startCooldownProbe } from './services/cooldown-probe.js';
+import { startBackupScheduler } from './services/backups.js';
+import { startCustomModelSync } from './services/custom-model-sync.js';
+import { startBuiltinModelDiscovery } from './services/builtin-model-discovery.js';
+import { flushProxyCache } from './lib/proxy.js';
+import { startWakeDetect } from './lib/wake-detect.js';
 import { NodeScheduler } from './lib/scheduler.js';
 import { installProcessSafetyNet } from './lib/process-safety-net.js';
 import { loadConfig } from './lib/config.js';
@@ -63,6 +69,32 @@ async function main() {
     console.log(` Neon PostgreSQL: Connected (Control Plane)`);
     console.log(` Render In-Memory: Active (Data Plane)`);
     console.log(`======================================================\n`);
+
+    startCooldownProbe(scheduler);
+    startBackupScheduler(scheduler);
+    startCustomModelSync(getDb(), scheduler);
+    startBuiltinModelDiscovery(getDb(), scheduler);
+
+    // Post-sleep recovery: while the host was suspended (laptop lid, VM
+    // pause) timers and keep-alive sockets froze, so the first requests after
+    // wake used to hit dead pooled connections and pre-sleep key statuses
+    // until the 5-minute health cycle caught up. On a detected wake (>30s
+    // wall-clock drift, or SIGCONT/SIGUSR1/2), drop the proxy dispatcher's
+    // pooled sockets and re-probe every key immediately.
+    startWakeDetect({
+      async onWake(event) {
+        const idle = Math.round(event.idleMs / 1000);
+        console.log(`[wake] resumed after ~${idle}s (${event.reason}${event.signal ? `:${event.signal}` : ''}) — flushing stale sockets, re-probing keys`);
+        flushProxyCache();
+        try {
+          // Forced: every status predates the sleep, so the recency skip and
+          // provider spacing of a scheduled pass would only delay the picture.
+          await checkAllKeys({ force: true });
+        } catch (err: any) {
+          console.error(`[wake] post-wake key re-probe failed: ${err?.message ?? err}`);
+        }
+      },
+    });
   };
 
   console.log('[startup] 6/6 Starting HTTP listener...');
@@ -97,8 +129,9 @@ async function handleShutdown(signal: string) {
   }
 
   try {
-    // 1. Stop accepting new HTTP requests
+    // 1. Stop accepting new HTTP requests and close idle connections
     if (server) {
+      server.closeIdleConnections?.();
       await new Promise<void>((resolve) => {
         server!.close(() => {
           console.log('[shutdown] HTTP server closed.');

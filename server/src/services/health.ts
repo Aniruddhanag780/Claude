@@ -1,5 +1,6 @@
-import { getPostgresPool } from '../db/index.js';
+import { getPostgresPool, getDb } from '../db/index.js';
 import { resolveProvider } from '../providers/index.js';
+import { BaseProvider } from '../providers/base.js';
 import { decrypt } from '../lib/crypto.js';
 import { decryptProxyUrl } from '../lib/key-proxy.js';
 import { withKeyProxy } from '../lib/proxy.js';
@@ -9,6 +10,7 @@ import { updateDegradationState } from './degradation.js';
 import type { Scheduler } from '../lib/scheduler.js';
 import { sanitizeProviderErrorMessage } from '../lib/error-redaction.js';
 import { providerLog } from '../lib/server-logs.js';
+import { triggerBuiltinModelDiscovery } from './builtin-model-discovery.js';
 
 const pool = () => getPostgresPool();
 
@@ -63,6 +65,36 @@ function positiveIntEnv(raw: string | undefined, fallback: number): number {
 // Track consecutive failures per key
 const failureCount = new Map<number, number>();
 
+// A key whose last validation was rate-limited (429) is skipped by the
+// scheduled pass until the skip window passes: re-asking a provider that just
+// told us to slow down is how validation traffic becomes a ban. LLMTR's
+// validator is a POST to /chat/completions with a nonexistent model —
+// shaped exactly like the bot traffic their abuse system hunts — so an
+// unpaced re-ask every 5 minutes per key kept accounts flagged (#1369).
+// Forced passes (dashboard check-all, wake re-probe) still probe: explicit
+// operator intent wins over pacing. A later successful validation clears the
+// mark; validation that never ran leaves no mark.
+const validationRateLimitedAt = new Map<number, number>();
+
+const DEFAULT_VALIDATION_RATE_LIMIT_SKIP_MS = 60 * 60 * 1000;
+
+/** How long a 429ed key stays out of the scheduled pass. Tunable like the
+ *  other pacing knobs; 0 or a bad value falls back to the default. */
+function getValidationRateLimitSkipMs(): number {
+  return positiveIntEnv(process.env.HEALTH_CHECK_RATE_LIMIT_SKIP_MS, DEFAULT_VALIDATION_RATE_LIMIT_SKIP_MS);
+}
+
+/** Record that validating this key was just rate-limited. Exported for tests;
+ *  production calls it from checkKeyHealth's 429 path. */
+export function recordValidationRateLimited(keyId: number, atMs = Date.now()): void {
+  validationRateLimitedAt.set(keyId, atMs);
+}
+
+/** Test seam: drop all validation-429 pacing state. */
+export function clearValidationRateLimitState(): void {
+  validationRateLimitedAt.clear();
+}
+
 function recordInvalidFailure(keyId: number, platform?: string): void {
   const count = (failureCount.get(keyId) ?? 0) + 1;
   failureCount.set(keyId, count);
@@ -110,6 +142,84 @@ const CREDENTIAL_SELECT_ENABLED = `
   WHERE c.id = $1 AND c.enabled = true
 `;
 
+/**
+ * Provider-reported quota polling (#1403 phase 1). Providers with a key-info
+ * endpoint (see BaseProvider.fetchQuota) get polled right after a health pass
+ * confirms the key works, so the dashboard shows the provider's own balance
+ * instead of a regex guess over catalog text. Throttled per key: a poll is
+ * only worth taking when the last quota_api observation is older than
+ * QUOTA_POLL_INTERVAL_MS (or none exists). Fire-and-forget and failure-silent:
+ * a quota probe says nothing about key validity and must never bend a health
+ * verdict or the pass budget.
+ */
+export const QUOTA_POLL_INTERVAL_MS = 15 * 60 * 1000;
+
+function quotaPollDue(keyId: number, now = Date.now()): boolean {
+  try {
+    const row = getDb().prepare(`
+      SELECT created_at AS seenAt FROM provider_quota_observations
+       WHERE key_id = ? AND source = 'quota_api'
+       ORDER BY created_at DESC LIMIT 1
+    `).get(keyId) as { seenAt: string | null } | undefined;
+    if (!row?.seenAt) return true;
+    const seen = Date.parse(row.seenAt.includes('T') ? row.seenAt : row.seenAt.replace(' ', 'T') + 'Z');
+    if (!Number.isFinite(seen)) return true;
+    return now - seen >= QUOTA_POLL_INTERVAL_MS;
+  } catch {
+    return true;
+  }
+}
+
+export async function pollKeyQuota(
+  keyId: number,
+  row: any,
+  provider: BaseProvider,
+): Promise<boolean> {
+  try {
+    const apiKey = decrypt(row.encrypted_value || row.encrypted_key, row.iv, row.auth_tag);
+    return await withKeyProxy(decryptProxyUrl(row), () => provider.fetchQuota(apiKey, {
+      platform: row.platform as Platform,
+      keyId,
+      quotaPoolKey: inferQuotaPoolKey(row.platform as Platform, null),
+      endpoint: 'quota_api',
+      origin: 'health',
+    }));
+  } catch {
+    return false;
+  }
+}
+
+/** True when this provider actually has a quota endpoint to probe (#1403).
+ *  Uses the provider's own hasQuotaProbe getter: OpenAICompatProvider
+ *  overrides fetchQuota for every instance, spec or not, so a method-identity
+ *  check would claim quota support for specless platforms. */
+export function supportsQuotaPolling(provider: BaseProvider): boolean {
+  return provider.hasQuotaProbe;
+}
+
+/** Throttled, self-contained quota poll for one key — the entry point other
+ *  services (or a future scheduler) can use without duplicating the gate. */
+export async function maybePollKeyQuota(keyId: number): Promise<boolean> {
+  try {
+    const { rows } = await pool().query<CredentialRow>(CREDENTIAL_SELECT_ENABLED, [keyId]);
+    const row = rows[0];
+    if (!row) {
+      const dbRow = getDb().prepare('SELECT * FROM api_keys WHERE id = ? AND enabled = 1').get(keyId) as any;
+      if (!dbRow) return false;
+      const provider = resolveProvider(dbRow.platform as Platform, dbRow.base_url);
+      if (!provider || !supportsQuotaPolling(provider)) return false;
+      if (!quotaPollDue(keyId)) return false;
+      return await pollKeyQuota(keyId, dbRow, provider);
+    }
+    const provider = resolveProvider(row.platform as Platform, row.base_url);
+    if (!provider || !supportsQuotaPolling(provider)) return false;
+    if (!quotaPollDue(keyId)) return false;
+    return await pollKeyQuota(keyId, row, provider);
+  } catch {
+    return false;
+  }
+}
+
 export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
   const { rows } = await pool().query<CredentialRow>(CREDENTIAL_SELECT, [keyId]);
   const row = rows[0];
@@ -117,6 +227,16 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
 
   const provider = resolveProvider(row.platform as Platform, row.base_url);
   if (!provider) return 'error';
+
+  // #1459: a provider that forbids automated key checks gets no probe. Its
+  // status is left to real traffic (markKeyHealthyFromRequest), and any reason
+  // an older probe stored is cleared so the dashboard stops showing it.
+  if (provider.supportsKeyValidation === false) {
+    if (row.last_health_error != null) {
+      await pool().query('UPDATE credentials SET last_health_error = NULL WHERE id = $1', [keyId]);
+    }
+    return (row.status ?? 'healthy') as KeyStatus;
+  }
 
   try {
     const apiKey = decrypt(row.encrypted_value, row.iv, row.auth_tag);
@@ -147,6 +267,19 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
 
     if (isValid) {
       failureCount.delete(keyId);
+      // The provider answered again: whatever rate-limit told us to back off
+      // is over, so the key rejoins the normal cadence.
+      validationRateLimitedAt.delete(keyId);
+      // #1348: a healthy key on a built-in platform the catalog does not carry
+      // serves nothing until its models are discovered. Fire-and-forget; the
+      // trigger is a no-op for every other platform, and throttled.
+      triggerBuiltinModelDiscovery(getDb(), row.platform, 'healthy');
+      // #1403: piggyback provider-reported quota polling on the healthy
+      // verdict — but only for providers with a quota endpoint, and at most
+      // once per QUOTA_POLL_INTERVAL_MS per key. Fire-and-forget, silent.
+      if (supportsQuotaPolling(provider) && quotaPollDue(keyId)) {
+        void pollKeyQuota(keyId, row, provider).catch(() => {});
+      }
     } else {
       providerLog(
         'warn',
@@ -158,6 +291,7 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
 
     return status;
   } catch (err: any) {
+    if (err?.status === 429) recordValidationRateLimited(keyId);
     const lastError = sanitizeProviderErrorMessage(err?.message ?? err);
     console.error(
       `[Health] Key ${keyId} (${row.platform}, base=${row.base_url ?? 'default'}) ` +
@@ -190,6 +324,9 @@ export async function probeKeyValidity(keyId: number): Promise<KeyProbeOutcome> 
 
     const provider = resolveProvider(row.platform as Platform, row.base_url);
     if (!provider) return 'error';
+    // #1459: no probe for a provider that forbids them; the cooldown simply
+    // runs out, as it would after an inconclusive probe.
+    if (provider.supportsKeyValidation === false) return 'error';
 
     const apiKey = decrypt(row.encrypted_value, row.iv, row.auth_tag);
     const validation = await withKeyProxy(decryptProxyUrl(undefined), () => provider.validateKey(apiKey, {
@@ -207,7 +344,9 @@ export async function probeKeyValidity(keyId: number): Promise<KeyProbeOutcome> 
 }
 
 /**
- * Promote a key out of 'error' after it successfully served a live request.
+/**
+ * Promote a key out of 'error' or 'unknown' after it successfully served a live
+ * request.
  */
 export function markKeyHealthyFromRequest(keyId: number): void {
   pool().query(
@@ -216,6 +355,13 @@ export function markKeyHealthyFromRequest(keyId: number): void {
      WHERE id = $1 AND last_health_error IS NOT NULL`,
     [keyId],
   ).catch(() => {});
+  try {
+    getDb()
+      .prepare("UPDATE api_keys SET status = 'healthy', last_health_error = NULL WHERE id = ? AND status IN ('error', 'unknown')")
+      .run(keyId);
+  } catch {
+    // Never let health bookkeeping break a request that already succeeded.
+  }
   failureCount.delete(keyId);
 }
 
@@ -294,8 +440,17 @@ async function runHealthPass(opts: HealthPassOptions): Promise<HealthPassResult>
   `);
 
   const skippedKeyIds: number[] = [];
+  const skipMs = opts.force ? 0 : getValidationRateLimitSkipMs();
   const due = rows.filter(row => {
     if (opts.force) return true;
+    // A key the provider just rate-limited stays out until the skip window
+    // passes — even one parked at 'error'. A 429 is fresher, more specific
+    // evidence than the eagerness to re-ask an errored key (#1369).
+    const limitedAt = validationRateLimitedAt.get(row.id);
+    if (limitedAt !== undefined && now() - limitedAt < skipMs) {
+      skippedKeyIds.push(row.id);
+      return false;
+    }
     if (row.last_health_error) return true;
     if (row.age_ms !== null && row.age_ms < RECENT_CHECK_SKIP_MS) {
       skippedKeyIds.push(row.id);

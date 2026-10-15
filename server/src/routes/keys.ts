@@ -15,16 +15,37 @@ const addKeySchema = z.object({
   label: z.string().optional(),
   baseUrl: z.string().url().optional().nullable(),
   modelScope: z.array(z.string()).optional().nullable(),
+  groupLabel: z.string().trim().max(80).optional().nullable(),
 });
 
 const updateKeySchema = z.object({
   enabled: z.boolean().optional(),
   label: z.string().optional(),
   modelScope: z.array(z.string()).optional().nullable(),
+  groupLabel: z.string().trim().max(80).optional().nullable(),
+  key: z.string().trim().min(1).optional(),
 });
 
 const rotateKeySchema = z.object({
   key: z.string().min(1),
+});
+
+// GET /api/keys/providers - Platform summary
+keysRouter.get('/providers', async (_req: Request, res: Response) => {
+  try {
+    const pool = getPostgresPool();
+    const resRows = await pool.query(`
+      SELECT p.provider_key as platform,
+             COUNT(c.id) as total_keys,
+             COUNT(CASE WHEN c.enabled = true THEN 1 END) as enabled_keys
+      FROM providers p
+      LEFT JOIN credentials c ON c.provider_id = p.id
+      GROUP BY p.provider_key
+    `);
+    res.json(resRows.rows);
+  } catch {
+    res.json([]);
+  }
 });
 
 // 1. GET /api/keys - List all keys with masked values
@@ -48,6 +69,7 @@ keysRouter.get('/', async (_req: Request, res: Response) => {
         c.last_failed_at,
         c.last_health_error,
         c.model_scope,
+        c.group_label,
         c.encrypted_value,
         c.iv,
         c.auth_tag,
@@ -79,6 +101,7 @@ keysRouter.get('/', async (_req: Request, res: Response) => {
         platform: row.platform,
         providerName: row.provider_name,
         label: row.label || '',
+        groupLabel: row.group_label || null,
         maskedKey: maskKey(decrypted),
         baseUrl: row.base_url || null,
         status,
@@ -111,7 +134,7 @@ keysRouter.post('/', async (req: Request, res: Response) => {
       return;
     }
 
-    const { platform, key = '', label = '', baseUrl = null, modelScope = null } = parsed.data;
+    const { platform, key = '', label = '', baseUrl = null, modelScope = null, groupLabel = null } = parsed.data;
     const pool = getPostgresPool();
 
     // 1. Find or create provider
@@ -139,9 +162,9 @@ keysRouter.post('/', async (req: Request, res: Response) => {
     const credRes = await pool.query(
       `INSERT INTO credentials (
          provider_id, credential_name, encrypted_value, iv, auth_tag,
-         credential_type, enabled, priority, model_scope
+         credential_type, enabled, priority, model_scope, group_label
        )
-       VALUES ($1, $2, $3, $4, $5, $6, true, 0, $7)
+       VALUES ($1, $2, $3, $4, $5, $6, true, 0, $7, $8)
        RETURNING id, created_at`,
       [
         providerId,
@@ -151,6 +174,7 @@ keysRouter.post('/', async (req: Request, res: Response) => {
         enc.authTag,
         keyless ? 'keyless' : 'api_key',
         modelScope ? JSON.stringify(modelScope) : null,
+        groupLabel || null,
       ]
     );
 
@@ -161,6 +185,7 @@ keysRouter.post('/', async (req: Request, res: Response) => {
       id: credRes.rows[0].id,
       platform,
       label,
+      groupLabel: groupLabel || null,
       maskedKey: maskKey(key),
       enabled: true,
       keyless,
@@ -172,8 +197,8 @@ keysRouter.post('/', async (req: Request, res: Response) => {
   }
 });
 
-// 3. PUT /api/keys/:id - Update credential
-keysRouter.put('/:id', async (req: Request, res: Response) => {
+// Helper for updating credential by ID
+async function handleUpdateKey(req: Request, res: Response) {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) {
@@ -187,7 +212,7 @@ keysRouter.put('/:id', async (req: Request, res: Response) => {
       return;
     }
 
-    const { enabled, label, modelScope } = parsed.data;
+    const { enabled, label, modelScope, groupLabel, key } = parsed.data;
     const pool = getPostgresPool();
 
     const updates: string[] = ['updated_at = NOW()'];
@@ -206,6 +231,19 @@ keysRouter.put('/:id', async (req: Request, res: Response) => {
       updates.push(`model_scope = $${idx++}`);
       values.push(modelScope ? JSON.stringify(modelScope) : null);
     }
+    if (groupLabel !== undefined) {
+      updates.push(`group_label = $${idx++}`);
+      values.push(groupLabel || null);
+    }
+    if (key !== undefined) {
+      const enc = encrypt(key);
+      updates.push(`encrypted_value = $${idx++}`);
+      values.push(enc.encrypted);
+      updates.push(`iv = $${idx++}`);
+      values.push(enc.iv);
+      updates.push(`auth_tag = $${idx++}`);
+      values.push(enc.authTag);
+    }
 
     values.push(id);
     await pool.query(
@@ -219,7 +257,13 @@ keysRouter.put('/:id', async (req: Request, res: Response) => {
     console.error('[keys] Error updating key:', err);
     res.status(500).json({ error: 'Failed to update API key' });
   }
-});
+}
+
+// 3. PUT /api/keys/:id - Update credential
+keysRouter.put('/:id', handleUpdateKey);
+
+// 3b. PATCH /api/keys/:id - Update credential
+keysRouter.patch('/:id', handleUpdateKey);
 
 // 4. POST /api/keys/:id/rotate - Rotate credential key
 keysRouter.post('/:id/rotate', async (req: Request, res: Response) => {
@@ -248,7 +292,7 @@ keysRouter.post('/:id/rotate', async (req: Request, res: Response) => {
     }
 
     await reloadRoutingRegistry();
-    res.json({ success: true, id, maskedKey: maskKey(parsed.data.key) });
+    res.json({ success: true, id });
   } catch (err: any) {
     console.error('[keys] Error rotating key:', err);
     res.status(500).json({ error: 'Failed to rotate key' });
@@ -261,7 +305,7 @@ keysRouter.delete('/:id', async (req: Request, res: Response) => {
     const id = Number(req.params.id);
     const pool = getPostgresPool();
 
-    const delRes = await pool.query('DELETE FROM credentials WHERE id = $1', [id]);
+    const delRes = await pool.query('DELETE FROM credentials WHERE id = $1 RETURNING id', [id]);
     if (delRes.rowCount === 0) {
       res.status(404).json({ error: 'Key not found' });
       return;
@@ -271,30 +315,66 @@ keysRouter.delete('/:id', async (req: Request, res: Response) => {
     res.json({ success: true, id });
   } catch (err: any) {
     console.error('[keys] Error deleting key:', err);
-    res.status(500).json({ error: 'Failed to delete key' });
+    res.status(500).json({ error: 'Failed to delete API key' });
   }
 });
 
-// 6. POST /api/keys/:id/test - Lightweight credential testing
+// DELETE /api/keys/:id/cooldowns - Reset cooldowns for key
+keysRouter.delete('/:id/cooldowns', async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const pool = getPostgresPool();
+    await pool.query('UPDATE credentials SET cooldown_until = NULL WHERE id = $1', [id]);
+    await reloadRoutingRegistry();
+    res.json({ success: true, id });
+  } catch (err: any) {
+    console.error('[keys] Error clearing cooldowns:', err);
+    res.status(500).json({ error: 'Failed to clear cooldowns' });
+  }
+});
+
+// PATCH /api/keys/platform/:platform - Enable/disable all keys for a platform
+keysRouter.patch('/platform/:platform', async (req: Request, res: Response) => {
+  try {
+    const platform = req.params.platform;
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+      res.status(400).json({ error: 'enabled boolean is required' });
+      return;
+    }
+    const pool = getPostgresPool();
+    await pool.query(
+      `UPDATE credentials SET enabled = $1, updated_at = NOW()
+       WHERE provider_id IN (SELECT id FROM providers WHERE provider_key = $2)`,
+      [enabled, platform]
+    );
+    await reloadRoutingRegistry();
+    res.json({ success: true, platform, enabled });
+  } catch (err: any) {
+    console.error('[keys] Error updating platform keys:', err);
+    res.status(500).json({ error: 'Failed to update platform keys' });
+  }
+});
+
+// 6. POST /api/keys/:id/test - Test key validity live
 keysRouter.post('/:id/test', async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
     const pool = getPostgresPool();
 
-    const credRes = await pool.query(
-      `SELECT c.id, c.encrypted_value, c.iv, c.auth_tag, p.provider_key
-       FROM credentials c
-       JOIN providers p ON p.id = c.provider_id
-       WHERE c.id = $1`,
-      [id]
-    );
+    const queryRes = await pool.query(`
+      SELECT c.id, c.encrypted_value, c.iv, c.auth_tag, p.provider_key
+      FROM credentials c
+      JOIN providers p ON p.id = c.provider_id
+      WHERE c.id = $1
+    `, [id]);
 
-    if (credRes.rows.length === 0) {
+    if (queryRes.rows.length === 0) {
       res.status(404).json({ error: 'Key not found' });
       return;
     }
 
-    const row = credRes.rows[0];
+    const row = queryRes.rows[0];
     const platform = row.provider_key as Platform;
     const plaintext = decrypt(row.encrypted_value, row.iv, row.auth_tag);
 
@@ -327,7 +407,7 @@ keysRouter.post('/:id/test', async (req: Request, res: Response) => {
 // Custom endpoint discovery & registration routes
 keysRouter.post('/custom', async (req: Request, res: Response) => {
   try {
-    const { baseUrl, model, apiKey = '', label = '' } = req.body || {};
+    const { baseUrl, model, apiKey = '', label = '', groupLabel = null } = req.body || {};
     if (!baseUrl) {
       res.status(400).json({ error: 'baseUrl is required' });
       return;
@@ -354,11 +434,11 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
     const credRes = await pool.query(
       `INSERT INTO credentials (
          provider_id, credential_name, encrypted_value, iv, auth_tag,
-         credential_type, enabled, priority
+         credential_type, enabled, priority, group_label
        )
-       VALUES ($1, $2, $3, $4, $5, $6, true, 0)
+       VALUES ($1, $2, $3, $4, $5, $6, true, 0, $7)
        RETURNING id`,
-      [providerId, label, enc.encrypted, enc.iv, enc.authTag, apiKey ? 'api_key' : 'keyless']
+      [providerId, label, enc.encrypted, enc.iv, enc.authTag, apiKey ? 'api_key' : 'keyless', groupLabel || null]
     );
 
     const keyId = credRes.rows[0].id;
@@ -377,7 +457,7 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
     }
 
     await reloadRoutingRegistry();
-    res.status(201).json({ success: true, keyId, providerId, baseUrl, model });
+    res.status(201).json({ success: true, keyId, providerId, baseUrl, model, groupLabel });
   } catch (err: any) {
     console.error('[keys] Error registering custom endpoint:', err);
     res.status(500).json({ error: err?.message || 'Failed to register custom endpoint' });
@@ -530,4 +610,3 @@ keysRouter.post('/custom/probe', async (req: Request, res: Response) => {
     res.status(502).json({ ok: false, error: err?.message });
   }
 });
-

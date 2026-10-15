@@ -152,21 +152,24 @@
     "compressionRunPreview": "Spustit náhled",
     "updatesTitle": "Aktualizace",
     "checkForUpdates": "Sledujte aktualizace",
-    "lastChecked": "Naposledy kontrolováno: {when}",
-    "currentVersion": "Aktuální sestavení:",
     "updateAvailable": "Je dostupná aktualizace",
-    "changelog": "Co se změnilo",
     "upToDate": "Vše je aktuální",
     "buildAhead": "Toto sestavení je před oficiální větví main.",
     "buildDiverged": "Toto sestavení se odchýlilo od oficiální větve main.",
     "buildUnknown": "Toto vlastní sestavení nelze porovnat s oficiální větví main.",
     "notGitInstall": "Tato instalace neobsahuje informace o commitu.",
     "checkFailed": "Aktualizace se nepodařilo zkontrolovat.",
-    "contactsGithub": "Kontroly se spouštějí ručně a kontaktují GitHub.",
     "autoUpdateCheck": "Automatická kontrola aktualizací",
-    "autoUpdateCheckHelp": "Jednou denně zkontroluje na GitHubu novou verzi a zobrazí připomenutí. Ve výchozím nastavení vypnuto.",
-    "openReleases": "Otevřít vydání na GitHubu",
-    "restartAfterUpdate": "Po dokončení sestavení restartujte FreeLLMAPI."
+    "restartAfterUpdate": "Po dokončení sestavení restartujte FreeLLMAPI.",
+    "downloadUpdate": "Stáhnout aktualizaci",
+    "downloadingUpdate": "Stahování… {percent} %",
+    "restartToUpdate": "Restartovat a aktualizovat",
+    "updateReadyHint": "Staženo. FreeLLMAPI zálohuje vaše data, restartuje se a otevře novou verzi.",
+    "updateInstallFailed": "Aktualizaci se nepodařilo nainstalovat.",
+    "updateNow": "Aktualizovat nyní",
+    "updatingContainer": "Stahuje se nový obraz a probíhá restart. Stránka se znovu načte, až bude FreeLLMAPI zpět.",
+    "updateNowFailed": "Aktualizátor požadavek nepřijal. Zkontrolujte, že kontejner watchtower běží.",
+    "updateNowTimeout": "FreeLLMAPI se ani po 5 minutách nerestartoval. Zkontrolujte logy kontejneru watchtower."
   },
   "models": {
     "title": "Modely",
@@ -224,6 +227,7 @@
     "settingsHint": "Lokální úpravy katalogových modelů jsou uchovávány napříč synchronizacemi katalogu. Smazané katalogové modely zůstávají smazané, dokud je znovu nepřidáte přes konfiguraci.",
     "catalogModel": "Katalog",
     "customModel": "Zvyk",
+    "discoveredModel": "nalezený",
     "localOverride": "Místní přepsání",
     "displayName": "Zobrazovací název",
     "sizeLabel": "Úroveň schopností",
@@ -340,7 +344,10 @@
     "weightSpeed": "Rychlost",
     "weightIntelligence": "Zpravodajství",
     "weightRequired": "Alespoň jedno závaží musí být nad nulou.",
-    "scoreColumn": "Hudba"
+    "scoreColumn": "Hudba",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "Tlak frézky",
@@ -497,11 +504,11 @@
     "platform": "Platforma",
     "hideAdded": "Skrýt přidané poskytovatele",
     "apiToken": "API žeton",
-    "noKeyNeededPlaceholder": "Klíč API není potřeba",
+    "keyOptionalPlaceholder": "Volitelné",
     "bearerTokenPlaceholder": "Token na doručitele",
     "pasteKeyPlaceholder": "Vložte zde klíč",
     "pasteSeveral": "Vložit více",
-    "keylessHint": "Není potřeba API klíč: bezplatná úroveň tohoto poskytovatele je anonymní (omezená rychlostí na IP adresu).",
+    "keyOptionalHint": "Volitelné: nechte prázdné pro anonymní bezplatnou úroveň (omezení na IP), nebo vložte vlastní klíč a použijte svůj účet.",
     "enable": "Povolit",
     "noProviderKeys": "Klíče od poskytovatele zatím neexistují. Přidejte jeden výše, abyste mohli začít směrovat.",
     "filterPlaceholder": "Poskytovatelé filtrů nebo klíče",
@@ -679,7 +686,22 @@
     "testFailed": "Test modelu selhal",
     "testThrottled": "Před dalším testem tohoto modelu počkejte {seconds} s.",
     "noModelsForProvider": "Pro tohoto poskytovatele nejsou nakonfigurovány žádné modely.",
-    "testModels": "Otestovat modely"
+    "testModels": "Otestovat modely",
+    "monthlyRequestCapLabel": "Měsíční limit požadavků",
+    "monthlyTokenCapLabel": "Měsíční limit tokenů",
+    "capUnlimitedPlaceholder": "Neomezeno",
+    "capEditHint": "Limity se resetují 1. dne v 00:00 UTC. Nechte prázdné pro neomezeno.",
+    "monthlyUsageLine": "{requests} požadavků, {tokens} tokenů tento měsíc",
+    "quotaBalanceHint": "Zbývá {remaining} z {limit} {metric}",
+    "quotaBalanceLeft": "Zbývá {remaining}"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Před aktualizací"
   },
   "status": {
     "healthy": "zdravé",
@@ -864,6 +887,7 @@
     "maxTokens": "Max. tokenů",
     "errorTitle": "Žádost neúspěšná",
     "attach": "Připojit soubory",
+    "addMenu": "Add files and tools",
     "attachTooMany": "Ke zprávě můžete připojit až {count} souborů.",
     "attachTooLarge": "{name} je příliš velký. Limit je {max}.",
     "attachUnsupported": "{name} není podporován. Připojte obrázky (PNG, JPEG, WebP, GIF) nebo textové soubory (TXT, MD, CSV, JSON, LOG).",
@@ -1135,17 +1159,16 @@
       "generic": "Anything else that speaks the OpenAI API, set up by hand from a base URL and key.",
       "atomcode": "AtomGit's terminal agent, written in Rust, that takes any OpenAI-compatible endpoint.",
       "openclaw": "Osobní asistent, který je neustále k dispozici a z vašeho vlastního počítače odpovídá v aplikacích WhatsApp, Telegram, Discord a dalších.",
-      "hermes": "Samozdokonalující se agent od Nous Research s trvalou pamětí a dovednostmi, v terminálu nebo v chatovacích aplikacích."
+      "hermes": "Samozdokonalující se agent od Nous Research s trvalou pamětí a dovednostmi, v terminálu nebo v chatovacích aplikacích.",
+      "pi": "Minimalistický terminálový agent, který si přizpůsobíte vlastními rozšířeními, dovednostmi a šablonami promptů.",
+      "reasonix": "Terminálový agent pro programování stavěný pro DeepSeek, postavený na cachování prefixů, aby dlouhé relace zůstaly levné."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "Je nainstalována novější verze FreeLLMAPI.",
+    "reload": "Načíst znovu"
   },
   "freeTier": {
     "poolsToggle": "Free-tier pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "Přejmenovat řetězec \"{oldName}\" na \"{name}\"? Klienti volající auto:{oldName} musí přejít na auto:{name}.",
     "renamePlaceholder": "Nový název řetězce",
     "renameFailed": "Řetězec se nepodařilo přejmenovat."
+  },
+  "updates": {
+    "versionAvailable": "Je k dispozici verze {version}",
+    "versionReady": "Verze {version} je připravena k instalaci",
+    "releaseNotes": "Poznámky k vydání",
+    "tryAgain": "Zkusit znovu",
+    "offline": "Zkontrolujte připojení k internetu a zkuste to znovu."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

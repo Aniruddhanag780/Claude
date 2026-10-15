@@ -11,7 +11,8 @@ import type {
 } from '@freellmapi/shared/types.js';
 import { routeRequest, resolveModelGroupCandidates, resolveRoutingChain, resolveStickyPreference, routingReserveTokens, type RouteResult, type ResolvedChain, type ChainRow } from '../services/router.js';
 import { getSetting, getUnifiedApiKey } from '../db/index.js';
-import { contentToString } from '../lib/content.js';
+import { contentToString, estimateInputTokens } from '../lib/content.js';
+import { routeOutputBudget } from '../lib/output-cap.js';
 import { resolveTaskType } from '../lib/task-type.js';
 import { repairToolArguments, toolSchemaMap } from '../lib/tool-args.js';
 import { invalidToolArgumentsError, invalidToolCallReasons, isToolArgumentValidationEnabled } from '../lib/tool-validate.js';
@@ -30,6 +31,7 @@ import type { ReasoningEffort } from '../lib/sampling-params.js';
 import { buildModelListing } from '../services/model-listing.js';
 import { compressRequest, formatCompressionHeader } from '../services/compression/pipeline.js';
 import { normalizeMessageImages } from '../lib/image-normalize.js';
+import { maybeServeAnthropicWebSearch, serverToolUseToText, webSearchResultToText } from '../lib/anthropic-web-search.js';
 
 // Anthropic-compatible Messages API (`POST /v1/messages`). This is a thin
 // translation layer over the SAME router/fallback/analytics machinery the
@@ -324,6 +326,13 @@ function convertRequest(input: AnthropicRequest): ConvertedRequest {
           tool_call_id: String((block as any).tool_use_id ?? ''),
           content: flattenToolResult((block as any).content),
         });
+      } else if (type === 'server_tool_use') {
+        // A replayed web search (ours, or real Anthropic's): the routed model
+        // has no server tool, so the search and its results come back as text.
+        const note = serverToolUseToText(block as any);
+        if (note) textParts.push(note);
+      } else if (type === 'web_search_tool_result') {
+        textParts.push(webSearchResultToText(block as any));
       } else if (type === 'document') {
         // A document that is already text costs nothing to inline. One that
         // needs decoding cannot be served by any provider here, and dropping
@@ -372,10 +381,6 @@ function convertRequest(input: AnthropicRequest): ConvertedRequest {
     wantsTools: (tools?.length ?? 0) > 0,
     documentRejections,
   };
-}
-
-function estimateTokens(messages: ChatMessage[]): number {
-  return messages.reduce((sum, m) => sum + Math.ceil(contentToString(m.content).length / 4), 0);
 }
 
 // Model resolution (Claude family → auto | pinned catalog model) lives in
@@ -444,7 +449,15 @@ function rescuedToToolCalls(
   }));
 }
 
+// Requests carrying a web_search server tool are served through the search
+// loop (lib/anthropic-web-search.ts) when a search key exists; it re-enters
+// handleMessages once per model turn. Everything else goes straight through.
 anthropicRouter.post('/messages', async (req: Request, res: Response) => {
+  if (await maybeServeAnthropicWebSearch(handleMessages, req, res)) return;
+  await handleMessages(req, res);
+});
+
+export async function handleMessages(req: Request, res: Response): Promise<void> {
   const start = Date.now();
   if (!authenticate(req, res)) return;
 
@@ -505,7 +518,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
   messages = compressionResult.messages;
   res.setHeader('X-FreeLLM-Compress', formatCompressionHeader(compressionResult));
 
-  const estimatedInputTokens = estimateTokens(messages);
+  const estimatedInputTokens = estimateInputTokens(messages, tools);
   const imageCount = messages.reduce((n, m) =>
     n + (Array.isArray(m.content) ? m.content.filter(b => (b as any)?.type === 'image_url').length : 0), 0);
 
@@ -660,7 +673,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
       return routeRequest(routingTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? resolvedChain?.chain, false, state.skipPlatforms.size > 0 ? state.skipPlatforms : undefined, outputReserve, taskType);
     },
     dispatch: async (route, attempt, dispatchCtx) => {
-      const contextBudget = route.contextWindow != null ? route.contextWindow - estimatedInputTokens : undefined;
+      const contextBudget = routeOutputBudget(route, estimatedInputTokens);
       const routeOptions = { ...dispatchOptions, contextBudget };
       if (stream) {
         try {
@@ -782,7 +795,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
       sendExhaustion(res, exhaustion);
     },
   });
-});
+}
 
 // Thrown by streamCompletion once the SSE response is underway, so the outer
 // loop knows the request is finished (honestly errored mid-stream) and must
@@ -1109,7 +1122,7 @@ anthropicRouter.post('/messages/count_tokens', (req: Request, res: Response) => 
     recordStats: false,
   });
   res.setHeader('X-FreeLLM-Compress', formatCompressionHeader(compressionResult));
-  res.json({ input_tokens: estimateTokens(compressionResult.messages) });
+  res.json({ input_tokens: estimateInputTokens(compressionResult.messages, tools) });
 });
 
 // Anthropic-compatible GET /v1/models. Content-negotiated: only answers when

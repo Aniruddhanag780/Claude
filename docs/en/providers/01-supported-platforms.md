@@ -45,7 +45,7 @@ Of the 43 built-in platforms, **10 use dedicated adapters** and **33 ride `OpenA
 | `bazaarlink` | BazaarLink | Keyed | OpenAI-compat | Only the `auto:free` route is cataloged — direct model ids are paid (#385). |
 | `ainative` | AINative Studio | Keyed | OpenAI-compat | Advertises recurring ~10M tokens/month free allocation; quota treated as unverified until confirmed by a real account. |
 | `aion` | Aion Labs | Keyed | OpenAI-compat | No-card free key; availability catalog-managed behind the 30-day age gate. |
-| `requesty` | Requesty | Keyed | OpenAI-compat | Router endpoint at `router.requesty.ai/v1`; free rows age into the monthly catalog. |
+| `requesty` | Requesty | Keyed | OpenAI-compat | Router endpoint at `router.requesty.ai/v1`; free rows age into the monthly catalog; the free tier is 200 requests/day shared across all free models. |
 | `navy` | NavyAI | Keyed | OpenAI-compat | Free plan: 150K tokens/day and 20 RPM; live smoke tests require an explicit User-Agent header. |
 | `nara` | NaraRouter | Keyed | OpenAI-compat | Free plan additionally requires Telegram channel/link verification; live-probed 2026-07-09. |
 | `sealion` | SEA-LION (AI Singapore) | Keyed | OpenAI-compat | First-party API; Google sign-in, no card, no region wall; 10 RPM recurring free tier. |
@@ -59,6 +59,14 @@ Of the 43 built-in platforms, **10 use dedicated adapters** and **33 ride `OpenA
 | `xfyun` | iFlytek Spark | Keyed | OpenAI-compat | Auth is the console APIPassword as a Bearer token; the Lite model is the documented free one; no published token/QPS ceiling (#936). |
 | `aihorde` | AI Horde | Keyless (anonymous sentinel `0000000000`; registered key raises queue priority) | Native (`AIHordeProvider`) | Community volunteer workers via queue-based proxy: max_tokens >= 16, stop must be array, no tools, usage reported as kudos, 120s timeout, no upstream streaming (#345). |
 | `custom` | Custom (OpenAI-compatible) | User-supplied base URL stored per `api_keys` row | OpenAI-compat built per key via `resolveProvider()` | Registered placeholder keeps `getProvider('custom')`/`hasProvider('custom')` well-behaved; 120s timeout for slow local runtimes (llama.cpp, vLLM, LM Studio) (#145). |
+
+## Custom endpoint groups
+
+Custom endpoints can be filed under a **group** you name (#1176): set it in the **Group** field when adding an endpoint, or later from **Edit key**. The group belongs to the endpoint, so every key in that endpoint's pool moves with it, and a key added later joins the same group. Blank means the default **Custom (OpenAI-compatible)** group.
+
+- **Keys page** – each group gets its own section with a `#handle` badge (the label slugified: `Work relays` → `#work-relays`). The section's switch turns on or off only that group's endpoints.
+- **Requests** – add the handle after a model id to keep a request inside the group: `custom:deepseek-v3.1#work-relays` (or `deepseek-v3.1#work-relays`) routes and fails over only across the group's endpoints that serve that model. An endpoint's own handle (`custom:deepseek-v3.1#relay-a.example.com-v1`) still pins a single endpoint and wins if a group has the same name.
+- **API** – `GET /api/keys` returns `groupLabel`; `PATCH /api/keys/:id` and `POST /api/keys/custom` accept `groupLabel` (`""` clears it); `PATCH /api/keys/platform/custom` accepts `group` (a label, or `null` for the ungrouped endpoints) to narrow the on/off sweep.
 
 ## Related history
 

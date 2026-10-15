@@ -152,21 +152,24 @@
     "compressionRunPreview": "Kör förhandsvisning",
     "updatesTitle": "Uppdateringar",
     "checkForUpdates": "Kolla efter uppdateringar",
-    "lastChecked": "Senast kontrollerat: {when}",
-    "currentVersion": "Aktuell version:",
     "updateAvailable": "Uppdatering tillgänglig",
-    "changelog": "Vad har ändrats",
     "upToDate": "Uppdaterad",
     "buildAhead": "Den här versionen ligger före officiella main.",
     "buildDiverged": "Den här versionen har avvikit från officiella main.",
     "buildUnknown": "Den här anpassade versionen kan inte jämföras med officiella main.",
     "notGitInstall": "Den här installationen innehåller ingen commit-information.",
     "checkFailed": "Det gick inte att söka efter uppdateringar.",
-    "contactsGithub": "Kontroller görs manuellt och kontaktar GitHub.",
     "autoUpdateCheck": "Automatisk uppdateringskontroll",
-    "autoUpdateCheckHelp": "Kontrollerar GitHub en gång om dagen efter en ny version och visar en påminnelse. Av som standard.",
-    "openReleases": "Öppna GitHub Releases",
-    "restartAfterUpdate": "Starta om FreeLLMAPI när bygget är klart."
+    "restartAfterUpdate": "Starta om FreeLLMAPI när bygget är klart.",
+    "downloadUpdate": "Hämta uppdatering",
+    "downloadingUpdate": "Hämtar… {percent} %",
+    "restartToUpdate": "Starta om för att uppdatera",
+    "updateReadyHint": "Hämtad. FreeLLMAPI säkerhetskopierar dina data, startar om och öppnar den nya versionen.",
+    "updateInstallFailed": "Uppdateringen kunde inte installeras.",
+    "updateNow": "Uppdatera nu",
+    "updatingContainer": "Hämtar den nya avbildningen och startar om. Sidan laddas om när FreeLLMAPI är tillbaka.",
+    "updateNowFailed": "Uppdateraren tog inte emot begäran. Kontrollera att watchtower-containern körs.",
+    "updateNowTimeout": "FreeLLMAPI har inte startat om efter 5 minuter. Kontrollera loggarna för watchtower-containern."
   },
   "models": {
     "title": "Modeller",
@@ -224,6 +227,7 @@
     "settingsHint": "Lokala redigeringar av katalogmodeller sparas över katalogsynkningar. Raderade katalogmodeller förblir raderade tills du lägger till dem igen via konfigurationen.",
     "catalogModel": "Katalog",
     "customModel": "Sedvänja",
+    "discoveredModel": "upptäckt",
     "localOverride": "Lokal överstyrning",
     "displayName": "Visningsnamn",
     "sizeLabel": "Kapacitetsnivå",
@@ -340,7 +344,10 @@
     "weightSpeed": "Hastighet",
     "weightIntelligence": "Underrättelse",
     "weightRequired": "Minst en vikt måste vara över noll.",
-    "scoreColumn": "Poäng"
+    "scoreColumn": "Poäng",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "Frästryck",
@@ -497,11 +504,11 @@
     "platform": "Plattform",
     "hideAdded": "Dölj tillagda leverantörer",
     "apiToken": "API token",
-    "noKeyNeededPlaceholder": "Ingen API nyckel behövs",
+    "keyOptionalPlaceholder": "Valfritt",
     "bearerTokenPlaceholder": "Bärartoken",
     "pasteKeyPlaceholder": "klistra in knappen här",
     "pasteSeveral": "Klistra in flera",
-    "keylessHint": "Ingen API nyckel behövs: denna leverantörs gratisnivå är anonym (prisbegränsad per IP).",
+    "keyOptionalHint": "Valfritt: lämna tomt för den anonyma gratisnivån (hastighetsbegränsad per IP) eller klistra in din egen nyckel för att använda ditt konto.",
     "enable": "Aktivera",
     "noProviderKeys": "Inga leverantörsnycklar än. Lägg till en ovan för att börja rutta.",
     "filterPlaceholder": "Filterleverantörer eller nycklar",
@@ -679,7 +686,22 @@
     "testFailed": "Modelltestet misslyckades",
     "testThrottled": "Vänta {seconds}s innan du testar denna modell igen.",
     "noModelsForProvider": "Inga modeller konfigurerade för denna leverantör.",
-    "testModels": "Testa modeller"
+    "testModels": "Testa modeller",
+    "monthlyRequestCapLabel": "Månadslimit för förfrågningar",
+    "monthlyTokenCapLabel": "Månadslimit för tokens",
+    "capUnlimitedPlaceholder": "Obegränsat",
+    "capEditHint": "Gränserna nollställs den 1:a kl 00:00 UTC. Lämna tomt för obegränsat.",
+    "monthlyUsageLine": "{requests} förfrågningar, {tokens} tokens denna månad",
+    "quotaBalanceHint": "{remaining} av {limit} {metric} kvar",
+    "quotaBalanceLeft": "{remaining} kvar"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Före uppdatering"
   },
   "status": {
     "healthy": "Hälsosamt",
@@ -864,6 +887,7 @@
     "maxTokens": "Max antal tokens",
     "errorTitle": "Begäran avvisades",
     "attach": "Bifoga filer",
+    "addMenu": "Add files and tools",
     "attachTooMany": "Du kan bifoga upp till {count} filer per meddelande.",
     "attachTooLarge": "{name} är för stor. Gränsen är {max}.",
     "attachUnsupported": "{name} stöds inte. Bifoga bilder (PNG, JPEG, WebP, GIF) eller textfiler (TXT, MD, CSV, JSON, LOG).",
@@ -1135,17 +1159,16 @@
       "generic": "Anything else that speaks the OpenAI API, set up by hand from a base URL and key.",
       "atomcode": "AtomGit's terminal agent, written in Rust, that takes any OpenAI-compatible endpoint.",
       "openclaw": "En ständigt tillgänglig personlig assistent som svarar på WhatsApp, Telegram, Discord med mera från din egen dator.",
-      "hermes": "Nous Researchs självförbättrande agent med beständigt minne och färdigheter, i terminalen eller i chattappar."
+      "hermes": "Nous Researchs självförbättrande agent med beständigt minne och färdigheter, i terminalen eller i chattappar.",
+      "pi": "En minimal terminalagent som du formar med egna tillägg, färdigheter och promptmallar.",
+      "reasonix": "En terminalbaserad kodagent byggd för DeepSeek kring prefix-cachning, så att långa sessioner förblir billiga."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "En nyare version av FreeLLMAPI är installerad.",
+    "reload": "Läs in igen"
   },
   "freeTier": {
     "poolsToggle": "Free-tier pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "Byt namn på kedjan \"{oldName}\" till \"{name}\"? Klients som anropar auto:{oldName} måste byta till auto:{name}.",
     "renamePlaceholder": "Nytt kedjenamn",
     "renameFailed": "Det gick inte att byta namn på kedjan."
+  },
+  "updates": {
+    "versionAvailable": "Version {version} är tillgänglig",
+    "versionReady": "Version {version} är redo att installeras",
+    "releaseNotes": "Versionsinformation",
+    "tryAgain": "Försök igen",
+    "offline": "Kontrollera internetanslutningen och försök igen."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

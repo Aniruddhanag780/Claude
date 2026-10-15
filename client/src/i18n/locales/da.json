@@ -152,21 +152,24 @@
     "compressionRunPreview": "Kør forhåndsvisning",
     "updatesTitle": "Opdateringer",
     "checkForUpdates": "Tjek for opdateringer",
-    "lastChecked": "Sidst tjekket: {when}",
-    "currentVersion": "Nuværende build:",
     "updateAvailable": "Opdatering tilgængelig",
-    "changelog": "Hvad er ændret",
     "upToDate": "Opdateret",
     "buildAhead": "Denne build er foran den officielle main-gren.",
     "buildDiverged": "Denne build er divergeret fra den officielle main-gren.",
     "buildUnknown": "Denne tilpassede build kan ikke sammenlignes med den officielle main-gren.",
     "notGitInstall": "Denne installation indeholder ikke commit-oplysninger.",
     "checkFailed": "Det var ikke muligt at søge efter opdateringer.",
-    "contactsGithub": "Tjek udføres manuelt og kontakter GitHub.",
     "autoUpdateCheck": "Automatisk opdateringstjek",
-    "autoUpdateCheckHelp": "Tjekker GitHub én gang om dagen for en ny udgivelse og viser en påmindelse. Slået fra som standard.",
-    "openReleases": "Åbn GitHub-udgivelser",
-    "restartAfterUpdate": "Genstart FreeLLMAPI, når buildet er færdigt."
+    "restartAfterUpdate": "Genstart FreeLLMAPI, når buildet er færdigt.",
+    "downloadUpdate": "Hent opdatering",
+    "downloadingUpdate": "Henter… {percent} %",
+    "restartToUpdate": "Genstart for at opdatere",
+    "updateReadyHint": "Hentet. FreeLLMAPI tager backup af dine data, genstarter og åbner den nye version.",
+    "updateInstallFailed": "Opdateringen kunne ikke installeres.",
+    "updateNow": "Opdater nu",
+    "updatingContainer": "Henter det nye image og genstarter. Siden genindlæses, når FreeLLMAPI er tilbage.",
+    "updateNowFailed": "Opdateringstjenesten afviste anmodningen. Tjek at watchtower-containeren kører.",
+    "updateNowTimeout": "FreeLLMAPI er ikke genstartet efter 5 minutter. Tjek logfilerne for watchtower-containeren."
   },
   "models": {
     "title": "Modeller",
@@ -224,6 +227,7 @@
     "settingsHint": "Lokale redigeringer af katalogmodeller gemmes på tværs af katalogsynkroniseringer. Slettede katalogmodeller forbliver slettede, indtil du tilføjer dem igen via konfigurationen.",
     "catalogModel": "Katalog",
     "customModel": "skik",
+    "discoveredModel": "fundet",
     "localOverride": "Lokal overstyring",
     "displayName": "Visningsnavn",
     "sizeLabel": "Kapacitetsniveau",
@@ -340,7 +344,10 @@
     "weightSpeed": "Hastighed",
     "weightIntelligence": "Intelligens",
     "weightRequired": "Mindst én vægt skal være over nul.",
-    "scoreColumn": "Score"
+    "scoreColumn": "Score",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "Fræsertryk",
@@ -497,11 +504,11 @@
     "platform": "Platform",
     "hideAdded": "Skjul tilføjede udbydere",
     "apiToken": "API token",
-    "noKeyNeededPlaceholder": "Ingen API nøgle nødvendig",
+    "keyOptionalPlaceholder": "Valgfri",
     "bearerTokenPlaceholder": "Bærertoken",
     "pasteKeyPlaceholder": "Afsæt nøgle her",
     "pasteSeveral": "Indsæt flere",
-    "keylessHint": "Ingen API nøgle nødvendig: denne udbyders gratis niveau er anonymt (prisbegrænset pr. IP).",
+    "keyOptionalHint": "Valgfri: lad feltet stå tomt for det anonyme gratisniveau (begrænset pr. IP), eller indsæt din egen nøgle for at bruge din konto.",
     "enable": "Enable",
     "noProviderKeys": "Ingen udbydernøgler endnu. Tilføj en ovenfor for at starte ruten.",
     "filterPlaceholder": "Filterudbydere eller nøgler",
@@ -679,7 +686,22 @@
     "testFailed": "Modeltest fejlede",
     "testThrottled": "Vent venligst {seconds}s, før du tester denne model igen.",
     "noModelsForProvider": "Ingen modeller konfigureret for denne udbyder.",
-    "testModels": "Test modeller"
+    "testModels": "Test modeller",
+    "monthlyRequestCapLabel": "Månedlig grænse for anmodninger",
+    "monthlyTokenCapLabel": "Månedlig grænse for tokens",
+    "capUnlimitedPlaceholder": "Ubegrænset",
+    "capEditHint": "Grænser nulstilles den 1. kl. 00:00 UTC. Lad være tomt for ubegrænset.",
+    "monthlyUsageLine": "{requests} anmodninger, {tokens} tokens denne måned",
+    "quotaBalanceHint": "{remaining} af {limit} {metric} tilbage",
+    "quotaBalanceLeft": "{remaining} tilbage"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Før opdatering"
   },
   "status": {
     "healthy": "sundt",
@@ -864,6 +887,7 @@
     "maxTokens": "Maks. tokens",
     "errorTitle": "Anmodningen mislykkedes",
     "attach": "Vedhæft filer",
+    "addMenu": "Add files and tools",
     "attachTooMany": "Du kan vedhæfte op til {count} filer pr. besked.",
     "attachTooLarge": "{name} er for stor. Grænsen er {max}.",
     "attachUnsupported": "{name} understøttes ikke. Vedhæft billeder (PNG, JPEG, WebP, GIF) eller tekstfiler (TXT, MD, CSV, JSON, LOG).",
@@ -1135,17 +1159,16 @@
       "generic": "Anything else that speaks the OpenAI API, set up by hand from a base URL and key.",
       "atomcode": "AtomGit's terminal agent, written in Rust, that takes any OpenAI-compatible endpoint.",
       "openclaw": "En altid tilgængelig personlig assistent, der svarer på WhatsApp, Telegram, Discord og mere fra din egen maskine.",
-      "hermes": "Nous Researchs selvforbedrende agent med vedvarende hukommelse og færdigheder, i terminalen eller i chat-apps."
+      "hermes": "Nous Researchs selvforbedrende agent med vedvarende hukommelse og færdigheder, i terminalen eller i chat-apps.",
+      "pi": "En minimal terminalagent, du former med dine egne udvidelser, færdigheder og prompt-skabeloner.",
+      "reasonix": "En terminalbaseret kodeagent bygget til DeepSeek omkring prefix-caching, så lange sessioner forbliver billige."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "En nyere version af FreeLLMAPI er installeret.",
+    "reload": "Genindlæs"
   },
   "freeTier": {
     "poolsToggle": "Free-tier pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "Omdøb kæden \"{oldName}\" til \"{name}\"? Klients, der kalder auto:{oldName}, skal skifte til auto:{name}.",
     "renamePlaceholder": "Nyt kædenavn",
     "renameFailed": "Kæden kunne ikke omdøbes."
+  },
+  "updates": {
+    "versionAvailable": "Version {version} er tilgængelig",
+    "versionReady": "Version {version} er klar til installation",
+    "releaseNotes": "Udgivelsesnoter",
+    "tryAgain": "Prøv igen",
+    "offline": "Tjek din internetforbindelse, og prøv igen."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

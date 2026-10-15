@@ -152,21 +152,24 @@
     "compressionRunPreview": "Pokreni pregled",
     "updatesTitle": "Ažuriranja",
     "checkForUpdates": "Provjerite ima li novosti",
-    "lastChecked": "Zadnja provjera: {when}",
-    "currentVersion": "Trenutačna verzija:",
     "updateAvailable": "Dostupno je ažuriranje",
-    "changelog": "Što se promijenilo",
     "upToDate": "Ažurno",
     "buildAhead": "Ova je verzija ispred službene grane main.",
     "buildDiverged": "Ova se verzija odvojila od službene grane main.",
     "buildUnknown": "Ovu prilagođenu verziju nije moguće usporediti sa službenom granom main.",
     "notGitInstall": "Ova instalacija ne sadrži informacije o commitovima.",
     "checkFailed": "Nije moguće provjeriti ažuriranja.",
-    "contactsGithub": "Provjere se pokreću ručno i kontaktiraju GitHub.",
     "autoUpdateCheck": "Automatska provjera ažuriranja",
-    "autoUpdateCheckHelp": "Jednom dnevno provjerava GitHub za novo izdanje i prikazuje podsjetnik. Prema zadanome isključeno.",
-    "openReleases": "Otvori izdanja na GitHubu",
-    "restartAfterUpdate": "Ponovno pokrenite FreeLLMAPI nakon dovršetka izgradnje."
+    "restartAfterUpdate": "Ponovno pokrenite FreeLLMAPI nakon dovršetka izgradnje.",
+    "downloadUpdate": "Preuzmi ažuriranje",
+    "downloadingUpdate": "Preuzimanje… {percent} %",
+    "restartToUpdate": "Ponovno pokreni za ažuriranje",
+    "updateReadyHint": "Preuzeto. FreeLLMAPI sigurnosno kopira vaše podatke, ponovno se pokreće i otvara novu verziju.",
+    "updateInstallFailed": "Ažuriranje se nije moglo instalirati.",
+    "updateNow": "Ažuriraj sada",
+    "updatingContainer": "Preuzimanje nove slike i ponovno pokretanje. Stranica će se ponovno učitati kad se FreeLLMAPI vrati.",
+    "updateNowFailed": "Ažurirač nije prihvatio zahtjev. Provjerite radi li kontejner watchtower.",
+    "updateNowTimeout": "FreeLLMAPI se nije ponovno pokrenuo nakon 5 minuta. Provjerite zapise kontejnera watchtower."
   },
   "models": {
     "title": "Modeli",
@@ -224,6 +227,7 @@
     "settingsHint": "Lokalne izmjene katalogskih modela čuvaju se kroz kataloške sinkronizacije. Izbrisani kataloški modeli ostaju izbrisani dok ih ponovno ne dodate kroz konfiguraciju.",
     "catalogModel": "Katalog",
     "customModel": "običaj",
+    "discoveredModel": "otkriven",
     "localOverride": "Lokalno nadjačavanje",
     "displayName": "Prikazni naziv",
     "sizeLabel": "Razina sposobnosti",
@@ -340,7 +344,10 @@
     "weightSpeed": "Brzina",
     "weightIntelligence": "Obavještajna služba",
     "weightRequired": "Najmanje jedna težina mora biti iznad nule.",
-    "scoreColumn": "Glazba"
+    "scoreColumn": "Glazba",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "Tlak glodalice",
@@ -497,11 +504,11 @@
     "platform": "Peron",
     "hideAdded": "Sakrij dodane pružatelje usluga",
     "apiToken": "API žeton",
-    "noKeyNeededPlaceholder": "Nije potreban API ključ",
+    "keyOptionalPlaceholder": "Neobavezno",
     "bearerTokenPlaceholder": "Token nositelja",
     "pasteKeyPlaceholder": "Ovdje zalijepi ključ",
     "pasteSeveral": "Zalijepi više",
-    "keylessHint": "Nije potreban API ključ: besplatni paket ovog pružatelja je anoniman (ograničen brzinom po IP adresi).",
+    "keyOptionalHint": "Neobavezno: ostavite prazno za anonimnu besplatnu razinu (ograničenje po IP-u) ili zalijepite vlastiti ključ za korištenje svog računa.",
     "enable": "Omogući",
     "noProviderKeys": "Još nema ključeva pružatelja usluga. Dodaj jedan gore da počneš s rutiranjem.",
     "filterPlaceholder": "Pružatelji filtera ili ključevi",
@@ -679,7 +686,22 @@
     "testFailed": "Test modela nije uspio",
     "testThrottled": "Pričekajte {seconds}s prije ponovnog testiranja ovog modela.",
     "noModelsForProvider": "Nema konfiguriranih modela za ovog pružatelja.",
-    "testModels": "Testiraj modele"
+    "testModels": "Testiraj modele",
+    "monthlyRequestCapLabel": "Mjesečno ograničenje zahtjeva",
+    "monthlyTokenCapLabel": "Mjesečno ograničenje tokena",
+    "capUnlimitedPlaceholder": "Neograničeno",
+    "capEditHint": "Ograničenja se resetiraju 1. u 00:00 UTC. Ostavite prazno za neograničeno.",
+    "monthlyUsageLine": "{requests} zahtjeva, {tokens} tokena ovaj mjesec",
+    "quotaBalanceHint": "Preostalo {remaining} od {limit} {metric}",
+    "quotaBalanceLeft": "Preostalo {remaining}"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Prije ažuriranja"
   },
   "status": {
     "healthy": "Zdravo",
@@ -864,6 +887,7 @@
     "maxTokens": "Maks. tokena",
     "errorTitle": "Zahtjev nije uspio",
     "attach": "Priloži datoteke",
+    "addMenu": "Add files and tools",
     "attachTooMany": "Po poruci možete priložiti najviše {count} datoteka.",
     "attachTooLarge": "Datoteka {name} je prevelika. Ograničenje je {max}.",
     "attachUnsupported": "Datoteka {name} nije podržana. Priložite slike (PNG, JPEG, WebP, GIF) ili tekstualne datoteke (TXT, MD, CSV, JSON, LOG).",
@@ -1135,17 +1159,16 @@
       "generic": "Anything else that speaks the OpenAI API, set up by hand from a base URL and key.",
       "atomcode": "AtomGit's terminal agent, written in Rust, that takes any OpenAI-compatible endpoint.",
       "openclaw": "Uvijek dostupan osobni asistent koji s vašeg računala odgovara u aplikacijama WhatsApp, Telegram, Discord i drugima.",
-      "hermes": "Samopoboljšavajući agent tvrtke Nous Research s trajnom memorijom i vještinama, u terminalu ili u chat aplikacijama."
+      "hermes": "Samopoboljšavajući agent tvrtke Nous Research s trajnom memorijom i vještinama, u terminalu ili u chat aplikacijama.",
+      "pi": "Minimalistički terminalski agent koji oblikujete vlastitim proširenjima, vještinama i predlošcima upita.",
+      "reasonix": "Terminalski agent za programiranje izrađen za DeepSeek, oko predmemoriranja prefiksa, kako bi duge sesije ostale jeftine."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "Instalirana je novija verzija FreeLLMAPI-ja.",
+    "reload": "Ponovno učitaj"
   },
   "freeTier": {
     "poolsToggle": "Free-tier pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "Preimenovati lanac \"{oldName}\" u \"{name}\"? Klijenti koji zovu auto:{oldName} moraju prijeći na auto:{name}.",
     "renamePlaceholder": "Novi naziv lanca",
     "renameFailed": "Nije moguće preimenovati lanac."
+  },
+  "updates": {
+    "versionAvailable": "Dostupna je verzija {version}",
+    "versionReady": "Verzija {version} spremna je za instalaciju",
+    "releaseNotes": "Bilješke o izdanju",
+    "tryAgain": "Pokušaj ponovno",
+    "offline": "Provjerite internetsku vezu i pokušajte ponovno."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

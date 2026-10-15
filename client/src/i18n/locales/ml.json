@@ -152,21 +152,24 @@
     "compressionRunPreview": "പ്രിവ്യൂ പ്രവർത്തിപ്പിക്കുക",
     "updatesTitle": "അപ്‌ഡേറ്റുകൾ",
     "checkForUpdates": "അപ്ഡേറ്റുകൾക്കായി പരിശോധിക്കുക",
-    "lastChecked": "അവസാനം പരിശോധിച്ചത്: {when}",
-    "currentVersion": "നിലവിലെ ബിൽഡ്:",
     "updateAvailable": "അപ്‌ഡേറ്റ് ലഭ്യമാണ്",
-    "changelog": "എന്താണ് മാറിയത്",
     "upToDate": "കാലികമാണ്",
     "buildAhead": "ഈ ബിൽഡ് ഔദ്യോഗിക main ശാഖയേക്കാൾ മുന്നിലാണ്.",
     "buildDiverged": "ഈ ബിൽഡ് ഔദ്യോഗിക main ശാഖയിൽ നിന്ന് വ്യതിചലിച്ചിരിക്കുന്നു.",
     "buildUnknown": "ഈ കസ്റ്റം ബിൽഡിനെ ഔദ്യോഗിക main ശാഖയുമായി താരതമ്യം ചെയ്യാനാകില്ല.",
     "notGitInstall": "ഈ ഇൻസ്റ്റാളേഷനിൽ കമ്മിറ്റ് വിവരങ്ങൾ ഉൾപ്പെട്ടിട്ടില്ല.",
     "checkFailed": "അപ്‌ഡേറ്റുകൾ പരിശോധിക്കാനായില്ല.",
-    "contactsGithub": "പരിശോധനകൾ മാനുവലായാണ് നടത്തുന്നത്; അവ GitHub-മായി ബന്ധപ്പെടുന്നു.",
     "autoUpdateCheck": "സ്വയമേവയുള്ള അപ്ഡേറ്റ് പരിശോധന",
-    "autoUpdateCheckHelp": "ദിവസത്തിൽ ഒരിക്കൽ പുതിയ റിലീസിനായി GitHub പരിശോധിച്ച് ഒരു ഓർമ്മപ്പെടുത്തൽ കാണിക്കുന്നു. സ്ഥിരസ്ഥിതിയായി ഓഫ് ആണ്.",
-    "openReleases": "GitHub റിലീസുകൾ തുറക്കുക",
-    "restartAfterUpdate": "ബിൽഡ് പൂർത്തിയായ ശേഷം FreeLLMAPI പുനരാരംഭിക്കുക."
+    "restartAfterUpdate": "ബിൽഡ് പൂർത്തിയായ ശേഷം FreeLLMAPI പുനരാരംഭിക്കുക.",
+    "downloadUpdate": "അപ്‌ഡേറ്റ് ഡൗൺലോഡ് ചെയ്യുക",
+    "downloadingUpdate": "ഡൗൺലോഡ് ചെയ്യുന്നു… {percent}%",
+    "restartToUpdate": "അപ്‌ഡേറ്റിനായി റീസ്റ്റാർട്ട് ചെയ്യുക",
+    "updateReadyHint": "ഡൗൺലോഡ് ചെയ്തു. FreeLLMAPI നിങ്ങളുടെ ഡാറ്റ ബാക്കപ്പ് ചെയ്ത് റീസ്റ്റാർട്ട് ചെയ്ത് പുതിയ പതിപ്പ് തുറക്കും.",
+    "updateInstallFailed": "അപ്‌ഡേറ്റ് ഇൻസ്റ്റാൾ ചെയ്യാനായില്ല.",
+    "updateNow": "ഇപ്പോൾ അപ്‌ഡേറ്റ് ചെയ്യുക",
+    "updatingContainer": "പുതിയ ഇമേജ് എടുത്ത് റീസ്റ്റാർട്ട് ചെയ്യുന്നു. FreeLLMAPI തിരിച്ചെത്തുമ്പോൾ ഈ പേജ് റീലോഡ് ചെയ്യും.",
+    "updateNowFailed": "അപ്‌ഡേറ്റർ അഭ്യർത്ഥന സ്വീകരിച്ചില്ല. watchtower കണ്ടെയ്‌നർ പ്രവർത്തിക്കുന്നുണ്ടോ എന്ന് പരിശോധിക്കുക.",
+    "updateNowTimeout": "5 മിനിറ്റിനുശേഷവും FreeLLMAPI റീസ്റ്റാർട്ട് ആയില്ല. watchtower കണ്ടെയ്‌നറിന്റെ ലോഗുകൾ പരിശോധിക്കുക."
   },
   "models": {
     "title": "മോഡലുകൾ",
@@ -224,6 +227,7 @@
     "settingsHint": "കാറ്റലോഗ് മോഡലുകളിലേക്കുള്ള പ്രാദേശിക എഡിറ്റുകൾ കാറ്റലോഗ് സമന്വയങ്ങളിലുടനീളം സൂക്ഷിക്കുന്നു. ഇല്ലാതാക്കിയ കാറ്റലോഗ് മോഡലുകൾ നിങ്ങൾ കോൺഫിഗറിലൂടെ വീണ്ടും ചേർക്കുന്നത് വരെ ഇല്ലാതാക്കിയിരിക്കും.",
     "catalogModel": "കാറ്റലോഗ്",
     "customModel": "ആചാരം",
+    "discoveredModel": "കണ്ടെത്തിയത്",
     "localOverride": "പ്രാദേശിക അസാധുവാക്കൽ",
     "displayName": "പ്രദർശന നാമം",
     "sizeLabel": "കഴിവ് നില",
@@ -340,7 +344,10 @@
     "weightSpeed": "വേഗത",
     "weightIntelligence": "ഇൻ്റലിജൻസ്",
     "weightRequired": "കുറഞ്ഞത് ഒരു ഭാരമെങ്കിലും പൂജ്യത്തിന് മുകളിലായിരിക്കണം.",
-    "scoreColumn": "സ്കോർ"
+    "scoreColumn": "സ്കോർ",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "റൂട്ടർ മർദ്ദം",
@@ -497,11 +504,11 @@
     "platform": "പ്ലാറ്റ്ഫോം",
     "hideAdded": "ചേർത്ത ദാതാക്കളെ മറയ്ക്കുക",
     "apiToken": "API ടോക്കൺ",
-    "noKeyNeededPlaceholder": "API കീ ആവശ്യമില്ല",
+    "keyOptionalPlaceholder": "ഓപ്ഷണൽ",
     "bearerTokenPlaceholder": "ബെയറർ ടോക്കൺ",
     "pasteKeyPlaceholder": "കീ ഇവിടെ ഒട്ടിക്കുക",
     "pasteSeveral": "ഒന്നിലധികം ഒട്ടിക്കുക",
-    "keylessHint": "API കീ ആവശ്യമില്ല: ഈ ദാതാവിൻ്റെ സൗജന്യ ടയർ അജ്ഞാതമാണ് (ഓരോ IP-നും നിരക്ക് പരിമിതമാണ്).",
+    "keyOptionalHint": "ഓപ്ഷണൽ: അജ്ഞാത സൗജന്യ ടയറിനായി (ഓരോ IP-ക്കും നിരക്ക് പരിധി) ശൂന്യമായി വിടുക, അല്ലെങ്കിൽ നിങ്ങളുടെ അക്കൗണ്ട് ഉപയോഗിക്കാൻ സ്വന്തം കീ ഒട്ടിക്കുക.",
     "enable": "പ്രവർത്തനക്ഷമമാക്കുക",
     "noProviderKeys": "ഇതുവരെ ദാതാവിൻ്റെ കീകളൊന്നുമില്ല. റൂട്ടിംഗ് ആരംഭിക്കാൻ മുകളിൽ ഒന്ന് ചേർക്കുക.",
     "filterPlaceholder": "ദാതാക്കളോ കീകളോ ഫിൽട്ടർ ചെയ്യുക",
@@ -679,7 +686,22 @@
     "testFailed": "മോഡൽ പരിശോധന പരാജയപ്പെട്ടു",
     "testThrottled": "ഈ മോഡൽ വീണ്ടും പരിശോധിക്കുന്നതിന് മുമ്പ് ദയവായി {seconds} സെക്കൻഡ് കാത്തിരിക്കുക.",
     "noModelsForProvider": "ഈ ദാതാവിനായി മോഡലുകളൊന്നും കോൺഫിഗർ ചെയ്തിട്ടില്ല.",
-    "testModels": "മോഡലുകൾ പരീക്ഷിക്കുക"
+    "testModels": "മോഡലുകൾ പരീക്ഷിക്കുക",
+    "monthlyRequestCapLabel": "മാസിക അഭ്യർത്ഥന പരിധി",
+    "monthlyTokenCapLabel": "മാസിക ടോക്കൺ പരിധി",
+    "capUnlimitedPlaceholder": "പരിധിയില്ല",
+    "capEditHint": "പരിധികൾ ഓരോ മാസവും 1-ന് 00:00 UTC-ന് റീസെറ്റ് ചെയ്യും. പരിധിയില്ലാതെ വെച്ചാൽ മതി.",
+    "monthlyUsageLine": "ഈ മാസം {requests} അഭ്യർത്ഥനകൾ, {tokens} ടോക്കണുകൾ",
+    "quotaBalanceHint": "{limit} {metric}-ൽ {remaining} ശേഷിക്കുന്നു",
+    "quotaBalanceLeft": "{remaining} ശേഷിക്കുന്നു"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "അപ്‌ഡേറ്റിന് മുമ്പ്"
   },
   "status": {
     "healthy": "ആരോഗ്യമുള്ള",
@@ -864,6 +887,7 @@
     "maxTokens": "പരമാവധി ടോക്കണുകൾ",
     "errorTitle": "അഭ്യർത്ഥന പരാജയപ്പെട്ടു",
     "attach": "ഫയലുകൾ അറ്റാച്ചുചെയ്യുക",
+    "addMenu": "Add files and tools",
     "attachTooMany": "ഓരോ സന്ദേശത്തിലും പരമാവധി {count} ഫയലുകൾ വരെ അറ്റാച്ചുചെയ്യാം.",
     "attachTooLarge": "{name} വളരെ വലുതാണ്. പരിധി {max} ആണ്.",
     "attachUnsupported": "{name} പിന്തുണയ്ക്കുന്നില്ല. ചിത്രങ്ങൾ (PNG, JPEG, WebP, GIF) അല്ലെങ്കിൽ ടെക്സ്റ്റ് ഫയലുകൾ (TXT, MD, CSV, JSON, LOG) അറ്റാച്ചുചെയ്യുക.",
@@ -1135,17 +1159,16 @@
       "generic": "Anything else that speaks the OpenAI API, set up by hand from a base URL and key.",
       "atomcode": "AtomGit's terminal agent, written in Rust, that takes any OpenAI-compatible endpoint.",
       "openclaw": "നിങ്ങളുടെ സ്വന്തം മെഷീനിൽ നിന്ന് WhatsApp, Telegram, Discord തുടങ്ങിയവയിൽ മറുപടി നൽകുന്ന, എപ്പോഴും സജീവമായ വ്യക്തിഗത സഹായി.",
-      "hermes": "Nous Research-ന്റെ സ്വയം മെച്ചപ്പെടുത്തുന്ന ഏജന്റ്, സ്ഥിരമായ മെമ്മറിയും സ്കില്ലുകളും സഹിതം, ടെർമിനലിലോ ചാറ്റ് ആപ്പുകളിലോ."
+      "hermes": "Nous Research-ന്റെ സ്വയം മെച്ചപ്പെടുത്തുന്ന ഏജന്റ്, സ്ഥിരമായ മെമ്മറിയും സ്കില്ലുകളും സഹിതം, ടെർമിനലിലോ ചാറ്റ് ആപ്പുകളിലോ.",
+      "pi": "നിങ്ങളുടെ സ്വന്തം എക്സ്റ്റൻഷനുകളും സ്കില്ലുകളും പ്രോംപ്റ്റ് ടെംപ്ലേറ്റുകളും കൊണ്ട് രൂപപ്പെടുത്തുന്ന ലളിതമായ ടെർമിനൽ ഏജന്റ്.",
+      "reasonix": "DeepSeek-നായി നിർമ്മിച്ച ടെർമിനൽ കോഡിംഗ് ഏജന്റ്; ദൈർഘ്യമേറിയ സെഷനുകളും ചെലവുകുറഞ്ഞതാക്കാൻ പ്രിഫിക്സ് കാഷിംഗിനെ ചുറ്റിപ്പറ്റി നിർമ്മിച്ചത്."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "FreeLLMAPI-യുടെ പുതിയ പതിപ്പ് ഇൻസ്റ്റാൾ ചെയ്തിട്ടുണ്ട്.",
+    "reload": "റീലോഡ്"
   },
   "freeTier": {
     "poolsToggle": "Free-tier pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "ചെയിൻ \"{oldName}\" എന്നതിന്റെ പേരു \"{name}\" ആക്കണോ? auto:{oldName} വിളിക്കുന്ന ക്ലയന്റുകൾ auto:{name} ലേക്ക് മാറണം.",
     "renamePlaceholder": "പുതിയ ചെയിൻ പേര്",
     "renameFailed": "ചെയിനിന്റെ പേരു മാറ്റാനായില്ല."
+  },
+  "updates": {
+    "versionAvailable": "പതിപ്പ് {version} ലഭ്യമാണ്",
+    "versionReady": "പതിപ്പ് {version} ഇൻസ്റ്റാൾ ചെയ്യാൻ തയ്യാറാണ്",
+    "releaseNotes": "റിലീസ് കുറിപ്പുകൾ",
+    "tryAgain": "വീണ്ടും ശ്രമിക്കുക",
+    "offline": "ഇന്റർനെറ്റ് കണക്ഷൻ പരിശോധിച്ച് വീണ്ടും ശ്രമിക്കുക."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

@@ -2,8 +2,11 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getActiveRegistry } from '../services/router-registry.js';
 import { getPostgresPool } from '../db/postgres.js';
-import { hasProvider } from '../providers/index.js';
-import { checkKeyHealth, checkAllKeys } from '../services/health.js';
+import { getDb } from '../db/index.js';
+import { hasProvider, resolveProvider } from '../providers/index.js';
+import { checkKeyHealth, checkAllKeys, pollKeyQuota, supportsQuotaPolling } from '../services/health.js';
+import { getDegradationStatus } from '../services/degradation.js';
+import { getQuotaStateForKeys } from '../services/provider-quota.js';
 import type { Platform } from '@freellmapi/shared/types.js';
 
 export const healthRouter = Router();
@@ -137,3 +140,48 @@ async function refreshRuntimeHealth(id: number): Promise<void> {
     record.runtime.lastUsedAt = new Date(row.last_checked_at).getTime();
   }
 }
+
+// Poll one key's provider-reported balance now (#1403). The health pass only
+// piggybacks the quota probe at most once per 15 minutes; this is the manual
+// override — an operator adding a key wants the balance immediately instead
+// of waiting for the next healthy pass after the throttle. Returns what the
+// probe recorded (or the fresh state when the provider reported nothing, so
+// the caller can tell "no quota endpoint / probe failed" from "fresh number").
+healthRouter.post('/quota/:keyId', async (req: Request, res: Response) => {
+  const keyId = parseInt(req.params.keyId as string, 10);
+  if (isNaN(keyId)) {
+    res.status(400).json({ error: { message: 'Invalid key ID' } });
+    return;
+  }
+  const pool = getPostgresPool();
+  const pgRes = await pool.query(
+    `SELECT c.id, p.provider_key AS platform, p.base_url,
+            c.credential_name, c.encrypted_value, c.iv, c.auth_tag,
+            c.enabled, c.last_health_error, c.model_scope
+     FROM credentials c
+     JOIN providers p ON p.id = c.provider_id
+     WHERE c.id = $1`,
+    [keyId],
+  );
+  let row = pgRes.rows[0];
+  if (!row) {
+    const db = getDb();
+    row = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(keyId) as any;
+  }
+  if (!row) {
+    res.status(404).json({ error: { message: 'Key not found' } });
+    return;
+  }
+  const provider = resolveProvider(row.platform as Platform, row.base_url);
+  if (!provider || !supportsQuotaPolling(provider)) {
+    res.status(400).json({ error: { message: `${row.platform} has no provider-reported quota endpoint` } });
+    return;
+  }
+  // pollKeyQuota is failure-silent by design; its boolean tells us whether a
+  // quota_api row was written, and the state query returns the fresh reading.
+  const recorded = await pollKeyQuota(keyId, row, provider);
+  const state = getQuotaStateForKeys().filter(
+    q => q.keyId === keyId && q.source === 'quota_api',
+  );
+  res.json({ keyId, recorded, quotaStates: state });
+});

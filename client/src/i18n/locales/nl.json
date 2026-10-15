@@ -152,21 +152,24 @@
     "compressionRunPreview": "Voorbeeld uitvoeren",
     "updatesTitle": "Updates",
     "checkForUpdates": "Controleer op updates",
-    "lastChecked": "Laatst gecontroleerd: {when}",
-    "currentVersion": "Huidige build:",
     "updateAvailable": "Update beschikbaar",
-    "changelog": "Wat is er veranderd",
     "upToDate": "Up-to-date",
     "buildAhead": "Deze build loopt voor op de officiële main-branch.",
     "buildDiverged": "Deze build is afgeweken van de officiële main-branch.",
     "buildUnknown": "Deze aangepaste build kan niet worden vergeleken met de officiële main-branch.",
     "notGitInstall": "Deze installatie bevat geen commitinformatie.",
     "checkFailed": "Kan niet controleren op updates.",
-    "contactsGithub": "Controles worden handmatig uitgevoerd en maken contact met GitHub.",
     "autoUpdateCheck": "Automatische updatecontrole",
-    "autoUpdateCheckHelp": "Controleert GitHub eenmaal per dag op een nieuwe release en toont een herinnering. Standaard uitgeschakeld.",
-    "openReleases": "GitHub Releases openen",
-    "restartAfterUpdate": "Start FreeLLMAPI opnieuw nadat de build is voltooid."
+    "restartAfterUpdate": "Start FreeLLMAPI opnieuw nadat de build is voltooid.",
+    "downloadUpdate": "Update downloaden",
+    "downloadingUpdate": "Downloaden… {percent}%",
+    "restartToUpdate": "Herstarten om bij te werken",
+    "updateReadyHint": "Gedownload. FreeLLMAPI maakt een back-up van je gegevens, herstart en opent de nieuwe versie.",
+    "updateInstallFailed": "De update kon niet worden geïnstalleerd.",
+    "updateNow": "Nu bijwerken",
+    "updatingContainer": "De nieuwe image wordt opgehaald en herstart. Deze pagina laadt opnieuw zodra FreeLLMAPI terug is.",
+    "updateNowFailed": "De updater heeft het verzoek niet geaccepteerd. Controleer of de watchtower-container draait.",
+    "updateNowTimeout": "FreeLLMAPI is na 5 minuten niet herstart. Bekijk de logs van de watchtower-container."
   },
   "models": {
     "title": "Modellen",
@@ -224,6 +227,7 @@
     "settingsHint": "Lokale bewerkingen van catalogusmodellen worden behouden over catalogus-synchronisaties. Verwijderde catalogusmodellen blijven verwijderd totdat je ze opnieuw toevoegt via de configuratie.",
     "catalogModel": "Catalogus",
     "customModel": "Gewoonte",
+    "discoveredModel": "ontdekt",
     "localOverride": "Lokale overruling",
     "displayName": "Weergavenaam",
     "sizeLabel": "Capaciteitsniveau",
@@ -340,7 +344,10 @@
     "weightSpeed": "Snelheid",
     "weightIntelligence": "Intelligentie",
     "weightRequired": "Minstens één gewicht moet boven nul liggen.",
-    "scoreColumn": "Partituur"
+    "scoreColumn": "Partituur",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "Routerdruk",
@@ -497,11 +504,11 @@
     "platform": "Platform",
     "hideAdded": "Toegevoegde providers verbergen",
     "apiToken": "API token",
-    "noKeyNeededPlaceholder": "Geen API sleutel nodig",
+    "keyOptionalPlaceholder": "Optioneel",
     "bearerTokenPlaceholder": "Dragertoken",
     "pasteKeyPlaceholder": "Hier plak de toets",
     "pasteSeveral": "Meerdere plakken",
-    "keylessHint": "Geen API sleutel nodig: de gratis laag van deze provider is anoniem (tariefbeperkt per IP).",
+    "keyOptionalHint": "Optioneel: laat leeg voor de anonieme gratis laag (rate-limited per IP), of plak je eigen sleutel om je account te gebruiken.",
     "enable": "Enable",
     "noProviderKeys": "Nog geen provider-sleutels. Voeg er hierboven één toe om te beginnen met routeren.",
     "filterPlaceholder": "Filterproviders of sleutels",
@@ -679,7 +686,22 @@
     "testFailed": "Modeltest mislukt",
     "testThrottled": "Wacht {seconds}s voordat u dit model opnieuw test.",
     "noModelsForProvider": "Geen modellen geconfigureerd voor deze provider.",
-    "testModels": "Modellen testen"
+    "testModels": "Modellen testen",
+    "monthlyRequestCapLabel": "Maandelijke limiet verzoeken",
+    "monthlyTokenCapLabel": "Maandelijke limiet tokens",
+    "capUnlimitedPlaceholder": "Onbeperkt",
+    "capEditHint": "Limieten worden op de 1e om 00:00 UTC gereset. Laat leeg voor onbeperkt.",
+    "monthlyUsageLine": "{requests} verzoeken, {tokens} tokens deze maand",
+    "quotaBalanceHint": "{remaining} van {limit} {metric} over",
+    "quotaBalanceLeft": "{remaining} over"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Vóór update"
   },
   "status": {
     "healthy": "Gezond",
@@ -864,6 +887,7 @@
     "maxTokens": "Max. tokens",
     "errorTitle": "Verzoek afgewezen",
     "attach": "Bestanden bijvoegen",
+    "addMenu": "Add files and tools",
     "attachTooMany": "Je kunt maximaal {count} bestanden per bericht bijvoegen.",
     "attachTooLarge": "{name} is te groot. De limiet is {max}.",
     "attachUnsupported": "{name} wordt niet ondersteund. Voeg afbeeldingen (PNG, JPEG, WebP, GIF) of tekstbestanden (TXT, MD, CSV, JSON, LOG) toe.",
@@ -1135,17 +1159,16 @@
       "generic": "Elk ander hulpmiddel dat de OpenAI-API spreekt, met de hand ingesteld via basis-URL en sleutel.",
       "atomcode": "AtomGit's terminalagent, geschreven in Rust, die elk OpenAI-compatibel endpoint aankan.",
       "openclaw": "Een altijd actieve persoonlijke assistent die vanaf je eigen machine antwoordt op WhatsApp, Telegram, Discord en meer.",
-      "hermes": "De zelfverbeterende agent van Nous Research met blijvend geheugen en skills, in de terminal of in chat-apps."
+      "hermes": "De zelfverbeterende agent van Nous Research met blijvend geheugen en skills, in de terminal of in chat-apps.",
+      "pi": "Een minimalistische terminal-agent die je vormgeeft met je eigen extensies, skills en promptsjablonen.",
+      "reasonix": "Een terminal-codeeragent gebouwd voor DeepSeek, rond prefix-caching, zodat lange sessies goedkoop blijven."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "Er is een nieuwere versie van FreeLLMAPI geïnstalleerd.",
+    "reload": "Opnieuw laden"
   },
   "freeTier": {
     "poolsToggle": "Gratis-tierpools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "Keten \"{oldName}\" hernoemen naar \"{name}\"? Clients die auto:{oldName} aanroepen moeten overstappen op auto:{name}.",
     "renamePlaceholder": "Nieuwe ketennaam",
     "renameFailed": "Kan de naam van die keten niet wijzigen."
+  },
+  "updates": {
+    "versionAvailable": "Versie {version} is beschikbaar",
+    "versionReady": "Versie {version} is klaar om te installeren",
+    "releaseNotes": "Release-opmerkingen",
+    "tryAgain": "Opnieuw proberen",
+    "offline": "Controleer je internetverbinding en probeer het opnieuw."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

@@ -6,12 +6,15 @@ import type { ChatMessage, ChatToolCall, TokenUsage } from '@freellmapi/shared/t
 import { type RouteResult, type ResolvedChain, type ChainRow, routeRequest, resolveRoutingChain, resolveModelGroupCandidates, resolveStickyPreference, hasEnabledVisionModel, hasEnabledToolsModel, routingReserveTokens } from '../services/router.js';
 import { secondsUntilNextMonth } from '../services/key-budget.js';
 import { runEmbeddings, EmbeddingsError } from '../services/embeddings.js';
+import { runRerank, RerankError, rerankRetryAfterSec } from '../services/rerank.js';
+import { runSearch, SearchError, searchRetryAfterSec, listSearchEngines } from '../services/search.js';
 import { retryAfterSeconds } from '../lib/retry-hint.js';
 import { runImageGeneration, runVideoGeneration, runSpeech, runTranscription, MediaError, MAX_TRANSCRIPTION_BYTES } from '../services/media.js';
 import multer from 'multer';
 import { getDb } from '../db/index.js';
 import { resolveAuth, prependSystemPrompt, type ResolvedAuth } from '../lib/system-prompt.js';
-import { contentToString, messageHasImage, normalizeOutboundContent, sanitizeResponse, truncateMessagesForGithub } from '../lib/content.js';
+import { contentToString, estimateInputTokens, messageHasImage, normalizeOutboundContent, sanitizeResponse, truncateMessagesForGithub } from '../lib/content.js';
+import { routeOutputBudget } from '../lib/output-cap.js';
 import { resolveTaskType } from '../lib/task-type.js';
 import { normalizeMessageImages } from '../lib/image-normalize.js';
 import { repairToolArguments, toolSchemaMap } from '../lib/tool-args.js';
@@ -697,6 +700,116 @@ proxyRouter.post('/embeddings', async (req: Request, res: Response) => {
   }
 });
 
+// Cohere/Jina-style rerank over the key pool (#1029). No catalog: a Cohere key
+// or a custom OpenAI-compatible endpoint exposing POST {base_url}/rerank is a
+// provider; the first success wins, custom endpoints tried first.
+const RerankBody = z.object({
+  model: z.string().optional(),
+  query: z.string().min(1),
+  documents: z.array(z.string()).min(1),
+  top_n: z.number().int().positive().optional(),
+});
+
+proxyRouter.post('/rerank', async (req: Request, res: Response) => {
+  if (!requireInferenceAuth(req, res)) return;
+  const parsed = RerankBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: 'Invalid request: `query` and `documents` are required', type: 'invalid_request_error' } });
+    return;
+  }
+  try {
+    const result = await runRerank(parsed.data.model, parsed.data.query, parsed.data.documents, parsed.data.top_n);
+    res.json({
+      results: result.results.map(r => ({
+        index: r.index,
+        relevance_score: r.relevanceScore,
+        document: { text: r.document },
+      })),
+      model: result.modelId,
+      provider: result.platform,
+    });
+  } catch (err: any) {
+    const status = err instanceof RerankError ? err.status : 502;
+    if (err instanceof RerankError) {
+      const retryAfter = rerankRetryAfterSec(err);
+      if (retryAfter !== undefined) res.setHeader('Retry-After', String(retryAfter));
+    }
+    const type = status === 400 ? 'invalid_request_error' : status === 429 ? 'rate_limit_error' : 'server_error';
+    res.status(status).json({ error: { message: `rerank error: ${err?.message ?? 'unknown'}`, type } });
+  }
+});
+
+// Web search over the key pool (#1174). Engines are catalog rows (Tavily,
+// Exa, Firecrawl, Linkup, plus custom relays speaking Tavily's wire shape);
+// the first engine that returns hits wins. See services/search.ts.
+const SearchBody = z.object({
+  query: z.string().min(1),
+  max_results: z.number().int().positive().optional(),
+  topic: z.enum(['general', 'news']).optional(),
+  include_answer: z.boolean().optional(),
+  engine: z.string().min(1).optional(),
+});
+
+proxyRouter.post('/search', async (req: Request, res: Response) => {
+  if (!requireInferenceAuth(req, res)) return;
+  const parsed = SearchBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: 'Invalid request: `query` is required', type: 'invalid_request_error' } });
+    return;
+  }
+  // A departed client drops the upstream search instead of spending a credit.
+  const abort = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) abort.abort(); });
+  try {
+    const result = await runSearch(parsed.data.query, {
+      maxResults: parsed.data.max_results,
+      topic: parsed.data.topic,
+      includeAnswer: parsed.data.include_answer,
+      engine: parsed.data.engine,
+      signal: abort.signal,
+    });
+    res.json({
+      query: result.query,
+      ...(result.answer !== undefined ? { answer: result.answer } : {}),
+      results: result.results,
+      provider: result.provider,
+      engine: result.engine,
+    });
+  } catch (err: any) {
+    if (res.headersSent || abort.signal.aborted) return;
+    const status = err instanceof SearchError ? err.status : 502;
+    if (err instanceof SearchError) {
+      const retryAfter = searchRetryAfterSec(err);
+      if (retryAfter !== undefined) res.setHeader('Retry-After', String(retryAfter));
+    }
+    const type = status === 400 ? 'invalid_request_error' : status === 429 ? 'rate_limit_error' : 'server_error';
+    res.status(status).json({
+      error: {
+        message: `search error: ${err?.message ?? 'unknown'}`,
+        type,
+        ...(err instanceof SearchError && err.code ? { code: err.code } : {}),
+      },
+    });
+  }
+});
+
+// The engines a caller can pin with `engine` on POST /v1/search.
+proxyRouter.get('/search/engines', (req: Request, res: Response) => {
+  if (!requireInferenceAuth(req, res)) return;
+  res.json({
+    object: 'list',
+    data: listSearchEngines()
+      .filter(e => e.enabled)
+      .map(e => ({
+        id: e.engineId,
+        object: 'search_engine',
+        provider: e.platform,
+        name: e.displayName,
+        available: e.healthyKeyCount > 0,
+      })),
+  });
+});
+
 // OpenAI-compatible image generation. Routed through the media catalog (its own
 // table, never the chat router): `model: "auto"` (or omitted) tries every enabled
 // image provider in order; a provider model id pins to that one. Failover is
@@ -1192,7 +1305,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
       );
     },
     dispatch: async (route, attempt, ctx) => {
-      const contextBudget = route.contextWindow != null ? route.contextWindow - estimatedInputTokens : undefined;
+      const contextBudget = routeOutputBudget(route, estimatedInputTokens);
       traceRouteEvent('Proxy', {
         event: attempt === 0 ? 'start' : 'next',
         requestId: requestGroupId,
@@ -1386,7 +1499,16 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
           logprobs: null,
           finish_reason: result.choices?.[0]?.finish_reason ?? 'stop',
         }],
-        usage: result.usage,
+        // `usage` is required by the OpenAI completions spec. The fallback
+        // counts computed just above (chars/4 when the provider omits usage,
+        // #764) existed but were dropped here — clients like editor
+        // ghost-text plugins read usage to throttle and saw `undefined`.
+        usage: result.usage ?? {
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          total_tokens: totalTokens,
+          estimated: true,
+        },
         execution_id: requestGroupId,
       });
 
@@ -1620,10 +1742,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // Non-streaming requests reconcile against the provider's real `usage` block;
   // streaming does the same when stream_options.include_usage produces a final
   // usage frame, and otherwise falls back to this estimate.
-  const estimatedInputTokens = messages.reduce((sum, m) => {
-    const text = contentToString(m.content);
-    return sum + Math.ceil(text.length / 4);
-  }, 0);
+  const estimatedInputTokens = estimateInputTokens(messages, tools);
 
   // Image requests must route to a vision-capable model. Reject up front with a
   // clear message when none is enabled, rather than silently dropping the image
@@ -1782,7 +1901,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         const type = err instanceof FusionError
           ? (err.status === 429 ? 'rate_limit_error' : err.status >= 500 ? 'server_error' : 'invalid_request_error')
           : 'server_error';
-        writeFrame({ error: { message, type } });
+        const code = err instanceof FusionError ? err.code : undefined;
+        writeFrame({ error: { message, type, ...(code ? { code } : {}) } });
       }
       try { res.write('data: [DONE]\n\n'); res.end(); } catch { /* socket gone */ }
       return;
@@ -1822,6 +1942,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           error: {
             message: err.message,
             type: err.status === 429 ? 'rate_limit_error' : err.status >= 500 ? 'server_error' : 'invalid_request_error',
+            ...(err.code ? { code: err.code } : {}),
           },
           execution_id: requestGroupId,
         });
@@ -1919,6 +2040,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         max_tokens,
         tools,
         tool_choice,
+        generationOptions: { stop, parallel_tool_calls, ...samplingParams },
       })
     : null;
   if (idemKey && idemFingerprint) {
@@ -2112,7 +2234,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       return routeRequest(routingEstimate, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? resolvedChain?.chain, samplingParams.response_format !== undefined, state.skipPlatforms.size > 0 ? state.skipPlatforms : undefined, outputReserve, taskType);
     },
     dispatch: async (route, attempt, ctx) => {
-    const contextBudget = route.contextWindow != null ? route.contextWindow - estimatedInputTokens : undefined;
+    const contextBudget = routeOutputBudget(route, estimatedInputTokens);
     const modelKey = `${route.platform}:${route.modelId}`;
     traceRouteEvent('Proxy', {
       event: attempt === 0 ? 'start' : 'next',

@@ -10,9 +10,12 @@ import {
   deleteSession,
   updateEmail,
   updatePassword,
+  resetUserPassword,
+  accountEmail,
   normalizeEmail,
 } from '../services/auth.js';
 import { setupCodeMatches, clearSetupCode } from '../lib/setup-code.js';
+import { generateResetCode, resetCodeMatches, clearResetCode } from '../lib/reset-code.js';
 
 export const authRouter = Router();
 
@@ -46,7 +49,14 @@ function isLockedOut(email: string): boolean {
   const a = attempts.get(throttleKey(email));
   return !!a && a.lockedUntil > Date.now();
 }
-
+// Seconds until the per-email lockout lifts (0 when not locked). The 429
+// carries this as Retry-After so a client (or a scripted login retry loop)
+// backs off for the ACTUAL remaining time instead of the worst-case 15 min.
+function lockoutRetryAfterSec(email: string, now = Date.now()): number {
+  const a = attempts.get(throttleKey(email));
+  if (!a || a.lockedUntil <= now) return 0;
+  return Math.max(1, Math.ceil((a.lockedUntil - now) / 1000));
+}
 function recordFailure(email: string): void {
   const key = throttleKey(email);
   const a = attempts.get(key) ?? { count: 0, lockedUntil: 0 };
@@ -158,6 +168,10 @@ authRouter.post('/login', async (req: Request, res: Response) => {
 
   const { email, password } = parsed.data;
   if (isLockedOut(email)) {
+    // RFC 6585: a 429 must say when the client may return. The whole gateway
+    // already does this (proxy limiter, exhaustion Retry-After, monthly budget
+    // cap); the dashboard's own lockout was the one 429 that didn't.
+    res.setHeader('Retry-After', String(lockoutRetryAfterSec(email)));
     res.status(429).json({ error: { message: 'Too many attempts. Wait 15 minutes or restart the app.', type: 'rate_limit_error' } });
     return;
   }
@@ -243,8 +257,56 @@ authRouter.put('/password', async (req: Request, res: Response) => {
     res.status(401).json({ error: { message: 'Incorrect current password', type: 'authentication_error' } });
     return;
   }
-
   // Issue fresh token since old sessions are deleted
   const newToken = await createSession(session.userId);
   res.json({ success: true, token: newToken });
+});
+
+// Forgot password: mint a reset code and log it
+const RESET_CODE_MIN_INTERVAL_MS = 10_000;
+let lastResetCodeAt = 0;
+authRouter.post('/forgot-password', async (_req: Request, res: Response) => {
+  // Always respond 200 regardless of account existence to avoid user enumeration.
+  if ((await userCount()) === 0) {
+    res.json({ success: true });
+    return;
+  }
+  const now = Date.now();
+  if (now - lastResetCodeAt < RESET_CODE_MIN_INTERVAL_MS) {
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil((RESET_CODE_MIN_INTERVAL_MS - (now - lastResetCodeAt)) / 1000))));
+    res.status(429).json({ error: { message: 'Too many reset-code requests. Try again later.', type: 'rate_limit_error' } });
+    return;
+  }
+  lastResetCodeAt = now;
+  generateResetCode(await accountEmail());
+  res.json({ success: true });
+});
+
+// Reset password: accept the logged code + new password
+const resetPasswordSchema = z.object({
+  resetCode: z.string().min(1, 'Reset code is required'),
+  newPassword: z.string().min(8, 'Password must be at least 8 characters'),
+});
+
+authRouter.post('/reset-password', async (req: Request, res: Response) => {
+  const parsed = resetPasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+  if (!resetCodeMatches(parsed.data.resetCode)) {
+    res.status(403).json({ error: { message: 'Invalid or expired reset code', type: 'authentication_error' } });
+    return;
+  }
+  const user = await resetUserPassword(parsed.data.newPassword);
+  if (!user) {
+    res.status(404).json({ error: { message: 'No account found', type: 'not_found' } });
+    return;
+  }
+  clearResetCode();
+  // Sign the operator straight in: the code already proved they control the
+  // install, and sending them back to a login form that needs an email they
+  // may not remember left them locked out after a successful reset (#1477).
+  const token = await createSession(user.userId);
+  res.json({ success: true, token, email: user.email });
 });

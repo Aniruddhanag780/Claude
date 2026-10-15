@@ -152,21 +152,24 @@
     "compressionRunPreview": "Uruchom podgląd",
     "updatesTitle": "Aktualizacje",
     "checkForUpdates": "Sprawdź aktualizacje",
-    "lastChecked": "Ostatnio sprawdzane: {when}",
-    "currentVersion": "Bieżąca kompilacja:",
     "updateAvailable": "Dostępna aktualizacja",
-    "changelog": "Co się zmieniło",
     "upToDate": "Aktualne",
     "buildAhead": "Ta kompilacja wyprzedza oficjalną gałąź main.",
     "buildDiverged": "Ta kompilacja odbiega od oficjalnej gałęzi main.",
     "buildUnknown": "Tej niestandardowej kompilacji nie można porównać z oficjalną gałęzią main.",
     "notGitInstall": "Ta instalacja nie zawiera informacji o commicie.",
     "checkFailed": "Nie udało się sprawdzić dostępności aktualizacji.",
-    "contactsGithub": "Sprawdzanie jest uruchamiane ręcznie i nawiązuje połączenie z GitHubem.",
     "autoUpdateCheck": "Automatyczne sprawdzanie aktualizacji",
-    "autoUpdateCheckHelp": "Raz dziennie sprawdza w serwisie GitHub, czy jest nowe wydanie, i wyświetla przypomnienie. Domyślnie wyłączone.",
-    "openReleases": "Otwórz wydania w GitHubie",
-    "restartAfterUpdate": "Uruchom ponownie FreeLLMAPI po zakończeniu kompilacji."
+    "restartAfterUpdate": "Uruchom ponownie FreeLLMAPI po zakończeniu kompilacji.",
+    "downloadUpdate": "Pobierz aktualizację",
+    "downloadingUpdate": "Pobieranie… {percent}%",
+    "restartToUpdate": "Uruchom ponownie, aby zaktualizować",
+    "updateReadyHint": "Pobrano. FreeLLMAPI tworzy kopię zapasową danych, uruchamia się ponownie i otwiera nową wersję.",
+    "updateInstallFailed": "Nie udało się zainstalować aktualizacji.",
+    "updateNow": "Aktualizuj teraz",
+    "updatingContainer": "Pobieranie nowego obrazu i ponowne uruchamianie. Strona odświeży się, gdy FreeLLMAPI wróci.",
+    "updateNowFailed": "Aktualizator nie przyjął żądania. Sprawdź, czy kontener watchtower działa.",
+    "updateNowTimeout": "FreeLLMAPI nie uruchomił się ponownie po 5 minutach. Sprawdź logi kontenera watchtower."
   },
   "models": {
     "title": "Modele",
@@ -224,6 +227,7 @@
     "settingsHint": "Lokalne zmiany w modelach katalogu są zachowywane podczas synchronizacji katalogów. Usunięte modele katalogowe pozostają usunięte, dopóki nie dodasz ich ponownie za pomocą konfiguracji.",
     "catalogModel": "katalog",
     "customModel": "niestandardowe",
+    "discoveredModel": "wykryty",
     "localOverride": "lokalne obejście",
     "displayName": "Nazwa wyświetlana",
     "sizeLabel": "Poziom możliwości",
@@ -340,7 +344,10 @@
     "weightSpeed": "Prędkość",
     "weightIntelligence": "Inteligencja",
     "weightRequired": "Przynajmniej jedna waga musi być powyżej zera.",
-    "scoreColumn": "Wynik"
+    "scoreColumn": "Wynik",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "Ciśnienie routera",
@@ -497,11 +504,11 @@
     "platform": "Platforma",
     "hideAdded": "Ukryj dodanych dostawców",
     "apiToken": "Token API",
-    "noKeyNeededPlaceholder": "Nie jest potrzebny klucz API",
+    "keyOptionalPlaceholder": "Opcjonalnie",
     "bearerTokenPlaceholder": "Token okaziciela",
     "pasteKeyPlaceholder": "wklej tutaj klucz",
     "pasteSeveral": "Wklej kilka",
-    "keylessHint": "Nie jest potrzebny klucz API: bezpłatna warstwa tego dostawcy jest anonimowa (ograniczona stawka na adres IP).",
+    "keyOptionalHint": "Opcjonalnie: zostaw puste, aby korzystać z anonimowego darmowego poziomu (limit na IP), lub wklej własny klucz, aby używać swojego konta.",
     "enable": "Włącz",
     "noProviderKeys": "Nie ma jeszcze kluczy dostawcy. Dodaj jeden powyżej, aby rozpocząć wyznaczanie trasy.",
     "filterPlaceholder": "Filtruj dostawców lub klucze",
@@ -679,7 +686,22 @@
     "testFailed": "Test modelu nie powiódł się",
     "testThrottled": "Odczekaj {seconds}s przed ponownym testem tego modelu.",
     "noModelsForProvider": "Brak skonfigurowanych modeli dla tego dostawcy.",
-    "testModels": "Testuj modele"
+    "testModels": "Testuj modele",
+    "monthlyRequestCapLabel": "Miesięczny limit żądań",
+    "monthlyTokenCapLabel": "Miesięczny limit tokenów",
+    "capUnlimitedPlaceholder": "Bez limitu",
+    "capEditHint": "Limity resetują się 1. dnia miesiąca o 00:00 UTC. Pozostaw puste, aby bez limitu.",
+    "monthlyUsageLine": "{requests} żądań, {tokens} tokenów w tym miesiącu",
+    "quotaBalanceHint": "Pozostało {remaining} z {limit} {metric}",
+    "quotaBalanceLeft": "Pozostało {remaining}"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Przed aktualizacją"
   },
   "status": {
     "healthy": "zdrowy",
@@ -864,6 +887,7 @@
     "maxTokens": "Maks. tokenów",
     "errorTitle": "Żądanie nie powiodło się",
     "attach": "Załącz pliki",
+    "addMenu": "Add files and tools",
     "attachTooMany": "W jednej wiadomości możesz załączyć maksymalnie {count} plików.",
     "attachTooLarge": "Plik {name} jest za duży. Limit to {max}.",
     "attachUnsupported": "{name} nie jest obsługiwany. Załącz obrazy (PNG, JPEG, WebP, GIF) lub pliki tekstowe (TXT, MD, CSV, JSON, LOG).",
@@ -1135,17 +1159,16 @@
       "generic": "Każde inne narzędzie mówiące API OpenAI, ustawiane ręcznie adresem bazowym i kluczem.",
       "atomcode": "Agent terminalowy AtomGit, napisany w Rust, przyjmujący dowolny endpoint zgodny z OpenAI.",
       "openclaw": "Zawsze dostępny osobisty asystent, który z Twojego własnego komputera odpowiada w aplikacjach WhatsApp, Telegram, Discord i innych.",
-      "hermes": "Samodoskonalący się agent Nous Research z trwałą pamięcią i umiejętnościami, w terminalu lub w aplikacjach czatowych."
+      "hermes": "Samodoskonalący się agent Nous Research z trwałą pamięcią i umiejętnościami, w terminalu lub w aplikacjach czatowych.",
+      "pi": "Minimalistyczny agent terminalowy, który kształtujesz własnymi rozszerzeniami, umiejętnościami i szablonami promptów.",
+      "reasonix": "Terminalowy agent do programowania stworzony dla DeepSeek, oparty na cache'owaniu prefiksów, by długie sesje pozostawały tanie."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "Zainstalowano nowszą wersję FreeLLMAPI.",
+    "reload": "Odśwież"
   },
   "freeTier": {
     "poolsToggle": "Pule darmowego poziomu ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "Zmienić nazwę łańcucha \"{oldName}\" na \"{name}\"? Klienci wywołujący auto:{oldName} muszą przejść na auto:{name}.",
     "renamePlaceholder": "Nowa nazwa łańcucha",
     "renameFailed": "Nie udało się zmienić nazwy łańcucha."
+  },
+  "updates": {
+    "versionAvailable": "Dostępna jest wersja {version}",
+    "versionReady": "Wersja {version} jest gotowa do instalacji",
+    "releaseNotes": "Informacje o wydaniu",
+    "tryAgain": "Spróbuj ponownie",
+    "offline": "Sprawdź połączenie z internetem i spróbuj ponownie."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

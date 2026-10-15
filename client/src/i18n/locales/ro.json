@@ -152,21 +152,24 @@
     "compressionRunPreview": "Rulează previzualizarea",
     "updatesTitle": "Actualizări",
     "checkForUpdates": "Verifică actualizările",
-    "lastChecked": "Ultima verificare: {when}",
-    "currentVersion": "Versiunea curentă:",
     "updateAvailable": "Actualizare disponibilă",
-    "changelog": "Ce s-a schimbat",
     "upToDate": "La zi",
     "buildAhead": "Această versiune este înaintea ramurii main oficiale.",
     "buildDiverged": "Această versiune a deviat de la ramura main oficială.",
     "buildUnknown": "Această versiune personalizată nu poate fi comparată cu ramura main oficială.",
     "notGitInstall": "Această instalare nu include informații despre commit.",
     "checkFailed": "Nu s-au putut verifica actualizările.",
-    "contactsGithub": "Verificările sunt inițiate manual și contactează GitHub.",
     "autoUpdateCheck": "Verificare automată a actualizărilor",
-    "autoUpdateCheckHelp": "Verifică GitHub o dată pe zi dacă există o versiune nouă și afișează o notificare. Dezactivat implicit.",
-    "openReleases": "Deschide versiunile GitHub",
-    "restartAfterUpdate": "Repornește FreeLLMAPI după finalizarea compilării."
+    "restartAfterUpdate": "Repornește FreeLLMAPI după finalizarea compilării.",
+    "downloadUpdate": "Descarcă actualizarea",
+    "downloadingUpdate": "Se descarcă… {percent}%",
+    "restartToUpdate": "Repornește pentru actualizare",
+    "updateReadyHint": "Descărcat. FreeLLMAPI face o copie de rezervă a datelor, repornește și deschide noua versiune.",
+    "updateInstallFailed": "Actualizarea nu a putut fi instalată.",
+    "updateNow": "Actualizează acum",
+    "updatingContainer": "Se descarcă noua imagine și se repornește. Pagina se reîncarcă când FreeLLMAPI revine.",
+    "updateNowFailed": "Actualizatorul nu a acceptat cererea. Verifică dacă containerul watchtower rulează.",
+    "updateNowTimeout": "FreeLLMAPI nu a repornit după 5 minute. Verifică jurnalele containerului watchtower."
   },
   "models": {
     "title": "Modele",
@@ -224,6 +227,7 @@
     "settingsHint": "Editările locale la modelele de catalog sunt păstrate între sincronizările de catalog. Modelele șterse din catalog rămân șterse până când le adaugi din nou prin configurare.",
     "catalogModel": "Catalog",
     "customModel": "Personalizat",
+    "discoveredModel": "descoperit",
     "localOverride": "Suprascriere locală",
     "displayName": "Nume afișat",
     "sizeLabel": "Nivel de capacitate",
@@ -340,7 +344,10 @@
     "weightSpeed": "Viteză",
     "weightIntelligence": "Inteligență",
     "weightRequired": "Cel puțin o greutate trebuie să fie peste zero.",
-    "scoreColumn": "Scorul"
+    "scoreColumn": "Scorul",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "Presiunea routerului",
@@ -497,11 +504,11 @@
     "platform": "Peronul",
     "hideAdded": "Ascunde furnizorii adăugați",
     "apiToken": "API token",
-    "noKeyNeededPlaceholder": "Nu e nevoie de API cheie",
+    "keyOptionalPlaceholder": "Opțional",
     "bearerTokenPlaceholder": "Jeton de purtător",
     "pasteKeyPlaceholder": "Lipește cheia aici",
     "pasteSeveral": "Lipiți mai multe",
-    "keylessHint": "Nu este nevoie de API cheie: nivelul gratuit al acestui furnizor este anonim (cu tarif limitat pe IP).",
+    "keyOptionalHint": "Opțional: lăsați gol pentru nivelul gratuit anonim (limitat per IP) sau lipiți propria cheie pentru a folosi contul dvs.",
     "enable": "Activează",
     "noProviderKeys": "Încă nu am chei de furnizor. Adaugă unul mai sus pentru a începe rutarea.",
     "filterPlaceholder": "Furnizori sau chei de filtrare",
@@ -679,7 +686,22 @@
     "testFailed": "Testul modelului a eșuat",
     "testThrottled": "Așteptați {seconds}s înainte de a retesta acest model.",
     "noModelsForProvider": "Niciun model configurat pentru acest furnizor.",
-    "testModels": "Testează modelele"
+    "testModels": "Testează modelele",
+    "monthlyRequestCapLabel": "Limită lunară de cereri",
+    "monthlyTokenCapLabel": "Limită lunară de tokeni",
+    "capUnlimitedPlaceholder": "Nelimitat",
+    "capEditHint": "Limitele se resetează în ziua 1 la 00:00 UTC. Lasă gol pentru nelimitat.",
+    "monthlyUsageLine": "{requests} cereri, {tokens} tokeni luna aceasta",
+    "quotaBalanceHint": "Au rămas {remaining} din {limit} {metric}",
+    "quotaBalanceLeft": "Au rămas {remaining}"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Înainte de actualizare"
   },
   "status": {
     "healthy": "Sănătos",
@@ -864,6 +887,7 @@
     "maxTokens": "Jetoane maxime",
     "errorTitle": "Cerere eșuată",
     "attach": "Atașează fișiere",
+    "addMenu": "Add files and tools",
     "attachTooMany": "Poți atașa cel mult {count} fișiere per mesaj.",
     "attachTooLarge": "{name} este prea mare. Limita este {max}.",
     "attachUnsupported": "{name} nu este acceptat. Atașează imagini (PNG, JPEG, WebP, GIF) sau fișiere text (TXT, MD, CSV, JSON, LOG).",
@@ -1135,17 +1159,16 @@
       "generic": "Anything else that speaks the OpenAI API, set up by hand from a base URL and key.",
       "atomcode": "AtomGit's terminal agent, written in Rust, that takes any OpenAI-compatible endpoint.",
       "openclaw": "Un asistent personal mereu activ care răspunde pe WhatsApp, Telegram, Discord și altele, de pe propria ta mașină.",
-      "hermes": "Agentul auto-perfecționabil de la Nous Research, cu memorie persistentă și abilități, în terminal sau în aplicațiile de chat."
+      "hermes": "Agentul auto-perfecționabil de la Nous Research, cu memorie persistentă și abilități, în terminal sau în aplicațiile de chat.",
+      "pi": "Un agent de terminal minimalist pe care îl modelezi cu propriile extensii, abilități și șabloane de prompturi.",
+      "reasonix": "Un agent de programare pentru terminal, nativ DeepSeek, construit în jurul cache-ului de prefix, ca sesiunile lungi să rămână ieftine."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "Este instalată o versiune mai nouă de FreeLLMAPI.",
+    "reload": "Reîncarcă"
   },
   "freeTier": {
     "poolsToggle": "Free-tier pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "Redenumiți lanțul \"{oldName}\" în \"{name}\"? Clienții care apelau auto:{oldName} trebuie să treacă la auto:{name}.",
     "renamePlaceholder": "Numele nou al lanțului",
     "renameFailed": "Nu s-a putut redenumi lanțul."
+  },
+  "updates": {
+    "versionAvailable": "Versiunea {version} este disponibilă",
+    "versionReady": "Versiunea {version} este gata de instalare",
+    "releaseNotes": "Note de lansare",
+    "tryAgain": "Încearcă din nou",
+    "offline": "Verifică conexiunea la internet și încearcă din nou."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

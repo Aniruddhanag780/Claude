@@ -564,6 +564,12 @@ const DEFAULT_PROVIDER_DAILY_REQUEST_CAPS: Record<string, number> = {
   // models share it). 1800 leaves margin for validation probes and for drift
   // between our ledger and the provider's own daily boundary (#581).
   modelscope: 1800,
+  // Requesty's free tier is 200 requests/day per account, shared by every free
+  // model (requesty.ai/free-models, no card). The catalog rows each carry
+  // rpd 200, so without this gate the router could spend 200 per model. 180
+  // leaves the same margin as ModelScope for cooldown probes and drift from
+  // Requesty's own daily reset.
+  requesty: 180,
 };
 
 const DEFAULT_PROVIDER_DAILY_TOKEN_CAPS: Record<string, number> = {
@@ -1511,4 +1517,60 @@ export function learnLimitFromError(modelDbId: number, err: { message?: string }
     ).run(parsed.limit, modelDbId, parsed.limit),
   );
   return result && result.changes > 0 ? parsed : null;
+}
+
+// ── Learning real context windows from context-length rejections (#1479) ──
+// The catalog's context_window is the model's advertised window, but a relay
+// can route to an endpoint with a smaller one. Observed live: OpenRouter's
+// nvidia/nemotron-3-super-120b-a12b:free passed the pre-dispatch size gate and
+// then answered "This endpoint's maximum context length is 262144 tokens".
+// Without learning that ceiling, every later oversized request dispatches to
+// the same endpoint and fails the same way.
+//
+// Each pattern is anchored on a context-window phrase from a real provider
+// body, so a token count elsewhere in the message (the requested size, an
+// output budget) is never read as the window.
+const CONTEXT_WINDOW_PATTERNS: RegExp[] = [
+  // OpenAI / OpenRouter / vLLM / DeepSeek: "maximum context length is 262144 tokens"
+  /maximum context length (?:is|of)\s+([\d,]+)/i,
+  // Mistral: "too large for model with 131072 maximum context length"
+  /([\d,]+)\s+maximum context length/i,
+  // Anthropic: "prompt is too long: 210000 tokens > 200000 maximum"
+  /prompt is too long:\s*[\d,]+\s*tokens\s*>\s*([\d,]+)\s*maximum/i,
+  // Google: "exceeds the maximum number of tokens allowed (1048576)"
+  /exceeds the maximum number of tokens allowed\s*\(([\d,]+)\)/i,
+];
+// A window below this is almost certainly a misread, and a wrong low value
+// would size the model out of nearly every request until the next catalog sync.
+export const MIN_LEARNED_CONTEXT_WINDOW = 1024;
+
+/** The context window a provider names when it rejects a prompt as too long,
+ *  or null when the message names none. */
+export function parseProviderContextWindow(message: string | undefined | null): number | null {
+  if (!message) return null;
+  for (const re of CONTEXT_WINDOW_PATTERNS) {
+    const m = message.match(re);
+    if (!m) continue;
+    const window = Number(m[1]!.replace(/,/g, ''));
+    if (Number.isFinite(window) && window >= MIN_LEARNED_CONTEXT_WINDOW) return window;
+  }
+  return null;
+}
+
+/**
+ * Persist a provider-reported context window onto the model row, with the same
+ * only-more-conservative rule as learnLimitFromError: fill an unknown window
+ * or lower one that was too high, never raise it. The router's context gates
+ * then size the model out of prompts it cannot hold before they dispatch.
+ * Returns the learned window when the row changed, else null.
+ */
+export function learnContextWindowFromError(modelDbId: number, err: { message?: string }): number | null {
+  const window = parseProviderContextWindow(err?.message);
+  if (window == null) return null;
+  const result = withDb(db =>
+    db.prepare(
+      'UPDATE models SET context_window = ? WHERE id = ? AND (context_window IS NULL OR context_window > ?)',
+    ).run(window, modelDbId, window),
+  );
+  return result && result.changes > 0 ? window : null;
 }

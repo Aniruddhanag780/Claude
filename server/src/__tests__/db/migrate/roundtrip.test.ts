@@ -8,6 +8,7 @@ import {
   FIX_SETTINGS_UPDATED_AT_FILENAME,
   ADD_MISSING_MODEL_COLUMNS_FILENAME,
   COMPAT_TABLES_FILENAME,
+  SEARCH_AND_ENDPOINT_GROUP_FILENAME,
   DEFAULT_MIGRATIONS,
 } from '../../../db/migrate/defaults.js';
 
@@ -28,6 +29,7 @@ describe('PostgreSQL migration runner', () => {
       FIX_SETTINGS_UPDATED_AT_FILENAME,
       ADD_MISSING_MODEL_COLUMNS_FILENAME,
       COMPAT_TABLES_FILENAME,
+      SEARCH_AND_ENDPOINT_GROUP_FILENAME,
     ]);
 
     // Verify providers seeded

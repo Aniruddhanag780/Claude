@@ -152,21 +152,24 @@
     "compressionRunPreview": "Önbaxışı işə sal",
     "updatesTitle": "Yeniləmələr",
     "checkForUpdates": "Yeniləmələri yoxlayın",
-    "lastChecked": "Son yoxlama: {when}",
-    "currentVersion": "Cari quruluş:",
     "updateAvailable": "Yeniləmə mövcuddur",
-    "changelog": "Nələr dəyişib",
     "upToDate": "Ən son versiyadır",
     "buildAhead": "Bu quruluş rəsmi main budağından irəlidədir.",
     "buildDiverged": "Bu quruluş rəsmi main budağından ayrılıb.",
     "buildUnknown": "Bu xüsusi quruluşu rəsmi main budağı ilə müqayisə etmək mümkün deyil.",
     "notGitInstall": "Bu quraşdırmada commit məlumatı yoxdur.",
     "checkFailed": "Yeniləmələri yoxlamaq mümkün olmadı.",
-    "contactsGithub": "Yoxlamalar əl ilə başladılır və GitHub-a qoşulur.",
     "autoUpdateCheck": "Avtomatik yeniləmə yoxlaması",
-    "autoUpdateCheckHelp": "Gündə bir dəfə yeni buraxılış üçün GitHub-u yoxlayır və xatırlatma göstərir. Standart olaraq sönülüdür.",
-    "openReleases": "GitHub buraxılışlarını aç",
-    "restartAfterUpdate": "Quruluş tamamlandıqdan sonra FreeLLMAPI-ni yenidən başladın."
+    "restartAfterUpdate": "Quruluş tamamlandıqdan sonra FreeLLMAPI-ni yenidən başladın.",
+    "downloadUpdate": "Yeniləməni endir",
+    "downloadingUpdate": "Endirilir… {percent}%",
+    "restartToUpdate": "Yeniləmək üçün yenidən başlat",
+    "updateReadyHint": "Endirildi. FreeLLMAPI məlumatlarınızın ehtiyat nüsxəsini çıxarır, yenidən başlayır və yeni versiyanı açır.",
+    "updateInstallFailed": "Yeniləmə quraşdırıla bilmədi.",
+    "updateNow": "İndi yenilə",
+    "updatingContainer": "Yeni şəkil endirilir və yenidən başladılır. FreeLLMAPI qayıdanda bu səhifə yenilənəcək.",
+    "updateNowFailed": "Yeniləyici sorğunu qəbul etmədi. watchtower konteynerinin işlədiyini yoxlayın.",
+    "updateNowTimeout": "FreeLLMAPI 5 dəqiqədən sonra da yenidən başlamayıb. watchtower konteynerinin jurnallarına baxın."
   },
   "models": {
     "title": "Modellər",
@@ -224,6 +227,7 @@
     "settingsHint": "Kataloq modellərinə lokal redaktələr kataloq sinxronizasiyaları arasında saxlanılır. Silinmiş kataloq modelləri yenidən konfiqurasiya vasitəsilə əlavə edənə qədər silinmiş qalır.",
     "catalogModel": "Kataloq",
     "customModel": "Adət",
+    "discoveredModel": "aşkarlanmış",
     "localOverride": "Lokal Üstünlüklər",
     "displayName": "Göstərilmə adı",
     "sizeLabel": "Qabiliyyət səviyyəsi",
@@ -340,7 +344,10 @@
     "weightSpeed": "Sürət",
     "weightIntelligence": "Kəşfiyyat",
     "weightRequired": "Ən azı bir ağırlıq sıfırdan yuxarı olmalıdır.",
-    "scoreColumn": "Musiqi"
+    "scoreColumn": "Musiqi",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "Router təzyiqi",
@@ -497,11 +504,11 @@
     "platform": "Platforma",
     "hideAdded": "Əlavə edilmiş provayderləri gizlət",
     "apiToken": "API tokeni",
-    "noKeyNeededPlaceholder": "Heç API açar lazım deyil",
+    "keyOptionalPlaceholder": "İstəyə bağlı",
     "bearerTokenPlaceholder": "Daşıyıcı token",
     "pasteKeyPlaceholder": "Burada açarı yapışdır",
     "pasteSeveral": "Bir neçəsini yapışdır",
-    "keylessHint": "API açar tələb olunmur: bu provayderin pulsuz səviyyəsi anonimdir (IP üçün tarif məhdudiyyəti ilə).",
+    "keyOptionalHint": "İstəyə bağlı: anonim pulsuz səviyyə üçün boş buraxın (hər IP üzrə məhdud) və ya hesabınızdan istifadə etmək üçün öz açarınızı yapışdırın.",
     "enable": "Aktiv et",
     "noProviderKeys": "Hələ provayder açarları yoxdur. Marşrutlaşdırmaya başlamaq üçün yuxarıda birini əlavə edin.",
     "filterPlaceholder": "Filtr təminatçıları və ya açarlar",
@@ -679,7 +686,22 @@
     "testFailed": "Model sınağı uğursuz oldu",
     "testThrottled": "Bu modeli yenidən sınaqdan keçirməzdən əvvəl {seconds} san gözləyin.",
     "noModelsForProvider": "Bu təminatçı üçün heç bir model tənzimlənməyib.",
-    "testModels": "Modelləri test et"
+    "testModels": "Modelləri test et",
+    "monthlyRequestCapLabel": "Aylıq sorğu limiti",
+    "monthlyTokenCapLabel": "Aylıq token limiti",
+    "capUnlimitedPlaceholder": "Limitsiz",
+    "capEditHint": "Limitlər hər ayın 1-i 00:00 UTC-də sıfırlanır. Limitsiz üçün boş buraxın.",
+    "monthlyUsageLine": "Bu ay {requests} sorğu, {tokens} token",
+    "quotaBalanceHint": "{limit} {metric} içindən {remaining} qalıb",
+    "quotaBalanceLeft": "{remaining} qalıb"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Yeniləmədən əvvəl"
   },
   "status": {
     "healthy": "sağlam",
@@ -864,6 +887,7 @@
     "maxTokens": "Maksimum token",
     "errorTitle": "Tələb uğursuz oldu",
     "attach": "Fayl əlavə et",
+    "addMenu": "Add files and tools",
     "attachTooMany": "Hər mesaja ən çox {count} fayl əlavə edə bilərsiniz.",
     "attachTooLarge": "{name} çox böyükdür. Maksimum həcm: {max}.",
     "attachUnsupported": "{name} dəstəklənmir. Şəkil (PNG, JPEG, WebP, GIF) və ya mətn faylları (TXT, MD, CSV, JSON, LOG) əlavə edin.",
@@ -1135,17 +1159,16 @@
       "generic": "Anything else that speaks the OpenAI API, set up by hand from a base URL and key.",
       "atomcode": "AtomGit's terminal agent, written in Rust, that takes any OpenAI-compatible endpoint.",
       "openclaw": "Öz maşınınızdan WhatsApp, Telegram, Discord və digərlərində cavab verən, həmişə aktiv şəxsi köməkçi.",
-      "hermes": "Nous Research-in özünü təkmilləşdirən agenti; daimi yaddaş və bacarıqlarla, terminalda və ya söhbət tətbiqlərində."
+      "hermes": "Nous Research-in özünü təkmilləşdirən agenti; daimi yaddaş və bacarıqlarla, terminalda və ya söhbət tətbiqlərində.",
+      "pi": "Öz genişləndirmələriniz, bacarıqlarınız və sorğu şablonlarınızla formalaşdırdığınız minimal terminal agenti.",
+      "reasonix": "DeepSeek üçün yaradılmış terminal kodlaşdırma agenti; uzun sessiyalar ucuz qalsın deyə prefiks keşi üzərində qurulub."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "FreeLLMAPI-nin daha yeni versiyası quraşdırılıb.",
+    "reload": "Yenidən yüklə"
   },
   "freeTier": {
     "poolsToggle": "Free-tier pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "\"{oldName}\" zəncirinin adı \"{name}\" ilə dəyişilsin? auto:{oldName} səsləyən müştərilər auto:{name} keçməlidir.",
     "renamePlaceholder": "Yeni zəncir adı",
     "renameFailed": "Zəncirin adını dəyişmək alınmadı."
+  },
+  "updates": {
+    "versionAvailable": "{version} versiyası mövcuddur",
+    "versionReady": "{version} versiyası quraşdırmağa hazırdır",
+    "releaseNotes": "Buraxılış qeydləri",
+    "tryAgain": "Yenidən cəhd et",
+    "offline": "İnternet bağlantınızı yoxlayın və yenidən cəhd edin."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

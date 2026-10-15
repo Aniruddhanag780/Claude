@@ -152,21 +152,24 @@
     "compressionRunPreview": "Запустити перегляд",
     "updatesTitle": "Оновлення",
     "checkForUpdates": "Перевірте наявність оновлень",
-    "lastChecked": "Востаннє перевірено: {when}",
-    "currentVersion": "Поточна збірка:",
     "updateAvailable": "Доступне оновлення",
-    "changelog": "Що змінилося",
     "upToDate": "Актуальна версія",
     "buildAhead": "Ця збірка випереджає офіційну гілку main.",
     "buildDiverged": "Ця збірка розійшлася з офіційною гілкою main.",
     "buildUnknown": "Цю користувацьку збірку неможливо порівняти з офіційною гілкою main.",
     "notGitInstall": "Ця інсталяція не містить інформації про commit.",
     "checkFailed": "Не вдалося перевірити наявність оновлень.",
-    "contactsGithub": "Перевірки запускаються вручну та звертаються до GitHub.",
     "autoUpdateCheck": "Автоматична перевірка оновлень",
-    "autoUpdateCheckHelp": "Раз на день перевіряє GitHub на новий випуск і показує нагадування. Типово вимкнено.",
-    "openReleases": "Відкрити релізи GitHub",
-    "restartAfterUpdate": "Перезапустіть FreeLLMAPI після завершення збірки."
+    "restartAfterUpdate": "Перезапустіть FreeLLMAPI після завершення збірки.",
+    "downloadUpdate": "Завантажити оновлення",
+    "downloadingUpdate": "Завантаження… {percent}%",
+    "restartToUpdate": "Перезапустити для оновлення",
+    "updateReadyHint": "Завантажено. FreeLLMAPI створює резервну копію даних, перезапускається й відкриває нову версію.",
+    "updateInstallFailed": "Не вдалося встановити оновлення.",
+    "updateNow": "Оновити зараз",
+    "updatingContainer": "Завантажується новий образ і виконується перезапуск. Сторінка перезавантажиться, коли FreeLLMAPI повернеться.",
+    "updateNowFailed": "Служба оновлення не прийняла запит. Перевірте, що контейнер watchtower запущено.",
+    "updateNowTimeout": "FreeLLMAPI не перезапустився за 5 хвилин. Перегляньте журнали контейнера watchtower."
   },
   "models": {
     "title": "Моделі",
@@ -224,6 +227,7 @@
     "settingsHint": "Локальні редагування моделей каталогу зберігаються під час синхронізації каталогу. Видалені моделі каталогу залишаються видаленими, доки ви знову не додасте їх за допомогою конфігурації.",
     "catalogModel": "каталог",
     "customModel": "звичай",
+    "discoveredModel": "виявлено",
     "localOverride": "локальне перевизначення",
     "displayName": "Відображуване ім'я",
     "sizeLabel": "Рівень можливостей",
@@ -340,7 +344,10 @@
     "weightSpeed": "швидкість",
     "weightIntelligence": "Інтелект",
     "weightRequired": "Принаймні одна вага повинна бути вище нуля.",
-    "scoreColumn": "Оцінка"
+    "scoreColumn": "Оцінка",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "Тиск фрезера",
@@ -497,11 +504,11 @@
     "platform": "Платформа",
     "hideAdded": "Сховати доданих провайдерів",
     "apiToken": "Токен API",
-    "noKeyNeededPlaceholder": "Ключ API не потрібен",
+    "keyOptionalPlaceholder": "Необов'язково",
     "bearerTokenPlaceholder": "Токен на пред'явника",
     "pasteKeyPlaceholder": "вставте ключ сюди",
     "pasteSeveral": "Вставити кілька",
-    "keylessHint": "Ключ API не потрібен: безкоштовний рівень цього постачальника є анонімним (швидкість обмежена для IP-адреси).",
+    "keyOptionalHint": "Необов'язково: залиште порожнім для анонімного безкоштовного рівня (обмеження за IP) або вставте власний ключ, щоб використовувати свій обліковий запис.",
     "enable": "Увімкнути",
     "noProviderKeys": "Ключів провайдера ще немає. Додайте один вище, щоб розпочати маршрутизацію.",
     "filterPlaceholder": "Фільтрувати постачальників або ключі",
@@ -679,7 +686,22 @@
     "testFailed": "Тест моделі не вдався",
     "testThrottled": "Зачекайте {seconds}с перед повторним тестуванням цієї моделі.",
     "noModelsForProvider": "Для цього постачальника немає налаштованих моделей.",
-    "testModels": "Перевірити моделі"
+    "testModels": "Перевірити моделі",
+    "monthlyRequestCapLabel": "Місячний ліміт запитів",
+    "monthlyTokenCapLabel": "Місячний ліміт токенів",
+    "capUnlimitedPlaceholder": "Без обмежень",
+    "capEditHint": "Ліміти скидаються 1-го числа о 00:00 UTC. Залиште порожнім для безліміту.",
+    "monthlyUsageLine": "{requests} запитів, {tokens} токенів цього місяця",
+    "quotaBalanceHint": "Залишилося {remaining} з {limit} {metric}",
+    "quotaBalanceLeft": "Залишилося {remaining}"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Перед оновленням"
   },
   "status": {
     "healthy": "здоровий",
@@ -864,6 +887,7 @@
     "maxTokens": "Макс. маркерів",
     "errorTitle": "Запит не виконано",
     "attach": "Прикріпити файли",
+    "addMenu": "Add files and tools",
     "attachTooMany": "До одного повідомлення можна прикріпити не більше {count} файлів.",
     "attachTooLarge": "Файл {name} завеликий. Обмеження — {max}.",
     "attachUnsupported": "{name} не підтримується. Прикріпіть зображення (PNG, JPEG, WebP, GIF) або текстові файли (TXT, MD, CSV, JSON, LOG).",
@@ -1135,17 +1159,16 @@
       "generic": "Anything else that speaks the OpenAI API, set up by hand from a base URL and key.",
       "atomcode": "AtomGit's terminal agent, written in Rust, that takes any OpenAI-compatible endpoint.",
       "openclaw": "Завжди доступний персональний асистент, який відповідає у WhatsApp, Telegram, Discord та інших месенджерах просто з вашого комп'ютера.",
-      "hermes": "Агент від Nous Research, що самовдосконалюється, з постійною пам'яттю та навичками — у терміналі або в чат-застосунках."
+      "hermes": "Агент від Nous Research, що самовдосконалюється, з постійною пам'яттю та навичками — у терміналі або в чат-застосунках.",
+      "pi": "Мінімалістичний термінальний агент, який ви налаштовуєте власними розширеннями, навичками та шаблонами промптів.",
+      "reasonix": "Термінальний агент для програмування, створений під DeepSeek і побудований навколо кешування префіксів, щоб довгі сесії залишалися дешевими."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "Встановлено новішу версію FreeLLMAPI.",
+    "reload": "Перезавантажити"
   },
   "freeTier": {
     "poolsToggle": "Free-tier pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "Перейменувати ланцюг \"{oldName}\" на \"{name}\"? Клієнти, що викликають auto:{oldName}, мають перейти на auto:{name}.",
     "renamePlaceholder": "Нова назва ланцюга",
     "renameFailed": "Не вдалося перейменувати ланцюг."
+  },
+  "updates": {
+    "versionAvailable": "Доступна версія {version}",
+    "versionReady": "Версія {version} готова до встановлення",
+    "releaseNotes": "Примітки до випуску",
+    "tryAgain": "Спробувати ще раз",
+    "offline": "Перевірте підключення до інтернету й спробуйте ще раз."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

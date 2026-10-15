@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { getPostgresPool } from '../db/postgres.js';
 import { analyticsAggregator } from '../services/analytics-aggregator.js';
 import { FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M } from '../db/model-pricing.js';
+import { searchAnalytics, type SearchAnalyticsRange } from '../services/search.js';
 
 export const analyticsRouter = Router();
 
@@ -22,6 +23,16 @@ function getCutoffDate(range: string): Date {
 }
 
 const round1 = (n: number): number => Math.round(n * 10) / 10;
+
+// Web searches (#1174) live in their own log (search_requests), so they never
+// show up in the chat totals above; the dashboard's search cards read this.
+const SEARCH_RANGES: readonly SearchAnalyticsRange[] = ['24h', '7d', '30d', '90d', 'all'];
+
+analyticsRouter.get('/search', (req: Request, res: Response) => {
+  const raw = typeof req.query.range === 'string' ? req.query.range : '7d';
+  const range = (SEARCH_RANGES as readonly string[]).includes(raw) ? raw as SearchAnalyticsRange : '7d';
+  res.json(searchAnalytics(range));
+});
 
 // 1. Overview / Summary statistics
 analyticsRouter.get('/summary', async (req: Request, res: Response) => {

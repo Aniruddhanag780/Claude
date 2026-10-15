@@ -152,21 +152,24 @@
     "compressionRunPreview": "รันตัวอย่าง",
     "updatesTitle": "การอัปเดต",
     "checkForUpdates": "ตรวจสอบการอัปเดต",
-    "lastChecked": "ตรวจสอบล่าสุด: {when}",
-    "currentVersion": "บิลด์ปัจจุบัน:",
     "updateAvailable": "มีการอัปเดต",
-    "changelog": "มีอะไรเปลี่ยนแปลง",
     "upToDate": "เป็นเวอร์ชันล่าสุด",
     "buildAhead": "บิลด์นี้ล้ำหน้า main อย่างเป็นทางการ",
     "buildDiverged": "บิลด์นี้แยกออกจาก main อย่างเป็นทางการ",
     "buildUnknown": "ไม่สามารถเปรียบเทียบบิลด์ที่ปรับแต่งนี้กับ main อย่างเป็นทางการได้",
     "notGitInstall": "การติดตั้งนี้ไม่มีข้อมูล commit",
     "checkFailed": "ไม่สามารถตรวจสอบการอัปเดตได้",
-    "contactsGithub": "การตรวจสอบเป็นแบบดำเนินการเองและมีการติดต่อ GitHub",
     "autoUpdateCheck": "ตรวจสอบการอัปเดตอัตโนมัติ",
-    "autoUpdateCheckHelp": "ตรวจสอบ GitHub วันละครั้งว่ามีเวอร์ชันใหม่หรือไม่ และแสดงการแจ้งเตือน ปิดไว้ตามค่าเริ่มต้น",
-    "openReleases": "เปิด GitHub Releases",
-    "restartAfterUpdate": "รีสตาร์ต FreeLLMAPI หลังจากบิลด์เสร็จสิ้น"
+    "restartAfterUpdate": "รีสตาร์ต FreeLLMAPI หลังจากบิลด์เสร็จสิ้น",
+    "downloadUpdate": "ดาวน์โหลดอัปเดต",
+    "downloadingUpdate": "กำลังดาวน์โหลด… {percent}%",
+    "restartToUpdate": "รีสตาร์ตเพื่ออัปเดต",
+    "updateReadyHint": "ดาวน์โหลดแล้ว FreeLLMAPI จะสำรองข้อมูลของคุณ รีสตาร์ต และเปิดเวอร์ชันใหม่",
+    "updateInstallFailed": "ไม่สามารถติดตั้งอัปเดตได้",
+    "updateNow": "อัปเดตตอนนี้",
+    "updatingContainer": "กำลังดึงอิมเมจใหม่และรีสตาร์ต หน้านี้จะโหลดใหม่เมื่อ FreeLLMAPI กลับมา",
+    "updateNowFailed": "ตัวอัปเดตไม่รับคำขอ ตรวจสอบว่าคอนเทนเนอร์ watchtower กำลังทำงาน",
+    "updateNowTimeout": "FreeLLMAPI ยังไม่รีสตาร์ตหลังผ่านไป 5 นาที ตรวจสอบบันทึกของคอนเทนเนอร์ watchtower"
   },
   "models": {
     "title": "โมเดล",
@@ -224,6 +227,7 @@
     "settingsHint": "การแก้ไขโมเดลแค็ตตาล็อกในเครื่องจะถูกเก็บไว้ระหว่างการซิงค์แค็ตตาล็อก โมเดลแคตตาล็อกที่ถูกลบจะถูกลบจนกว่าคุณจะเพิ่มอีกครั้งผ่านการกำหนดค่า",
     "catalogModel": "แคตตาล็อก",
     "customModel": "กำหนดเอง",
+    "discoveredModel": "ค้นพบ",
     "localOverride": "การแทนที่ในท้องถิ่น",
     "displayName": "ชื่อที่แสดง",
     "sizeLabel": "ระดับความสามารถ",
@@ -340,7 +344,10 @@
     "weightSpeed": "ความเร็ว",
     "weightIntelligence": "ความฉลาด",
     "weightRequired": "อย่างน้อยหนึ่งน้ำหนักต้องมากกว่าศูนย์",
-    "scoreColumn": "คะแนน"
+    "scoreColumn": "คะแนน",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "แรงดันเราเตอร์",
@@ -497,11 +504,11 @@
     "platform": "แพลตฟอร์ม",
     "hideAdded": "ซ่อนผู้ให้บริการที่เพิ่มแล้ว",
     "apiToken": "โทเค็น API",
-    "noKeyNeededPlaceholder": "ไม่จำเป็นต้องใช้คีย์ API",
+    "keyOptionalPlaceholder": "ไม่บังคับ",
     "bearerTokenPlaceholder": "โทเค็นผู้ถือ",
     "pasteKeyPlaceholder": "วางคีย์ที่นี่",
     "pasteSeveral": "วางหลายรายการ",
-    "keylessHint": "ไม่จำเป็นต้องมีคีย์ API: Free Tier ของผู้ให้บริการรายนี้ไม่เปิดเผยตัวตน (จำกัดอัตราต่อ IP)",
+    "keyOptionalHint": "ไม่บังคับ: เว้นว่างไว้เพื่อใช้ระดับฟรีแบบไม่ระบุตัวตน (จำกัดอัตราต่อ IP) หรือวางคีย์ของคุณเองเพื่อใช้บัญชีของคุณ",
     "enable": "เปิดใช้งาน",
     "noProviderKeys": "ยังไม่มีคีย์ผู้ให้บริการ เพิ่มหนึ่งรายการด้านบนเพื่อเริ่มการกำหนดเส้นทาง",
     "filterPlaceholder": "กรองผู้ให้บริการหรือคีย์",
@@ -679,7 +686,22 @@
     "testFailed": "การทดสอบโมเดลล้มเหลว",
     "testThrottled": "โปรดรอ {seconds} วินาทีก่อนที่จะทดสอบโมเดลนี้อีกครั้ง",
     "noModelsForProvider": "ไม่มีการกำหนดค่าโมเดลสำหรับผู้ให้บริการนี้",
-    "testModels": "ทดสอบโมเดล"
+    "testModels": "ทดสอบโมเดล",
+    "monthlyRequestCapLabel": "ขีดจำกัดคำขอรายเดือน",
+    "monthlyTokenCapLabel": "ขีดจำกัดโทเคนรายเดือน",
+    "capUnlimitedPlaceholder": "ไม่จำกัด",
+    "capEditHint": "ขีดจำกัดจะรีเซ็ตวันที่ 1 เวลา 00:00 UTC เว้นว่างไว้หากไม่จำกัด",
+    "monthlyUsageLine": "เดือนนี้ {requests} คำขอ {tokens} โทเคน",
+    "quotaBalanceHint": "เหลือ {remaining} จาก {limit} {metric}",
+    "quotaBalanceLeft": "เหลือ {remaining}"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "ก่อนอัปเดต"
   },
   "status": {
     "healthy": "มีสุขภาพดี",
@@ -864,6 +887,7 @@
     "maxTokens": "โทเค็นสูงสุด",
     "errorTitle": "คำขอล้มเหลว",
     "attach": "แนบไฟล์",
+    "addMenu": "Add files and tools",
     "attachTooMany": "คุณแนบไฟล์ได้สูงสุด {count} ไฟล์ต่อหนึ่งข้อความ",
     "attachTooLarge": "{name} มีขนาดใหญ่เกินไป ขีดจำกัดคือ {max}",
     "attachUnsupported": "{name} ไม่รองรับ กรุณาแนบรูปภาพ (PNG, JPEG, WebP, GIF) หรือไฟล์ข้อความ (TXT, MD, CSV, JSON, LOG)",
@@ -1135,17 +1159,16 @@
       "generic": "Anything else that speaks the OpenAI API, set up by hand from a base URL and key.",
       "atomcode": "AtomGit's terminal agent, written in Rust, that takes any OpenAI-compatible endpoint.",
       "openclaw": "ผู้ช่วยส่วนตัวที่พร้อมตลอดเวลา ตอบกลับบน WhatsApp, Telegram, Discord และอื่น ๆ จากเครื่องของคุณเอง",
-      "hermes": "เอเจนต์ที่พัฒนาตัวเองได้ของ Nous Research พร้อมหน่วยความจำถาวรและทักษะ ใช้ได้ทั้งในเทอร์มินัลและบนแอปแชต"
+      "hermes": "เอเจนต์ที่พัฒนาตัวเองได้ของ Nous Research พร้อมหน่วยความจำถาวรและทักษะ ใช้ได้ทั้งในเทอร์มินัลและบนแอปแชต",
+      "pi": "เอเจนต์เทอร์มินัลแบบมินิมอลที่คุณปรับแต่งได้ด้วยส่วนขยาย ทักษะ และเทมเพลตพรอมต์ของคุณเอง",
+      "reasonix": "เอเจนต์เขียนโค้ดบนเทอร์มินัลที่สร้างมาเพื่อ DeepSeek โดยออกแบบรอบ prefix caching ให้เซสชันยาว ๆ ยังคงประหยัด"
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "ติดตั้ง FreeLLMAPI เวอร์ชันใหม่กว่าแล้ว",
+    "reload": "โหลดใหม่"
   },
   "freeTier": {
     "poolsToggle": "Free-tier pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "เปลี่ยนชื่อเชน \"{oldName}\" เป็น \"{name}\"? ไคลเอนต์ที่เรียก auto:{oldName} ต้องเปลี่ยนไปใช้ auto:{name} แทน",
     "renamePlaceholder": "ชื่อเชนใหม่",
     "renameFailed": "ไม่สามารถเปลี่ยนชื่อเชนได้"
+  },
+  "updates": {
+    "versionAvailable": "มีเวอร์ชัน {version} แล้ว",
+    "versionReady": "เวอร์ชัน {version} พร้อมติดตั้งแล้ว",
+    "releaseNotes": "บันทึกประจำรุ่น",
+    "tryAgain": "ลองอีกครั้ง",
+    "offline": "ตรวจสอบการเชื่อมต่ออินเทอร์เน็ตแล้วลองอีกครั้ง"
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

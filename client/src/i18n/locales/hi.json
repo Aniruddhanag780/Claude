@@ -152,21 +152,24 @@
     "compressionRunPreview": "पूर्वावलोकन चलाएँ",
     "updatesTitle": "अपडेट",
     "checkForUpdates": "अपडेट के लिए जांचें",
-    "lastChecked": "अंतिम बार जाँच की गई: {when}",
-    "currentVersion": "वर्तमान बिल्ड:",
     "updateAvailable": "अपडेट उपलब्ध है",
-    "changelog": "क्या बदला है",
     "upToDate": "नवीनतम संस्करण",
     "buildAhead": "यह बिल्ड आधिकारिक main शाखा से आगे है।",
     "buildDiverged": "यह बिल्ड आधिकारिक main शाखा से अलग हो गया है।",
     "buildUnknown": "इस कस्टम बिल्ड की तुलना आधिकारिक main शाखा से नहीं की जा सकती।",
     "notGitInstall": "इस इंस्टॉलेशन में कमिट की जानकारी शामिल नहीं है।",
     "checkFailed": "अपडेट की जाँच नहीं की जा सकी।",
-    "contactsGithub": "जाँच मैन्युअल रूप से होती है और GitHub से संपर्क करती है।",
     "autoUpdateCheck": "स्वचालित अपडेट जाँच",
-    "autoUpdateCheckHelp": "दिन में एक बार नई रिलीज़ के लिए GitHub की जाँच करता है और अनुस्मारक दिखाता है। डिफ़ॉल्ट रूप से बंद।",
-    "openReleases": "GitHub रिलीज़ खोलें",
-    "restartAfterUpdate": "बिल्ड पूरा होने के बाद FreeLLMAPI को पुनः आरंभ करें।"
+    "restartAfterUpdate": "बिल्ड पूरा होने के बाद FreeLLMAPI को पुनः आरंभ करें।",
+    "downloadUpdate": "अपडेट डाउनलोड करें",
+    "downloadingUpdate": "डाउनलोड हो रहा है… {percent}%",
+    "restartToUpdate": "अपडेट के लिए रीस्टार्ट करें",
+    "updateReadyHint": "डाउनलोड हो गया। FreeLLMAPI आपके डेटा का बैकअप लेता है, रीस्टार्ट होता है और नया संस्करण खोलता है।",
+    "updateInstallFailed": "अपडेट इंस्टॉल नहीं हो सका।",
+    "updateNow": "अभी अपडेट करें",
+    "updatingContainer": "नई इमेज खींची जा रही है और रीस्टार्ट हो रहा है। FreeLLMAPI वापस आने पर यह पेज रीलोड होगा।",
+    "updateNowFailed": "अपडेटर ने अनुरोध स्वीकार नहीं किया। जाँचें कि watchtower कंटेनर चल रहा है।",
+    "updateNowTimeout": "5 मिनट बाद भी FreeLLMAPI रीस्टार्ट नहीं हुआ। watchtower कंटेनर के लॉग देखें।"
   },
   "models": {
     "title": "मॉडल",
@@ -224,6 +227,7 @@
     "settingsHint": "कैटलॉग मॉडल में स्थानीय संपादन कैटलॉग सिंक में रखे जाते हैं। हटाए गए कैटलॉग मॉडल तब तक हटाए जाते हैं जब तक आप उन्हें कॉन्फ़िगरेशन के माध्यम से दोबारा नहीं जोड़ते।",
     "catalogModel": "कैटलॉग",
     "customModel": "कस्टम",
+    "discoveredModel": "खोजा गया",
     "localOverride": "स्थानीय ओवरराइड",
     "displayName": "प्रदर्शन नाम",
     "sizeLabel": "क्षमता स्तर",
@@ -340,7 +344,10 @@
     "weightSpeed": "गति",
     "weightIntelligence": "बुद्धि",
     "weightRequired": "कम से कम एक वज़न शून्य से ऊपर होना चाहिए.",
-    "scoreColumn": "स्कोर"
+    "scoreColumn": "स्कोर",
+    "minReliabilityFloor": "न्यूनतम विश्वसनीयता सीमा",
+    "minReliabilityFloorHint": "जब किसी मॉडल की देखी गई सफलता दर इस मान से नीचे गिर जाए, तो उसे रूटिंग से हटा देता है। 0.8 का अर्थ 80% है। अक्षम करने के लिए खाली छोड़ें — बहुत कम इतिहास वाले मॉडल हमेशा रखे जाते हैं ताकि नए मॉडल आज़माए जा सकें। पूरी श्रृंखला कभी खाली नहीं करता।",
+    "minReliabilityFloorOff": "अक्षम"
   },
   "penaltyInspector": {
     "title": "राउटर का दबाव",
@@ -497,11 +504,11 @@
     "platform": "मंच",
     "hideAdded": "जोड़े गए प्रदाता छिपाएँ",
     "apiToken": "API टोकन",
-    "noKeyNeededPlaceholder": "कोई API कुंजी की आवश्यकता नहीं है",
+    "keyOptionalPlaceholder": "वैकल्पिक",
     "bearerTokenPlaceholder": "वाहक टोकन",
     "pasteKeyPlaceholder": "यहाँ कुंजी चिपकाएँ",
     "pasteSeveral": "एक से अधिक पेस्ट करें",
-    "keylessHint": "कोई API कुंजी की आवश्यकता नहीं है: इस प्रदाता का निःशुल्क स्तर गुमनाम है (प्रति आईपी दर-सीमित)।",
+    "keyOptionalHint": "वैकल्पिक: अनाम मुफ़्त स्तर (प्रति IP दर-सीमित) के लिए खाली छोड़ें, या अपने खाते का उपयोग करने के लिए अपनी कुंजी चिपकाएँ।",
     "enable": "सक्षम करें",
     "noProviderKeys": "अभी तक कोई प्रदाता कुंजी नहीं है. रूटिंग शुरू करने के लिए ऊपर एक जोड़ें।",
     "filterPlaceholder": "फ़िल्टर प्रदाता या कुंजियाँ",
@@ -679,7 +686,22 @@
     "testFailed": "मॉडल परीक्षण विफल रहा",
     "testThrottled": "कृपया इस मॉडल का पुनः परीक्षण करने से पहले {seconds}s प्रतीक्षा करें।",
     "noModelsForProvider": "इस प्रदाता के लिए कोई मॉडल कॉन्फ़िगर नहीं किया गया है।",
-    "testModels": "मॉडल परखें"
+    "testModels": "मॉडल परखें",
+    "monthlyRequestCapLabel": "मासिक अनुरोध सीमा",
+    "monthlyTokenCapLabel": "मासिक टोकन सीमा",
+    "capUnlimitedPlaceholder": "असीमित",
+    "capEditHint": "सीमाएँ हर महीने की 1 तारीख़ को 00:00 UTC पर रीसेट होती हैं। असीमित के लिए खाली छोड़ें।",
+    "monthlyUsageLine": "इस माह {requests} अनुरोध, {tokens} टोकन",
+    "quotaBalanceHint": "{limit} {metric} में से {remaining} शेष",
+    "quotaBalanceLeft": "{remaining} शेष"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "अपडेट से पहले"
   },
   "status": {
     "healthy": "स्वस्थ",
@@ -864,6 +887,7 @@
     "maxTokens": "अधिकतम टोकन",
     "errorTitle": "अनुरोध विफल",
     "attach": "फ़ाइलें संलग्न करें",
+    "addMenu": "Add files and tools",
     "attachTooMany": "आप प्रति संदेश अधिकतम {count} फ़ाइलें संलग्न कर सकते हैं।",
     "attachTooLarge": "{name} बहुत बड़ी है। सीमा {max} है।",
     "attachUnsupported": "{name} समर्थित नहीं है। छवियाँ (PNG, JPEG, WebP, GIF) या टेक्स्ट फ़ाइलें (TXT, MD, CSV, JSON, LOG) संलग्न करें।",
@@ -1135,17 +1159,16 @@
       "generic": "OpenAI API बोलने वाला कोई और टूल, बेस URL और कुंजी से हाथ से सेट करें।",
       "atomcode": "AtomGit का टर्मिनल एजेंट, Rust में लिखा, जो हर OpenAI-संगत एंडपॉइंट लेता है।",
       "openclaw": "एक हमेशा चालू रहने वाला निजी सहायक जो आपकी अपनी मशीन से WhatsApp, Telegram, Discord और अन्य पर जवाब देता है।",
-      "hermes": "Nous Research का खुद को बेहतर बनाने वाला एजेंट, स्थायी मेमोरी और स्किल्स के साथ, टर्मिनल में या चैट ऐप्स पर।"
+      "hermes": "Nous Research का खुद को बेहतर बनाने वाला एजेंट, स्थायी मेमोरी और स्किल्स के साथ, टर्मिनल में या चैट ऐप्स पर।",
+      "pi": "एक न्यूनतम टर्मिनल एजेंट, जिसे आप अपने एक्सटेंशन, स्किल्स और प्रॉम्प्ट टेम्पलेट से ढालते हैं।",
+      "reasonix": "DeepSeek के लिए बना टर्मिनल कोडिंग एजेंट, प्रीफ़िक्स कैशिंग के इर्द-गिर्द बनाया गया ताकि लंबे सेशन भी सस्ते रहें।"
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "FreeLLMAPI का नया संस्करण इंस्टॉल है।",
+    "reload": "रीलोड करें"
   },
   "freeTier": {
     "poolsToggle": "फ्री टियर पूल ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "चेन \"{oldName}\" का नाम \"{name}\" करें? auto:{oldName} कॉल करने वाले क्लाइंट्स को auto:{name} पर जाना होगा।",
     "renamePlaceholder": "नया चेन नाम",
     "renameFailed": "चेन का नाम नहीं बदला जा सका।"
+  },
+  "updates": {
+    "versionAvailable": "संस्करण {version} उपलब्ध है",
+    "versionReady": "संस्करण {version} इंस्टॉल के लिए तैयार है",
+    "releaseNotes": "रिलीज़ नोट्स",
+    "tryAgain": "फिर से कोशिश करें",
+    "offline": "अपना इंटरनेट कनेक्शन जाँचें और फिर से कोशिश करें।"
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

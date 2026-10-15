@@ -152,21 +152,24 @@
     "compressionRunPreview": "Suorita esikatselu",
     "updatesTitle": "Päivitykset",
     "checkForUpdates": "Tarkista päivitykset",
-    "lastChecked": "Viimeksi tarkistettu: {when}",
-    "currentVersion": "Nykyinen koontiversio:",
     "updateAvailable": "Päivitys saatavilla",
-    "changelog": "Mikä muuttui",
     "upToDate": "Ajan tasalla",
     "buildAhead": "Tämä koontiversio on virallista main-haaraa edellä.",
     "buildDiverged": "Tämä koontiversio on erkaantunut virallisesta main-haarasta.",
     "buildUnknown": "Tätä mukautettua koontiversiota ei voi verrata viralliseen main-haaraan.",
     "notGitInstall": "Tämä asennus ei sisällä commit-tietoja.",
     "checkFailed": "Päivitysten tarkistaminen epäonnistui.",
-    "contactsGithub": "Tarkistukset tehdään manuaalisesti ja ne ottavat yhteyden GitHubiin.",
     "autoUpdateCheck": "Automaattinen päivitystarkistus",
-    "autoUpdateCheckHelp": "Tarkistaa GitHubista kerran päivässä, onko uutta julkaisua, ja näyttää muistutuksen. Oletuksena pois päältä.",
-    "openReleases": "Avaa GitHub-julkaisut",
-    "restartAfterUpdate": "Käynnistä FreeLLMAPI uudelleen koonnin valmistuttua."
+    "restartAfterUpdate": "Käynnistä FreeLLMAPI uudelleen koonnin valmistuttua.",
+    "downloadUpdate": "Lataa päivitys",
+    "downloadingUpdate": "Ladataan… {percent} %",
+    "restartToUpdate": "Käynnistä uudelleen päivittääksesi",
+    "updateReadyHint": "Ladattu. FreeLLMAPI varmuuskopioi tietosi, käynnistyy uudelleen ja avaa uuden version.",
+    "updateInstallFailed": "Päivitystä ei voitu asentaa.",
+    "updateNow": "Päivitä nyt",
+    "updatingContainer": "Ladataan uutta imagea ja käynnistetään uudelleen. Sivu latautuu uudelleen, kun FreeLLMAPI palaa.",
+    "updateNowFailed": "Päivittäjä ei hyväksynyt pyyntöä. Tarkista, että watchtower-kontti on käynnissä.",
+    "updateNowTimeout": "FreeLLMAPI ei ole käynnistynyt uudelleen 5 minuutissa. Tarkista watchtower-kontin lokit."
   },
   "models": {
     "title": "Mallit",
@@ -224,6 +227,7 @@
     "settingsHint": "Paikalliset muokkaukset katalogimalleihin säilytetään katalogin synkronointien yli. Poistetut katalogimallit pysyvät poistettuina, kunnes lisäät ne uudelleen konfiguraatioiden kautta.",
     "catalogModel": "Katalogi",
     "customModel": "Tapana",
+    "discoveredModel": "löydetty",
     "localOverride": "paikallinen ohitus",
     "displayName": "Näyttönimi",
     "sizeLabel": "Kyvykkyystaso",
@@ -340,7 +344,10 @@
     "weightSpeed": "Nopeus",
     "weightIntelligence": "Tiedustelu",
     "weightRequired": "Vähintään yhden painon täytyy olla yli nollan.",
-    "scoreColumn": "Musiikki"
+    "scoreColumn": "Musiikki",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "Jyrsimen paine",
@@ -497,11 +504,11 @@
     "platform": "Alusta",
     "hideAdded": "Piilota lisätyt palveluntarjoajat",
     "apiToken": "API merkki",
-    "noKeyNeededPlaceholder": "Ei tarvita API avainta",
+    "keyOptionalPlaceholder": "Valinnainen",
     "bearerTokenPlaceholder": "Kantajamerkki",
     "pasteKeyPlaceholder": "Liitä avain tähän",
     "pasteSeveral": "Liitä useita",
-    "keylessHint": "API avainta ei tarvita: tämän palveluntarjoajan ilmainen taso on anonyymi (maksurajoitettu IP-osoitteeseen liittyen).",
+    "keyOptionalHint": "Valinnainen: jätä tyhjäksi käyttääksesi anonyymiä ilmaistasoa (rajoitettu IP-kohtaisesti), tai liitä oma avaimesi käyttääksesi tiliäsi.",
     "enable": "Ota käyttöön",
     "noProviderKeys": "Ei vielä palveluntarjoajan avaimia. Lisää yksi ylle aloittaaksesi reitityksen.",
     "filterPlaceholder": "Suodattimen tarjoajat tai avaimet",
@@ -679,7 +686,22 @@
     "testFailed": "Mallin testi epäonnistui",
     "testThrottled": "Odota {seconds}s ennen kuin testaat tätä mallia uudelleen.",
     "noModelsForProvider": "Tälle palveluntarjoajalle ei ole määritetty malleja.",
-    "testModels": "Testaa malleja"
+    "testModels": "Testaa malleja",
+    "monthlyRequestCapLabel": "Kuukausittainen pyyntöraja",
+    "monthlyTokenCapLabel": "Kuukausittainen tokenraja",
+    "capUnlimitedPlaceholder": "Rajoittamaton",
+    "capEditHint": "Rajat nollautuvat kuun 1. päivänä 00:00 UTC. Jätä tyhjäksi rajoittamattomaan.",
+    "monthlyUsageLine": "{requests} pyyntöä, {tokens} tokenia tässä kuussa",
+    "quotaBalanceHint": "{remaining}/{limit} {metric} jäljellä",
+    "quotaBalanceLeft": "{remaining} jäljellä"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Ennen päivitystä"
   },
   "status": {
     "healthy": "terve",
@@ -864,6 +887,7 @@
     "maxTokens": "Tokenien enimmäismäärä",
     "errorTitle": "Pyyntö epäonnistui",
     "attach": "Liitä tiedostoja",
+    "addMenu": "Add files and tools",
     "attachTooMany": "Voit liittää enintään {count} tiedostoa viestiä kohden.",
     "attachTooLarge": "{name} on liian suuri. Raja on {max}.",
     "attachUnsupported": "{name} ei ole tuettu. Liitä kuvia (PNG, JPEG, WebP, GIF) tai tekstitiedostoja (TXT, MD, CSV, JSON, LOG).",
@@ -1135,17 +1159,16 @@
       "generic": "Anything else that speaks the OpenAI API, set up by hand from a base URL and key.",
       "atomcode": "AtomGit's terminal agent, written in Rust, that takes any OpenAI-compatible endpoint.",
       "openclaw": "Aina päällä oleva henkilökohtainen avustaja, joka vastaa omalta koneeltasi WhatsApp-, Telegram-, Discord- ja muissa sovelluksissa.",
-      "hermes": "Nous Research -yhtiön itseään kehittävä agentti, jolla on pysyvä muisti ja taitoja, terminaalissa tai chat-sovelluksissa."
+      "hermes": "Nous Research -yhtiön itseään kehittävä agentti, jolla on pysyvä muisti ja taitoja, terminaalissa tai chat-sovelluksissa.",
+      "pi": "Minimalistinen terminaaliagentti, jota muokkaat omilla laajennuksilla, taidoilla ja kehotepohjilla.",
+      "reasonix": "DeepSeekille rakennettu päätteen koodausagentti, joka nojaa etuliitevälimuistiin, jotta pitkät istunnot pysyvät edullisina."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "FreeLLMAPI:n uudempi versio on asennettu.",
+    "reload": "Lataa uudelleen"
   },
   "freeTier": {
     "poolsToggle": "Free-tier pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "Nimetäänkö ketju \"{oldName}\" nimelle \"{name}\"? Kutsua auto:{oldName} käyttävien asiakkaiden on vaihdettava kutsuun auto:{name}.",
     "renamePlaceholder": "Uusi ketjun nimi",
     "renameFailed": "Ketjua ei voitu nimetä uudelleen."
+  },
+  "updates": {
+    "versionAvailable": "Versio {version} on saatavilla",
+    "versionReady": "Versio {version} on valmis asennettavaksi",
+    "releaseNotes": "Julkaisutiedot",
+    "tryAgain": "Yritä uudelleen",
+    "offline": "Tarkista internetyhteys ja yritä uudelleen."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

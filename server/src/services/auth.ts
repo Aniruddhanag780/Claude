@@ -142,13 +142,25 @@ export async function updatePassword(userId: number, currentPassword: string, ne
   return true;
 }
 
-export async function resetUserPassword(newPassword: string): Promise<boolean> {
+/** The single account's email, or null before first-run setup. */
+export async function accountEmail(): Promise<string | null> {
   const pool = getPostgresPool();
-  const res = await pool.query('SELECT id FROM users LIMIT 1');
+  const res = await pool.query('SELECT email FROM users LIMIT 1');
+  return res.rows[0]?.email ?? null;
+}
+
+/**
+ * Reset the password for the single existing user and invalidate all
+ * sessions.
+ * Returns the user, or null if no user exists.
+ */
+export async function resetUserPassword(newPassword: string): Promise<SessionUser | null> {
+  const pool = getPostgresPool();
+  const res = await pool.query('SELECT id, email FROM users LIMIT 1');
   const row = res.rows[0];
-  if (!row) return false;
+  if (!row) return null;
 
   await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hashPassword(newPassword), row.id]);
   await pool.query('DELETE FROM sessions WHERE user_id = $1', [row.id]);
-  return true;
+  return { userId: row.id, email: row.email };
 }

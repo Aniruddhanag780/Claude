@@ -152,21 +152,24 @@
     "compressionRunPreview": "පෙරදසුන ධාවනය කරන්න",
     "updatesTitle": "යාවත්කාලීන",
     "checkForUpdates": "යාවත්කාලීන සඳහා පරීක්ෂා කරන්න",
-    "lastChecked": "අවසන් වරට පරීක්ෂා කළේ: {when}",
-    "currentVersion": "වත්මන් ගොඩනැගීම:",
     "updateAvailable": "යාවත්කාලීනයක් තිබේ",
-    "changelog": "වෙනස් වූ දේ",
     "upToDate": "යාවත්කාලීනයි",
     "buildAhead": "මෙම ගොඩනැගීම නිල main ශාඛාවට වඩා ඉදිරියෙන් ඇත.",
     "buildDiverged": "මෙම ගොඩනැගීම නිල main ශාඛාවෙන් අපගමනය වී ඇත.",
     "buildUnknown": "මෙම අභිරුචි ගොඩනැගීම නිල main ශාඛාව සමඟ සැසඳිය නොහැක.",
     "notGitInstall": "මෙම ස්ථාපනයේ commit තොරතුරු ඇතුළත් නොවේ.",
     "checkFailed": "යාවත්කාලීන පරීක්ෂා කිරීමට නොහැකි විය.",
-    "contactsGithub": "පරීක්ෂා කිරීම් අතින් ක්‍රියාත්මක කරන අතර GitHub සමඟ සම්බන්ධ වේ.",
     "autoUpdateCheck": "ස්වයංක්‍රීය යාවත්කාලීන පරීක්ෂාව",
-    "autoUpdateCheckHelp": "නව නිකුතුවක් සඳහා දිනකට වරක් GitHub පරීක්ෂා කර මතක් කිරීමක් පෙන්වයි. පෙරනිමියෙන් ක්‍රියාවිරහිතයි.",
-    "openReleases": "GitHub Releases විවෘත කරන්න",
-    "restartAfterUpdate": "ගොඩනැගීම සම්පූර්ණ වූ පසු FreeLLMAPI නැවත ආරම්භ කරන්න."
+    "restartAfterUpdate": "ගොඩනැගීම සම්පූර්ණ වූ පසු FreeLLMAPI නැවත ආරම්භ කරන්න.",
+    "downloadUpdate": "යාවත්කාලීනය බාගන්න",
+    "downloadingUpdate": "බාගනිමින්… {percent}%",
+    "restartToUpdate": "යාවත්කාලීන කිරීමට නැවත අරඹන්න",
+    "updateReadyHint": "බාගත විය. FreeLLMAPI ඔබගේ දත්ත උපස්ථ කර, නැවත ආරම්භ වී නව අනුවාදය විවෘත කරයි.",
+    "updateInstallFailed": "යාවත්කාලීනය ස්ථාපනය කළ නොහැකි විය.",
+    "updateNow": "දැන් යාවත්කාලීන කරන්න",
+    "updatingContainer": "නව image එක ලබාගෙන නැවත ආරම්භ කරමින්. FreeLLMAPI නැවත පැමිණි විට මෙම පිටුව නැවත පූරණය වේ.",
+    "updateNowFailed": "යාවත්කාලීනකරු ඉල්ලීම පිළිගත්තේ නැත. watchtower container එක ධාවනය වන්නේදැයි පරීක්ෂා කරන්න.",
+    "updateNowTimeout": "මිනිත්තු 5කට පසුවත් FreeLLMAPI නැවත ආරම්භ වී නැත. watchtower container හි ලොග් පරීක්ෂා කරන්න."
   },
   "models": {
     "title": "ආකෘති",
@@ -224,6 +227,7 @@
     "settingsHint": "නාමාවලි ආකෘති වෙත දේශීය සංස්කරණ නාමාවලි සමමුහුර්ත කිරීම් හරහා තබා ඇත. මකා දැමූ නාමාවලි ආකෘති ඔබ නැවත වින්‍යාසය හරහා එකතු කරන තෙක් මකා දැමෙනු ඇත.",
     "catalogModel": "නාමාවලිය",
     "customModel": "චාරිත්රය",
+    "discoveredModel": "සොයාගත්",
     "localOverride": "දේශීය අභිබවා යාම",
     "displayName": "සංදර්ශක නම",
     "sizeLabel": "හැකියා මට්ටම",
@@ -340,7 +344,10 @@
     "weightSpeed": "වේගය",
     "weightIntelligence": "බුද්ධිය",
     "weightRequired": "අවම වශයෙන් එක් බරක් බිංදුවට වඩා වැඩි විය යුතුය.",
-    "scoreColumn": "ලකුණු"
+    "scoreColumn": "ලකුණු",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "රවුටරයේ පීඩනය",
@@ -497,11 +504,11 @@
     "platform": "වේදිකාව",
     "hideAdded": "එකතු කළ සපයන්නන් සඟවන්න",
     "apiToken": "API ටෝකනය",
-    "noKeyNeededPlaceholder": "API යතුර අවශ්‍ය නොවේ",
+    "keyOptionalPlaceholder": "විකල්ප",
     "bearerTokenPlaceholder": "දරන්නා සංකේතය",
     "pasteKeyPlaceholder": "මෙහි යතුර අලවන්න",
     "pasteSeveral": "කිහිපයක් අලවන්න",
-    "keylessHint": "API යතුරක් අවශ්‍ය නොවේ: මෙම සැපයුම්කරුගේ නිදහස් ස්ථරය නිර්නාමිකයි (IP එකකට අනුපාතය-සීමිත).",
+    "keyOptionalHint": "විකල්ප: නිර්නාමික නොමිලේ ස්ථරය සඳහා හිස්ව තබන්න (IP එකකට අනුපාත සීමිත), නැතහොත් ඔබේ ගිණුම භාවිත කිරීමට ඔබේම යතුර අලවන්න.",
     "enable": "සබල කරන්න",
     "noProviderKeys": "තවමත් සපයන්නාගේ යතුරු නොමැත. මාර්ගගත කිරීම ආරම්භ කිරීමට ඉහත එකක් එක් කරන්න.",
     "filterPlaceholder": "පෙරහන් සපයන්නන් හෝ යතුරු",
@@ -679,7 +686,22 @@
     "testFailed": "ආකෘති පරීක්ෂණය අසමත් විය",
     "testThrottled": "මෙම ආකෘතිය නැවත පරීක්ෂා කිරීමට පෙර කරුණාකර තත්පර {seconds} ක් රැඳී සිටින්න.",
     "noModelsForProvider": "මෙම සපයන්නා සඳහා ආකෘති වින්‍යාස කර නොමැත.",
-    "testModels": "මාදිලි පරීක්ෂා කරන්න"
+    "testModels": "මාදිලි පරීක්ෂා කරන්න",
+    "monthlyRequestCapLabel": "මාසික ඉල්ලීම් සීමාව",
+    "monthlyTokenCapLabel": "මාසික ටෝකන් සීමාව",
+    "capUnlimitedPlaceholder": "සීමා රහිත",
+    "capEditHint": "සීමාවන් සෑම මාසයකම 1 වන දා 00:00 UTC ට යළි සකසයි. සීමා රහිතට හිස්ව තබන්න.",
+    "monthlyUsageLine": "මෙම මාසය ඉල්ලීම් {requests}, ටෝකන් {tokens}",
+    "quotaBalanceHint": "{limit} {metric} න් {remaining} ඉතිරියි",
+    "quotaBalanceLeft": "{remaining} ඉතිරියි"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "යාවත්කාලීනයට පෙර"
   },
   "status": {
     "healthy": "සෞඛ්ය සම්පන්න",
@@ -864,6 +887,7 @@
     "maxTokens": "උපරිම ටෝකන",
     "errorTitle": "ඉල්ලීම අසාර්ථක විය",
     "attach": "ගොනු අමුණන්න",
+    "addMenu": "Add files and tools",
     "attachTooMany": "එක් පණිවිඩයකට ගොනු {count}ක් දක්වා අමුණා ගත හැක.",
     "attachTooLarge": "{name} ඉතා විශාලයි. සීමාව {max} වේ.",
     "attachUnsupported": "{name} සඳහා සහාය නොදක්වයි. රූප (PNG, JPEG, WebP, GIF) හෝ පෙළ ගොනු (TXT, MD, CSV, JSON, LOG) අමුණන්න.",
@@ -1135,17 +1159,16 @@
       "generic": "Anything else that speaks the OpenAI API, set up by hand from a base URL and key.",
       "atomcode": "AtomGit's terminal agent, written in Rust, that takes any OpenAI-compatible endpoint.",
       "openclaw": "ඔබේම යන්ත්‍රයෙන් WhatsApp, Telegram, Discord සහ තවත් ඒවායේ පිළිතුරු දෙන, සැමවිටම ක්‍රියාත්මක පුද්ගලික සහායකයෙක්.",
-      "hermes": "Nous Research හි ස්වයං-වැඩිදියුණු වන ඒජන්තය, ස්ථිර මතකය සහ කුසලතා සමඟ, ටර්මිනලයේ හෝ චැට් යෙදුම්වල."
+      "hermes": "Nous Research හි ස්වයං-වැඩිදියුණු වන ඒජන්තය, ස්ථිර මතකය සහ කුසලතා සමඟ, ටර්මිනලයේ හෝ චැට් යෙදුම්වල.",
+      "pi": "ඔබේම දිගු, කුසලතා සහ prompt සැකිලි සමඟ හැඩගස්වන අවම ටර්මිනල් ඒජන්තයක්.",
+      "reasonix": "DeepSeek සඳහා සාදන ලද ටර්මිනල් කේතන නියෝජිතයෙක්; දිගු සැසි ලාභදායීව තබා ගැනීමට prefix caching මත ගොඩනගා ඇත."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "FreeLLMAPI හි නවතම අනුවාදයක් ස්ථාපනය කර ඇත.",
+    "reload": "නැවත පූරණය"
   },
   "freeTier": {
     "poolsToggle": "Free-tier pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "දාමය \"{oldName}\" හි නම \"{name}\" ලෙස වෙනස් කරන්නද? auto:{oldName} අමතන සේවාදායකයින් auto:{name} වෙත යා යුතුය.",
     "renamePlaceholder": "නව දාම නම",
     "renameFailed": "එම දාමයේ නම වෙනස් කළ නොහැකි විය."
+  },
+  "updates": {
+    "versionAvailable": "අනුවාදය {version} ලබා ගත හැක",
+    "versionReady": "අනුවාදය {version} ස්ථාපනයට සූදානම්",
+    "releaseNotes": "නිකුතු සටහන්",
+    "tryAgain": "නැවත උත්සාහ කරන්න",
+    "offline": "ඔබගේ අන්තර්ජාල සම්බන්ධතාවය පරීක්ෂා කර නැවත උත්සාහ කරන්න."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

@@ -124,6 +124,7 @@ function createInMemoryMockPool() {
   tables.set('fallback_config', []);
   tables.set('embedding_models', []);
   tables.set('custom_model_tombstones', []);
+  tables.set('catalog_model_tombstones', []);
   tables.set('quirks', []);
   tables.set('quirk_targets', []);
   tables.set('provider_quota_observations', []);
@@ -133,6 +134,7 @@ function createInMemoryMockPool() {
   tables.set('server_logs', []);
   tables.set('backups', []);
   tables.set('url_tokens', []);
+  tables.set('search_requests', []);
 
   let idCounter = 1;
 
@@ -458,6 +460,8 @@ function createInMemoryMockPool() {
           return rows.find(r => r.platform === args[0] && r.model_id === args[1] && Number(r.key_id) === Number(args[2]));
         }
         if (u.includes('FROM MODELS')) {
+          const generic = execStatement(tables, sql, args, nextId);
+          if (generic) return generic.rows?.[0];
           const rows = tables.get('models') || [];
           if (u.includes('WHERE PLATFORM = ? AND MODEL_ID = ?') || u.includes('WHERE PLATFORM =') && u.includes('MODEL_ID =')) {
             const pKey = args[0];
@@ -468,7 +472,7 @@ function createInMemoryMockPool() {
             const mId = args[0];
             return rows.find(r => r.model_id === mId);
           }
-          return rows[0];
+          return undefined;
         }
         if (u.includes('FROM CLIENT_PROFILES')) {
           const rows = tables.get('client_profiles') || [];
@@ -515,14 +519,9 @@ function createInMemoryMockPool() {
           return tables.get('settings') || [];
         }
         if (u.includes('FROM MEDIA_MODELS')) {
-          const rows = tables.get('media_models') || [];
-          if (u.includes('WHERE MODALITY = ? AND ENABLED = 1')) {
-            const mod = argList[0];
-            return rows
-              .filter(r => r.modality === mod && (r.enabled === 1 || r.enabled === true))
-              .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0) || a.id - b.id);
-          }
-          return rows;
+          const generic = execStatement(tables, sql, argList, nextId);
+          if (generic) return generic.rows ?? [];
+          return tables.get('media_models') || [];
         }
         if (u.includes('FROM REQUESTS')) {
           const reqs = tables.get('requests') || [];
@@ -637,43 +636,7 @@ function createInMemoryMockPool() {
           tables.set('providers', provs);
           return { changes: 1, lastInsertRowid: cred.id };
         }
-        if (u.includes('INSERT INTO MEDIA_MODELS')) {
-          const rows = tables.get('media_models') || [];
-          const record: any = {
-            id: idCounter++,
-            platform: 'groq',
-            model_id: '',
-            display_name: '',
-            modality: 'transcription',
-            priority: 0,
-            enabled: 1,
-            quota_label: '',
-            meta_json: null,
-            key_id: null,
-          };
-          if (u.includes("VALUES ('CUSTOM'") || u.includes("VALUES ('CUSTOM,")) {
-            record.platform = 'custom';
-            record.model_id = args[0];
-            record.display_name = 'Local Whisper';
-            record.modality = 'transcription';
-            record.priority = 99;
-            record.enabled = 1;
-            record.quota_label = 'custom endpoint';
-            record.key_id = args[1];
-          } else if (u.includes("'TRANSCRIPTION'")) {
-            record.platform = args[0];
-            record.model_id = args[1];
-            record.display_name = args[2];
-            record.modality = 'transcription';
-            record.priority = args[3] ?? 0;
-            record.enabled = 1;
-            record.quota_label = '';
-            record.meta_json = args[4] ?? null;
-          }
-          rows.push(record);
-          tables.set('media_models', rows);
-          return { changes: 1, lastInsertRowid: record.id };
-        }
+
         if (u.includes('INSERT INTO REQUESTS')) {
           const rows = tables.get('requests') || [];
           const isHistorySeed = u.includes('TTFB_MS') && !u.includes('REQUEST_TYPE');
@@ -695,7 +658,7 @@ function createInMemoryMockPool() {
           tables.set('requests', rows);
           return { changes: 1, lastInsertRowid: record.id };
         }
-        if (u.includes('INSERT INTO MODELS')) {
+        if (u.includes('INSERT INTO MODELS') && !(args[0] && typeof args[0] === 'object' && !Array.isArray(args[0]))) {
           const rows = tables.get('models') || [];
           const provs = tables.get('providers') || [];
           const platform = args[0];
@@ -742,29 +705,7 @@ function createInMemoryMockPool() {
           tables.set('credentials', []);
           return { changes: rows.length, lastInsertRowid: 0 };
         }
-        if (u.includes('DELETE FROM MEDIA_MODELS')) {
-          const rows = tables.get('media_models') || [];
-          if (u.includes("WHERE MODALITY = 'TRANSCRIPTION'")) {
-            const filtered = rows.filter(r => r.modality !== 'transcription');
-            tables.set('media_models', filtered);
-            return { changes: rows.length - filtered.length, lastInsertRowid: 0 };
-          }
-          if (u.includes("WHERE PLATFORM IN")) {
-            const filtered = rows.filter(r => r.platform !== 'groq' && r.platform !== 'cloudflare');
-            tables.set('media_models', filtered);
-            return { changes: rows.length - filtered.length, lastInsertRowid: 0 };
-          }
-          tables.set('media_models', []);
-          return { changes: rows.length, lastInsertRowid: 0 };
-        }
-        if (u.includes('UPDATE MEDIA_MODELS SET ENABLED = 0')) {
-          const rows = tables.get('media_models') || [];
-          for (const r of rows) {
-            if (args[0] && r.model_id === args[0]) r.enabled = 0;
-            else if (r.model_id && u.includes(`MODEL_ID = '${r.model_id.toUpperCase()}'`)) r.enabled = 0;
-          }
-          return { changes: 1, lastInsertRowid: 0 };
-        }
+
         if (u.includes('UPDATE API_KEYS SET BASE_URL = NULL')) {
           const rows = tables.get('api_keys') || [];
           const row = rows.find(r => Number(r.id) === Number(args[0]));

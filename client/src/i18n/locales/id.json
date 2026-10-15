@@ -152,21 +152,24 @@
     "compressionRunPreview": "Jalankan pratinjau",
     "updatesTitle": "Pembaruan",
     "checkForUpdates": "Periksa pembaruan",
-    "lastChecked": "Terakhir diperiksa: {when}",
-    "currentVersion": "Build saat ini:",
     "updateAvailable": "Pembaruan tersedia",
-    "changelog": "Yang berubah",
     "upToDate": "Sudah terbaru",
     "buildAhead": "Build ini lebih maju dari cabang main resmi.",
     "buildDiverged": "Build ini telah menyimpang dari cabang main resmi.",
     "buildUnknown": "Build khusus ini tidak dapat dibandingkan dengan cabang main resmi.",
     "notGitInstall": "Instalasi ini tidak menyertakan informasi commit.",
     "checkFailed": "Tidak dapat memeriksa pembaruan.",
-    "contactsGithub": "Pemeriksaan dilakukan secara manual dan menghubungi GitHub.",
     "autoUpdateCheck": "Pemeriksaan pembaruan otomatis",
-    "autoUpdateCheckHelp": "Memeriksa GitHub sekali sehari untuk rilis baru dan menampilkan pengingat. Nonaktif secara bawaan.",
-    "openReleases": "Buka Rilis GitHub",
-    "restartAfterUpdate": "Mulai ulang FreeLLMAPI setelah proses build selesai."
+    "restartAfterUpdate": "Mulai ulang FreeLLMAPI setelah proses build selesai.",
+    "downloadUpdate": "Unduh pembaruan",
+    "downloadingUpdate": "Mengunduh… {percent}%",
+    "restartToUpdate": "Mulai ulang untuk memperbarui",
+    "updateReadyHint": "Selesai diunduh. FreeLLMAPI mencadangkan data Anda, memulai ulang, lalu membuka versi baru.",
+    "updateInstallFailed": "Pembaruan tidak dapat dipasang.",
+    "updateNow": "Perbarui sekarang",
+    "updatingContainer": "Menarik image baru dan memulai ulang. Halaman ini dimuat ulang saat FreeLLMAPI kembali.",
+    "updateNowFailed": "Pembaru tidak menerima permintaan. Pastikan kontainer watchtower berjalan.",
+    "updateNowTimeout": "FreeLLMAPI belum dimulai ulang setelah 5 menit. Periksa log kontainer watchtower."
   },
   "models": {
     "title": "Model",
@@ -224,6 +227,7 @@
     "settingsHint": "Pengeditan lokal pada model katalog disimpan di seluruh sinkronisasi katalog. Model katalog yang dihapus tetap terhapus sampai Anda menambahkannya lagi melalui konfigurasi.",
     "catalogModel": "katalog",
     "customModel": "adat",
+    "discoveredModel": "ditemukan",
     "localOverride": "penggantian lokal",
     "displayName": "Nama tampilan",
     "sizeLabel": "Tingkat kemampuan",
@@ -340,7 +344,10 @@
     "weightSpeed": "Kecepatan",
     "weightIntelligence": "Intelijen",
     "weightRequired": "Setidaknya satu bobot harus di atas nol.",
-    "scoreColumn": "Skor"
+    "scoreColumn": "Skor",
+    "minReliabilityFloor": "Minimum reliability floor",
+    "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
+    "minReliabilityFloorOff": "Disabled"
   },
   "penaltyInspector": {
     "title": "Tekanan router",
@@ -497,11 +504,11 @@
     "platform": "Peron",
     "hideAdded": "Sembunyikan penyedia yang sudah ditambahkan",
     "apiToken": "Token API",
-    "noKeyNeededPlaceholder": "Tidak diperlukan kunci API",
+    "keyOptionalPlaceholder": "Opsional",
     "bearerTokenPlaceholder": "Token pembawa",
     "pasteKeyPlaceholder": "tempelkan kunci di sini",
     "pasteSeveral": "Tempel beberapa",
-    "keylessHint": "Tidak diperlukan kunci API: tingkat gratis penyedia ini bersifat anonim (dibatasi tarif per IP).",
+    "keyOptionalHint": "Opsional: biarkan kosong untuk tingkat gratis anonim (dibatasi per IP), atau tempel kunci Anda sendiri untuk menggunakan akun Anda.",
     "enable": "Aktifkan",
     "noProviderKeys": "Belum ada kunci penyedia. Tambahkan satu di atas untuk memulai perutean.",
     "filterPlaceholder": "Filter penyedia atau kunci",
@@ -679,7 +686,22 @@
     "testFailed": "Pengujian model gagal",
     "testThrottled": "Harap tunggu {seconds} detik sebelum menguji model ini lagi.",
     "noModelsForProvider": "Tidak ada model yang dikonfigurasi untuk penyedia ini.",
-    "testModels": "Uji model"
+    "testModels": "Uji model",
+    "monthlyRequestCapLabel": "Batas permintaan bulanan",
+    "monthlyTokenCapLabel": "Batas token bulanan",
+    "capUnlimitedPlaceholder": "Tanpa batas",
+    "capEditHint": "Batas disetel ulang pada tanggal 1 pukul 00:00 UTC. Kosongkan untuk tanpa batas.",
+    "monthlyUsageLine": "{requests} permintaan, {tokens} token bulan ini",
+    "quotaBalanceHint": "Tersisa {remaining} dari {limit} {metric}",
+    "quotaBalanceLeft": "Tersisa {remaining}"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Sebelum pembaruan"
   },
   "status": {
     "healthy": "sehat",
@@ -864,6 +887,7 @@
     "maxTokens": "Token maksimum",
     "errorTitle": "Permintaan gagal",
     "attach": "Lampirkan file",
+    "addMenu": "Add files and tools",
     "attachTooMany": "Anda dapat melampirkan hingga {count} file per pesan.",
     "attachTooLarge": "{name} terlalu besar. Batasnya adalah {max}.",
     "attachUnsupported": "{name} tidak didukung. Lampirkan gambar (PNG, JPEG, WebP, GIF) atau file teks (TXT, MD, CSV, JSON, LOG).",
@@ -1135,17 +1159,16 @@
       "generic": "Perkakas lain mana pun yang berbicara API OpenAI, disiapkan manual dengan URL dasar dan kunci.",
       "atomcode": "Agen terminal dari AtomGit, ditulis dalam Rust, yang menerima endpoint apa pun yang kompatibel dengan OpenAI.",
       "openclaw": "Asisten pribadi yang selalu aktif dan menjawab di WhatsApp, Telegram, Discord, dan lainnya dari mesin Anda sendiri.",
-      "hermes": "Agen dari Nous Research yang terus memperbaiki diri, dengan memori persisten dan keterampilan, di terminal atau di aplikasi chat."
+      "hermes": "Agen dari Nous Research yang terus memperbaiki diri, dengan memori persisten dan keterampilan, di terminal atau di aplikasi chat.",
+      "pi": "Agen terminal minimalis yang Anda bentuk dengan ekstensi, keterampilan, dan templat prompt Anda sendiri.",
+      "reasonix": "Agen coding terminal yang dibuat khusus untuk DeepSeek, dibangun di sekitar prefix caching agar sesi panjang tetap murah."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "Versi FreeLLMAPI yang lebih baru telah terpasang.",
+    "reload": "Muat ulang"
   },
   "freeTier": {
     "poolsToggle": "Kumpulan tingkat gratis ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "Ganti nama rantai \"{oldName}\" menjadi \"{name}\"? Klien yang memanggil auto:{oldName} harus beralih ke auto:{name}.",
     "renamePlaceholder": "Nama rantai baru",
     "renameFailed": "Tidak dapat mengganti nama rantai."
+  },
+  "updates": {
+    "versionAvailable": "Versi {version} tersedia",
+    "versionReady": "Versi {version} siap dipasang",
+    "releaseNotes": "Catatan rilis",
+    "tryAgain": "Coba lagi",
+    "offline": "Periksa koneksi internet Anda lalu coba lagi."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

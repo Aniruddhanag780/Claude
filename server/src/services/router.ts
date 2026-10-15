@@ -29,7 +29,7 @@ import {
 import { TIMEOUT_ERROR_MARKERS } from '../lib/error-classify.js';
 import { checkMonthlyBudget, reserveMonthlyBudget } from './key-budget.js';
 import { applyModelWeightOverride, getModelWeightOverrides } from './model-weight-overrides.js';
-import { modelsWithOverriddenField } from './model-state.js';
+import { modelsWithOverriddenField, getCatalogModelTombstone } from './model-state.js';
 import { parseBudget } from '../lib/budget.js';
 import { platformDropsResponseFormat } from '../lib/sampling-params.js';
 import { isUnifyEnabled, getModelGroups, resolveRequestedIdForDispatch } from './model-groups.js';
@@ -40,6 +40,7 @@ import { modelStatsKey, endpointScopeForBaseUrl } from '../lib/endpoint-scope.js
 import { isToolBenched } from '../lib/tool-capability.js';
 import { parseModelScope, scopeAllows } from '../lib/model-scope.js';
 import { getKeyQuotaHeadroom, inferQuotaPoolKey } from './provider-quota.js';
+import { decrypt } from '../lib/crypto.js';
 import type { BaseProvider } from '../providers/base.js';
 import type { Platform } from '@freellmapi/shared/types.js';
 import type { Db } from '../db/types.js';
@@ -476,6 +477,34 @@ export function setHeadroomThresholds(rampStart?: number | null, floor?: number 
   };
   apply(HEADROOM_RAMP_START_KEY, rampStart);
   apply(HEADROOM_FLOOR_KEY, floor);
+}
+
+// ── Minimum reliability floor (#filter) ─────────────────────────────────────
+// Operators who keep hitting models/keys with a high error rate can set a floor
+// (0..1 decimal, e.g. 0.8 = drop anything observed below 80% success). Only
+// models with enough live samples are judged; under-observed ones stay in the
+// exploration pool so cold-start models are never silently killed. Absent/invalid
+// values disable the filter (existing installs untouched).
+export const MIN_RELIABILITY_FLOOR_KEY = 'routing_min_reliability_floor';
+
+export function getMinReliabilityFloor(): number | undefined {
+  const raw = getSetting(MIN_RELIABILITY_FLOOR_KEY);
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : undefined;
+}
+
+// null clears the floor back to the default (disabled); undefined leaves it untouched.
+export function setMinReliabilityFloor(floor?: number | null): void {
+  if (floor === undefined) return;
+  if (floor === null) {
+    getDb().prepare('DELETE FROM settings WHERE key = ?').run(MIN_RELIABILITY_FLOOR_KEY);
+    return;
+  }
+  if (!Number.isFinite(floor) || floor < 0 || floor > 1) {
+    throw new Error(`Invalid value ${floor} for ${MIN_RELIABILITY_FLOOR_KEY} (must be 0..1)`);
+  }
+  setSetting(MIN_RELIABILITY_FLOOR_KEY, String(floor));
 }
 
 // ── Task-type weight share (persisted) ─────────────────────────────────────
@@ -1054,17 +1083,38 @@ interface ScoredEntry {
 // capacity. `monthlyUsedTokens` is already summed across all keys, so budget
 // must scale to match or the headroom guardrail damps a multi-key model to the
 // floor after just one account's worth of tokens.
-function usableKeyCountsByPlatform(_db: Db): Map<string, number> {
-  const now = Date.now();
-  const counts = new Map<string, number>();
-  for (const c of getActiveRegistry().getAllCredentials()) {
-    if (!c.enabled) continue;
-    if (c.runtime.circuitState === 'DISABLED') continue;
-    if (c.runtime.cooldownUntil > now) continue;
-    counts.set(c.providerKey, (counts.get(c.providerKey) ?? 0) + 1);
+function usableKeyCountsByPlatform(db: Db): Map<string, number> {
+  try {
+    const registryCreds = getActiveRegistry()?.getAllCredentials() ?? [];
+    if (registryCreds.length > 0) {
+      const now = Date.now();
+      const counts = new Map<string, number>();
+      for (const c of registryCreds) {
+        if (!c.enabled) continue;
+        if (c.runtime.circuitState === 'DISABLED') continue;
+        if (c.runtime.cooldownUntil > now) continue;
+        counts.set(c.providerKey, (counts.get(c.providerKey) ?? 0) + 1);
+      }
+      return counts;
+    }
+  } catch {}
+
+  // Per-request GROUP BY on api_keys; only changes on key writes. Real-time
+  // correctness is backed by selectKeyForModel's live per-key checks — a stale
+  // count can at worst walk one extra candidate, never route to a dead key.
+  // ponytail: 5s TTL instead of write-point invalidation; per-write hooks if that ever matters.
+  if (cachesEnabled() && keyCountsCache && keyCountsCache.db === db && Date.now() - keyCountsCache.at < KEY_COUNTS_TTL_MS) {
+    return keyCountsCache.map;
   }
-  return counts;
+  const rows = db.prepare(
+    "SELECT platform, COUNT(*) AS count FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform"
+  ).all() as { platform: string; count: number }[];
+  const map = new Map(rows.map(r => [r.platform, r.count]));
+  keyCountsCache = { db, at: Date.now(), map };
+  return map;
 }
+const KEY_COUNTS_TTL_MS = 5_000;
+let keyCountsCache: { db: Db; at: number; map: Map<string, number> } | null = null;
 
 function scoreChainEntry(
   entry: ChainRow,
@@ -1136,6 +1186,37 @@ function scoreChainEntry(
 }
 
 /**
+ * Drop models whose observed success rate sits below the operator's reliability
+ * floor. Under-observed models (fewer than EXPLORE_MIN_SAMPLES live samples)
+ * are kept so cold-start models stay in the exploration pool. If the floor would
+ * empty the whole chain, the filter is skipped entirely — better a possibly-flaky
+ * model than no model at all. #filter.
+ */
+export function applyReliabilityFloor(chain: ChainRow[]): ChainRow[] {
+  const floor = getMinReliabilityFloor();
+  if (floor === undefined) return chain;
+
+  const kept: ChainRow[] = [];
+  const dropped: ChainRow[] = [];
+  for (const e of chain) {
+    const stats = statsCache?.get(modelStatsKey(e.platform, e.model_id, e.endpoint_scope));
+    const total = (stats?.successes ?? 0) + (stats?.failures ?? 0);
+    if (total < EXPLORE_MIN_SAMPLES) {
+      kept.push(e); // not enough signal yet — keep exploring
+      continue;
+    }
+    const rel = expectedReliability(
+      stats!.successes, stats!.failures,
+      activeCommunityPrior(e.platform, e.model_id, e.endpoint_scope),
+    );
+    if (rel < floor) dropped.push(e);
+    else kept.push(e);
+  }
+  // Safety valve: never leave routing with an empty candidate set.
+  return kept.length > 0 ? kept : chain;
+}
+
+/**
  * Order the enabled fallback chain for routing.
  *  - 'priority' strategy → legacy manual order + 429 penalty (unchanged).
  *  - bandit strategy      → convex score, manual priority as the deterministic
@@ -1201,6 +1282,9 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy, sampled = true
     weights = adjusted.adjusted ? adjusted.weights : weights;
   }
 
+  // Reliability floor: drop chronically-failing models before scoring (#filter).
+  chain = applyReliabilityFloor(chain);
+
   const composites = chain.map(e => intelligenceComposite(e.size_label, e.intelligence_rank));
   const intelMin = composites.length ? Math.min(...composites) : 0;
   const intelMax = composites.length ? Math.max(...composites) : 0;
@@ -1255,50 +1339,114 @@ const GLOBAL_SORT_ALIASES: Record<string, string> = {
  * (`auto:<name>`) correctly refused. `fallback_config` is the chain only for an
  * install with no profile at all.
  */
+// Chain cache: the active chain only changes on admin writes (models/profiles/
+// fallback_config), not per request — but routeRequest used to re-run the JOIN
+// on every request (synchronously, on the event loop). Cache by db+profileId
+// with a 1s TTL safety net; a profile switch changes profileId so it takes
+// effect immediately. Copy on return: callers like routeRequest splice/unshift.
+// Bypassed under NODE_ENV=test: suites write chain tables via raw SQL and route
+// immediately afterwards.
+let chainCache: { db: Db; profileId: number | null; rows: ChainRow[]; at: number } | null = null;
+const CHAIN_CACHE_TTL_MS = 1_000;
+
+function cachesEnabled(): boolean {
+  return process.env.NODE_ENV !== 'test';
+}
+
 function getActiveChain(db: Db): ChainRow[] {
   const profileId = getActiveProfileId(db);
-  if (profileId == null) {
-    // New PostgreSQL schema has no profiles/fallback_config — the chain is every
-    // enabled catalog model, ordered by its own priority (highest first).
-    return registryChainRows();
+  if (cachesEnabled() && chainCache && chainCache.db === db && chainCache.profileId === profileId
+      && Date.now() - chainCache.at < CHAIN_CACHE_TTL_MS) {
+    return chainCache.rows.slice();
+  }
+  let rows: ChainRow[] = [];
+  try {
+    if (profileId != null) {
+      rows = db.prepare(`
+        SELECT pm.model_db_id, pm.priority, pm.enabled,
+               m.platform, m.model_id, m.display_name, m.intelligence_rank,
+               m.size_label, m.monthly_token_budget,
+               m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+               m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+        FROM profile_models pm
+        JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
+        WHERE pm.profile_id = ?
+        ORDER BY pm.priority ASC
+      `).all(profileId) as ChainRow[];
+    } else {
+      rows = db.prepare(`
+        SELECT fc.model_db_id, fc.priority, fc.enabled,
+               m.platform, m.model_id, m.display_name, m.intelligence_rank,
+               m.size_label, m.monthly_token_budget,
+               m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+               m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+        FROM fallback_config fc
+        JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
+        ORDER BY fc.priority ASC
+      `).all() as ChainRow[];
+    }
+  } catch {
+    rows = [];
   }
 
-  return db.prepare(`
-    SELECT pm.model_db_id, pm.priority, pm.enabled,
-           m.platform, m.model_id, m.display_name, m.intelligence_rank,
-           m.size_label, m.monthly_token_budget,
-           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
-    FROM profile_models pm
-    JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
-    WHERE pm.profile_id = ?
-    ORDER BY pm.priority ASC
-  `).all(profileId) as ChainRow[];
+  if (!rows || rows.length === 0) {
+    try {
+      const regRows = registryChainRows();
+      if (regRows && regRows.length > 0) return regRows;
+    } catch {}
+  }
+
+  chainCache = { db, profileId, rows, at: Date.now() };
+  return rows.slice();
 }
 
-function getChainByProfileName(db: Db, _name: string): ChainRow[] | null {
-  // The legacy `profiles`/`profile_models` tables no longer exist; named chains
-  // are unsupported on PostgreSQL and resolve to a null (→ "profile not found").
-  const profileId = getActiveProfileId(db);
-  if (profileId == null) return null;
-  return db.prepare(`
-    SELECT pm.model_db_id, pm.priority, pm.enabled,
-           m.platform, m.model_id, m.display_name, m.intelligence_rank,
-           m.size_label, m.monthly_token_budget,
-           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
-    FROM profile_models pm
-    JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
-    WHERE pm.profile_id = ?
-    ORDER BY pm.priority ASC
-  `).all(profileId) as ChainRow[];
+function getChainByProfileName(db: Db, name: string): ChainRow[] | null {
+  try {
+    const profile = db.prepare("SELECT id FROM profiles WHERE LOWER(name) = ?").get(name.toLowerCase()) as { id: number } | undefined;
+    if (!profile) return null;
+    return db.prepare(`
+      SELECT pm.model_db_id, pm.priority, pm.enabled,
+             m.platform, m.model_id, m.display_name, m.intelligence_rank,
+             m.size_label, m.monthly_token_budget,
+             m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+             m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+      FROM profile_models pm
+      JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
+      WHERE pm.profile_id = ?
+      ORDER BY pm.priority ASC
+    `).all(profile.id) as ChainRow[];
+  } catch {
+    return null;
+  }
 }
 
-function getChainByGlobalSort(_db: Db, globalAxis: string): ChainRow[] {
-  // A global sort ignores the chain's ORDER, not its enable flags: a model the
-  // operator switched off stays off here too (#634). Fresh catalog rows default
-  // to in, so the sort still spans the whole catalog.
-  const allEnabled = registryChainRows();
+function getChainByGlobalSort(db: Db, globalAxis: string): ChainRow[] {
+  let allEnabled: ChainRow[] = [];
+  try {
+    const profileId = getActiveProfileId(db);
+    const chainEnabled = profileId != null
+      ? 'COALESCE(pm.enabled, fc.enabled, 1) = 1'
+      : 'COALESCE(fc.enabled, 1) = 1';
+    allEnabled = db.prepare(`
+      SELECT m.id as model_db_id, 0 as priority, 1 as enabled,
+             m.platform, m.model_id, m.display_name, m.intelligence_rank,
+             m.size_label, m.monthly_token_budget,
+             m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+             m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+      FROM models m
+      LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
+      ${profileId != null ? 'LEFT JOIN profile_models pm ON pm.profile_id = ? AND pm.model_db_id = m.id' : ''}
+      WHERE m.enabled = 1 AND ${chainEnabled}
+    `).all(...(profileId != null ? [profileId] : [])) as ChainRow[];
+  } catch {
+    allEnabled = [];
+  }
+
+  if (!allEnabled || allEnabled.length === 0) {
+    try {
+      allEnabled = registryChainRows();
+    } catch {}
+  }
 
   const strategyMap: Record<string, RoutingStrategy> = {
     'smart': 'smartest',
@@ -1308,7 +1456,7 @@ function getChainByGlobalSort(_db: Db, globalAxis: string): ChainRow[] {
     'balanced': 'balanced'
   };
   const strat = strategyMap[globalAxis] || 'balanced';
-  
+
   return orderChain(allEnabled, strat);
 }
 
@@ -1467,6 +1615,20 @@ function orderKeysByRemainingQuota<T extends { id: number }>(entry: ChainRow, or
  * Request-level filters (vision/tools/context window) stay in the caller; this
  * only does key selection + accounting pre-checks.
  */
+// Key decryption cache: AES-GCM decrypt of every candidate key used to run on
+// each routing pass. Keyed by ciphertext — a rotated/updated key changes its
+// encrypted_key, so stale entries can never be served and there is no hook to
+// wire. ponytail: unbounded Map; a keys page refresh prunes nothing, but one
+// entry is ~64 bytes and key counts are human-scale.
+const decryptCache = new Map<number, { ct: string; plain: string }>();
+function cachedDecrypt(keyId: number, ct: string, iv: string, authTag: string): string {
+  const hit = decryptCache.get(keyId);
+  if (hit && hit.ct === ct) return hit.plain;
+  const plain = decrypt(ct, iv, authTag);
+  decryptCache.set(keyId, { ct, plain });
+  return plain;
+}
+
 function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: Set<string>, diag?: string[]): RouteResult | null {
   const db = getDb();
   const label = `${entry.platform}/${entry.model_id}`;
@@ -1562,10 +1724,17 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
     // fallback exhaustion path rather than blocking here.
     if (!checkMonthlyBudget(key.id, estimatedTokens).allowed) { note('monthly-budget-cap'); continue; }
 
-    // The registry loader already decrypted the credential at load time, so the
-    // hot path performs no AES-GCM open here (and has no decrypt-failure branch
-    // to mark the key dead — that surfaces through last_health_error instead).
-    const decryptedKey = key.decryptedKey;
+    let decryptedKey = key.decryptedKey;
+    if (!decryptedKey && (key as any).encrypted_key && (key as any).iv && (key as any).auth_tag) {
+      try {
+        decryptedKey = cachedDecrypt(key.id, (key as any).encrypted_key, (key as any).iv, (key as any).auth_tag);
+      } catch {
+        db.prepare("UPDATE api_keys SET status = 'error', last_checked_at = datetime('now') WHERE id = ?")
+          .run(key.id);
+        note('decrypt-error');
+        continue;
+      }
+    }
     if (!decryptedKey) { note('decrypt-error'); continue; }
 
     const resolvedProvider = entry.platform === 'custom'
@@ -1756,9 +1925,24 @@ export function routePinnedModel(modelDbId: number, estimatedTokens = 1000, skip
   // pre-margin behavior was one dispatch attempt (a mid-chain context_too_large
   // 400 is classified and retried downstream). Nothing is multiplied here —
   // estimatedTokens already carries the exact capped output reserve (#470).
-  if (!fitsContextWindowStrict(entry.context_window, estimatedTokens)) return null;
-  if (entry.tpm_limit != null && estimatedTokens > entry.tpm_limit) return null;
+  if (!rowFitsRequestSize(entry, estimatedTokens)) return null;
   return selectKeyForModel(entry, estimatedTokens, skipKeys);
+}
+
+function rowFitsRequestSize(entry: ChainRow, estimatedTokens: number): boolean {
+  if (!fitsContextWindowStrict(entry.context_window, estimatedTokens)) return false;
+  return entry.tpm_limit == null || estimatedTokens <= entry.tpm_limit;
+}
+
+/**
+ * Whether a pinned model's known context window and TPM ceiling can hold a
+ * request this size. Lets a caller tell "routePinnedModel returned null because
+ * the request is too big" (permanent for this request) from "no key is free
+ * right now" (transient). An unknown model is not a size problem.
+ */
+export function pinnedModelFitsRequestSize(modelDbId: number, estimatedTokens: number): boolean {
+  const entry = getModelChainRow(getDb(), modelDbId);
+  return !entry || rowFitsRequestSize(entry, estimatedTokens);
 }
 
 /**
@@ -2024,9 +2208,36 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // The requested model is not in the current routing chain (e.g. it's a
       // custom model or not added to the active profile). We must fulfill the
       // explicit request by injecting it at the front.
-      const pinnedRow = registryModelChainRow(preferredModelDbId);
+      let pinnedRow: ChainRow | undefined;
+      try {
+        pinnedRow = db.prepare(`
+          SELECT m.id as model_db_id, 0 as priority, 1 as enabled,
+                 m.platform, m.model_id, m.display_name, m.intelligence_rank,
+                 m.size_label, m.monthly_token_budget,
+                 m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+                 m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+          FROM models m
+          WHERE m.id = ? AND m.enabled = 1
+        `).get(preferredModelDbId) as ChainRow | undefined;
+      } catch {
+        pinnedRow = undefined;
+      }
+      if (!pinnedRow) {
+        pinnedRow = registryModelChainRow(preferredModelDbId);
+      }
 
-      if (pinnedRow) {
+      // A model retired upstream (#634: 410 end-of-life) must not be re-added
+      // by a client pin — the row stays `models.enabled = 1` by design, but the
+      // chain tables are off and the provider answers 410 on every call. An
+      // explicit pin bypasses both chain tables, so skip the injection and let
+      // the request fall through to the rest of the chain (or the normal
+      // exhaustion error when nothing is left). A user tombstone still pins:
+      // that deletion is dashboard-managed, and the user asking by name is
+      // newer intent than their own earlier delete.
+      const retiredUpstream = pinnedRow
+        && getCatalogModelTombstone(db, 'chat', pinnedRow.platform, pinnedRow.model_id)?.source === 'upstream_eol';
+
+      if (pinnedRow && !retiredUpstream) {
         sortedChain.unshift(pinnedRow);
       }
     }

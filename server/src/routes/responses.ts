@@ -13,7 +13,8 @@ import { routeRequest, hasEnabledVisionModel, hasEnabledToolsModel, resolveStick
 import { getDb } from '../db/index.js';
 import { resolveAuth, prependSystemPrompt } from '../lib/system-prompt.js';
 import { isUnifyEnabled, getModelGroups, resolveRequestedIdForDispatch } from '../services/model-groups.js';
-import { contentToString, messageHasImage } from '../lib/content.js';
+import { contentToString, estimateInputTokens, messageHasImage } from '../lib/content.js';
+import { routeOutputBudget } from '../lib/output-cap.js';
 import { resolveTaskType } from '../lib/task-type.js';
 import { normalizeMessageImages } from '../lib/image-normalize.js';
 import { repairToolArguments, toolSchemaMap } from '../lib/tool-args.js';
@@ -38,6 +39,7 @@ import { sanitizeProviderErrorMessage } from '../lib/error-redaction.js';
 import { isClientAbortError, newClientAbortError, newHedgeAbortError } from '../lib/error-classify.js';
 import { inferQuotaPoolKey, type QuotaObservationContext } from '../services/provider-quota.js';
 import { compressRequest, formatCompressionHeader } from '../services/compression/pipeline.js';
+import { maybeServeResponsesWebSearch, webSearchCallToText } from '../lib/responses-web-search.js';
 import {
   FUSION_MODEL_ID,
   FusionError,
@@ -351,10 +353,29 @@ export function toChatMessages(req: ResponsesRequest): ChatMessage[] {
   }
 
   const messages: ChatMessage[] = [];
+  // Replayed web_search_call items (served by the gateway's search pool, or
+  // by OpenAI) become a short note on the assistant turn that follows, so the
+  // model keeps the context of what it searched without an extra assistant
+  // turn (consecutive assistant turns 400 on strict upstreams, #96).
+  let pendingSearchNotes: string[] = [];
+  const flushSearchNotes = () => {
+    if (pendingSearchNotes.length === 0) return;
+    messages.push({ role: 'assistant', content: pendingSearchNotes.join('\n') });
+    pendingSearchNotes = [];
+  };
 
   const items = req.input;
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
+
+    if ('type' in item && item.type === 'web_search_call') {
+      const note = webSearchCallToText(item as Record<string, unknown>);
+      if (note) pendingSearchNotes.push(note);
+      continue;
+    }
+    if (!('type' in item && item.type === 'message' && (item as { role?: string }).role === 'assistant')) {
+      flushSearchNotes();
+    }
 
     if ('type' in item && item.type === 'function_call') {
       // Parallel tool calls replay as consecutive standalone function_call
@@ -398,7 +419,7 @@ export function toChatMessages(req: ResponsesRequest): ChatMessage[] {
     const m = item as z.infer<typeof messageItemSchema>;
     // 'developer' is the Responses-era system role.
     const role = m.role === 'developer' ? 'system' : m.role;
-    const content = partsToChatContent(m.content);
+    let content = partsToChatContent(m.content);
 
     if (role === 'system') {
       // Hoist system/developer messages to the start of the conversation:
@@ -410,6 +431,14 @@ export function toChatMessages(req: ResponsesRequest): ChatMessage[] {
     }
 
     if (role === 'assistant') {
+      const searchNotes = pendingSearchNotes;
+      pendingSearchNotes = [];
+      if (searchNotes.length > 0) {
+        const notes = searchNotes.join('\n');
+        content = typeof content === 'string'
+          ? (content.length > 0 ? `${notes}\n\n${content}` : notes)
+          : [{ type: 'text', text: notes }, ...content];
+      }
       // A Responses assistant turn is a message item followed by its
       // function_call items. Merge them into a single chat assistant message
       // (content + tool_calls); emitting consecutive assistant turns makes
@@ -443,6 +472,7 @@ export function toChatMessages(req: ResponsesRequest): ChatMessage[] {
 
     messages.push({ role, content });
   }
+  flushSearchNotes();
 
   return [...systemMessages, ...messages];
 }
@@ -620,7 +650,15 @@ function quotaContextForRoute(route: RouteResult, endpoint: string): QuotaObserv
   };
 }
 
+// A `web_search` tool is served through the search loop
+// (lib/responses-web-search.ts) when a search key exists; it re-enters
+// handleResponses once per model turn. Everything else goes straight through.
 responsesRouter.post('/responses', async (req: Request, res: Response) => {
+  if (await maybeServeResponsesWebSearch(handleResponses, req, res)) return;
+  await handleResponses(req, res);
+});
+
+export async function handleResponses(req: Request, res: Response): Promise<void> {
   const start = Date.now();
   const requestGroupId = getRequestGroupId(req);
   res.setHeader('X-Request-ID', requestGroupId);
@@ -725,10 +763,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
   // bytes (see lib/image-normalize.ts). Mutates the image blocks in place.
   await normalizeMessageImages(messages);
 
-  const estimatedInputTokens = messages.reduce(
-    (sum, m) => sum + Math.ceil(contentToString(m.content).length / 4),
-    0,
-  );
+  const estimatedInputTokens = estimateInputTokens(messages, tools);
 
   // Image requests must route to a vision-capable model (mirrors
   // /chat/completions, proxy.ts). Reject up front with a clear message when
@@ -916,6 +951,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
             error: {
               message: err.message,
               type: err.status === 429 ? 'rate_limit_error' : err.status >= 500 ? 'server_error' : 'invalid_request_error',
+              ...(err.code ? { code: err.code } : {}),
             },
           });
         } else {
@@ -1098,11 +1134,12 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
       const type = err instanceof FusionError
         ? (err.status === 429 ? 'rate_limit_error' : err.status >= 500 ? 'server_error' : 'invalid_request_error')
         : 'server_error';
+      const code = err instanceof FusionError ? err.code : undefined;
       fusionSse('response.failed', {
         response: {
           ...skeleton,
           status: 'failed',
-          error: { message, type },
+          error: { message, type, ...(code ? { code } : {}) },
         },
       });
       res.end();
@@ -1141,7 +1178,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
       return routeRequest(routingTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? resolvedChain?.chain, completionOpts.response_format !== undefined, state.skipPlatforms.size > 0 ? state.skipPlatforms : undefined, outputReserve, taskType);
     },
     dispatch: async (route, attempt, ctx) => {
-      const contextBudget = route.contextWindow != null ? route.contextWindow - estimatedInputTokens : undefined;
+      const contextBudget = routeOutputBudget(route, estimatedInputTokens);
       const routeOpts = contextBudget != null ? { ...dispatchOpts, contextBudget } : dispatchOpts;
       traceRouteEvent('Responses', {
         event: attempt === 0 ? 'start' : 'next',
@@ -1618,4 +1655,4 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
       }
     },
   });
-});
+}

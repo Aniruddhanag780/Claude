@@ -6,22 +6,65 @@ import { getPostgresPool } from '../db/postgres.js';
 export const conversationsRouter = Router();
 
 const MAX_TITLE_LEN = 200;
-const MAX_MESSAGES_BYTES = 10 * 1024 * 1024;
+// A conversation is prose plus, occasionally, inlined image data URIs. 2 MB of
+// serialised JSON is far more than any readable chat and still small enough to
+// hand back on every switch without thinking about it. Over that we refuse the
+// write rather than silently truncating someone's history.
+export const MAX_MESSAGES_BYTES = 2 * 1024 * 1024;
 const MAX_MODEL_LEN = 250;
 const MAX_SYSTEM_PROMPT_LEN = 64_000;
 
+// Mirrors the client's ChatMessage. Kept permissive on `content` (an empty
+// assistant bubble is legitimate mid-fusion) and strict on `role`, which is the
+// one field the renderer branches on.
+const metaSchema = z.object({
+  platform: z.string().optional(),
+  model: z.string().optional(),
+  latency: z.number().optional(),
+  fallbackAttempts: z.number().optional(),
+  fusionPanel: z.array(z.object({
+    platform: z.string(),
+    model: z.string(),
+    status: z.enum(['ok', 'failed']).optional(),
+    content: z.string().optional(),
+    error: z.string().optional(),
+  })).optional(),
+  fusionJudge: z.object({ platform: z.string(), model: z.string() }).nullable().optional(),
+  // Playground "Search the web" (#1174): the engine that ran and the sources
+  // shown under the answer, so a reloaded chat keeps its citations.
+  webSearch: z.object({
+    engine: z.string().max(200).optional(),
+    latency: z.number().optional(),
+    sources: z.array(z.object({ title: z.string().max(1000), url: z.string().max(4000) })).max(50).optional(),
+  }).optional(),
+});
+
+const messageSchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  content: z.string(),
+  images: z.array(z.string()).optional(),
+  isError: z.boolean().optional(),
+  reasoning: z.string().optional(),
+  meta: metaSchema.optional(),
+});
+
+const messagesSchema = z.array(messageSchema);
+
+const modelSchema = z.string().max(MAX_MODEL_LEN).nullable();
+const systemPromptSchema = z.string().max(MAX_SYSTEM_PROMPT_LEN).nullable();
+
 const createSchema = z.object({
   title: z.string().trim().max(MAX_TITLE_LEN).optional(),
-  messages: z.array(z.unknown()).optional(),
-  model: z.string().trim().max(MAX_MODEL_LEN).nullish(),
-  systemPrompt: z.string().max(MAX_SYSTEM_PROMPT_LEN).nullish(),
+  messages: messagesSchema.optional(),
+  model: modelSchema.optional(),
+  systemPrompt: systemPromptSchema.optional(),
 });
 
 const updateSchema = z.object({
   title: z.string().trim().max(MAX_TITLE_LEN).optional(),
-  messages: z.array(z.unknown()).optional(),
-  model: z.string().trim().max(MAX_MODEL_LEN).nullable().optional(),
-  systemPrompt: z.string().max(MAX_SYSTEM_PROMPT_LEN).nullable().optional(),
+  messages: messagesSchema.optional(),
+  model: modelSchema.optional(),
+  systemPrompt: systemPromptSchema.optional(),
 });
 
 interface ConversationRow {

@@ -152,21 +152,24 @@
     "compressionRunPreview": "Vorschau ausführen",
     "updatesTitle": "Aktualisierungen",
     "checkForUpdates": "Suchen Sie nach Updates",
-    "lastChecked": "Zuletzt überprüft: {when}",
-    "currentVersion": "Aktueller Build:",
     "updateAvailable": "Aktualisierung verfügbar",
-    "changelog": "Was ist neu",
     "upToDate": "Auf dem neuesten Stand",
     "buildAhead": "Dieser Build ist dem offiziellen main-Branch voraus.",
     "buildDiverged": "Dieser Build ist vom offiziellen main-Branch abgewichen.",
     "buildUnknown": "Dieser benutzerdefinierte Build kann nicht mit dem offiziellen main-Branch verglichen werden.",
     "notGitInstall": "Diese Installation enthält keine Commit-Informationen.",
     "checkFailed": "Aktualisierungen konnten nicht geprüft werden.",
-    "contactsGithub": "Prüfungen erfolgen manuell und stellen eine Verbindung zu GitHub her.",
     "autoUpdateCheck": "Automatische Updateprüfung",
-    "autoUpdateCheckHelp": "Prüft einmal täglich auf GitHub, ob es eine neue Version gibt, und zeigt eine Erinnerung an. Standardmäßig deaktiviert.",
-    "openReleases": "GitHub-Releases öffnen",
-    "restartAfterUpdate": "FreeLLMAPI nach Abschluss des Builds neu starten."
+    "restartAfterUpdate": "FreeLLMAPI nach Abschluss des Builds neu starten.",
+    "downloadUpdate": "Update herunterladen",
+    "downloadingUpdate": "Wird heruntergeladen… {percent} %",
+    "restartToUpdate": "Neu starten und aktualisieren",
+    "updateReadyHint": "Heruntergeladen. FreeLLMAPI sichert Ihre Daten, startet neu und öffnet die neue Version.",
+    "updateInstallFailed": "Das Update konnte nicht installiert werden.",
+    "updateNow": "Jetzt aktualisieren",
+    "updatingContainer": "Das neue Image wird geladen und neu gestartet. Die Seite lädt neu, sobald FreeLLMAPI wieder da ist.",
+    "updateNowFailed": "Der Updater hat die Anfrage nicht angenommen. Prüfen Sie, ob der watchtower-Container läuft.",
+    "updateNowTimeout": "FreeLLMAPI ist nach 5 Minuten nicht neu gestartet. Prüfen Sie die Logs des watchtower-Containers."
   },
   "models": {
     "title": "Modelle",
@@ -224,6 +227,7 @@
     "settingsHint": "Lokale Änderungen an Katalogmodellen bleiben bei allen Katalogsynchronisierungen erhalten. Gelöschte Katalogmodelle bleiben gelöscht, bis Sie sie über die Konfiguration erneut hinzufügen.",
     "catalogModel": "Katalog",
     "customModel": "Brauch",
+    "discoveredModel": "entdeckt",
     "localOverride": "lokale Überschreibung",
     "displayName": "Anzeigename",
     "sizeLabel": "Fähigkeitsstufe",
@@ -340,7 +344,10 @@
     "weightSpeed": "Geschwindigkeit",
     "weightIntelligence": "Intelligenz",
     "weightRequired": "Mindestens ein Gewicht muss über Null liegen.",
-    "scoreColumn": "Punktzahl"
+    "scoreColumn": "Punktzahl",
+    "minReliabilityFloor": "Minimale Zuverlässigkeitsschwelle",
+    "minReliabilityFloorHint": "Nimmt ein Modell aus dem Routing, sobald seine beobachtete Erfolgsquote unter diesen Wert fällt. 0,8 bedeutet 80 %. Leer lassen zum Deaktivieren – Modelle mit zu wenig Historie bleiben immer erhalten, damit neue Modelle weiter getestet werden können. Leert niemals die gesamte Kette.",
+    "minReliabilityFloorOff": "Deaktiviert"
   },
   "penaltyInspector": {
     "title": "Router-Druck",
@@ -497,11 +504,11 @@
     "platform": "Plattform",
     "hideAdded": "Hinzugefügte Anbieter ausblenden",
     "apiToken": "API-Token",
-    "noKeyNeededPlaceholder": "Kein API-Schlüssel erforderlich",
+    "keyOptionalPlaceholder": "Optional",
     "bearerTokenPlaceholder": "Inhabertoken",
     "pasteKeyPlaceholder": "Schlüssel hier einfügen",
     "pasteSeveral": "Mehrere einfügen",
-    "keylessHint": "Kein API-Schlüssel erforderlich: Das kostenlose Kontingent dieses Anbieters ist anonym (Ratenbegrenzung pro IP).",
+    "keyOptionalHint": "Optional: Leer lassen für das anonyme Gratiskontingent (Ratenbegrenzung pro IP) oder eigenen Schlüssel einfügen, um Ihr Konto zu nutzen.",
     "enable": "Aktivieren",
     "noProviderKeys": "Noch keine Anbieterschlüssel. Fügen Sie oben eines hinzu, um mit dem Routing zu beginnen.",
     "filterPlaceholder": "Filtern Sie Anbieter oder Schlüssel",
@@ -679,7 +686,22 @@
     "testFailed": "Modelltest fehlgeschlagen",
     "testThrottled": "Bitte warten Sie {seconds}s, bevor Sie dieses Modell erneut testen.",
     "noModelsForProvider": "Keine Modelle für diesen Anbieter konfiguriert.",
-    "testModels": "Modelle testen"
+    "testModels": "Modelle testen",
+    "monthlyRequestCapLabel": "Monatliches Anfrage-Limit",
+    "monthlyTokenCapLabel": "Monatliches Token-Limit",
+    "capUnlimitedPlaceholder": "Unbegrenzt",
+    "capEditHint": "Limits werden am 1. um 00:00 UTC zurückgesetzt. Leer lassen für unbegrenzt.",
+    "monthlyUsageLine": "{requests} Anfragen, {tokens} Tokens diesen Monat",
+    "quotaBalanceHint": "{remaining} von {limit} {metric} übrig",
+    "quotaBalanceLeft": "{remaining} übrig"
+,
+    "groupLabel": "Group",
+    "groupLabelPlaceholder": "e.g. Relays, Work…",
+    "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
+    "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
+    "copyGroupHandle": "Copy group handle",
+    "groupHandleCopied": "Copied {handle}",
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
   },
   "backups": {
     "title": "Backups",
@@ -713,7 +735,8 @@
     "pathPlaceholder": "backups",
     "pathHint": "Relative to the database directory. Backups cannot be written outside it.",
     "save": "Save schedule",
-    "saved": "Saved"
+    "saved": "Saved",
+    "preUpdate": "Vor Update"
   },
   "status": {
     "healthy": "gesund",
@@ -864,6 +887,7 @@
     "maxTokens": "Max. Tokens",
     "errorTitle": "Die Anfrage ist fehlgeschlagen",
     "attach": "Dateien anhängen",
+    "addMenu": "Add files and tools",
     "attachTooMany": "Sie können bis zu {count} Dateien pro Nachricht anhängen.",
     "attachTooLarge": "{name} ist zu groß. Das Limit beträgt {max}.",
     "attachUnsupported": "{name} wird nicht unterstützt. Hängen Sie Bilder (PNG, JPEG, WebP, GIF) oder Textdateien (TXT, MD, CSV, JSON, LOG) an.",
@@ -1135,17 +1159,16 @@
       "generic": "Alles andere, was die OpenAI-API spricht — von Hand mit Basis-URL und Schlüssel eingerichtet.",
       "atomcode": "AtomGits Terminal-Agent, in Rust geschrieben, für jeden OpenAI-kompatiblen Endpunkt.",
       "openclaw": "Ein ständig verfügbarer persönlicher Assistent, der von deinem eigenen Rechner aus auf WhatsApp, Telegram, Discord und mehr antwortet.",
-      "hermes": "Der selbstverbessernde Agent von Nous Research mit dauerhaftem Gedächtnis und Skills, im Terminal oder in Chat-Apps."
+      "hermes": "Der selbstverbessernde Agent von Nous Research mit dauerhaftem Gedächtnis und Skills, im Terminal oder in Chat-Apps.",
+      "pi": "Ein minimaler Terminal-Agent, den du mit eigenen Erweiterungen, Skills und Prompt-Vorlagen formst.",
+      "reasonix": "Ein für DeepSeek gebauter Coding-Agent fürs Terminal, ausgelegt auf Prefix-Caching, damit lange Sitzungen günstig bleiben."
     }
   },
   "update": {
     "available": "New version available",
-    "whatsNew": "What's new in v{version}",
-    "publishedOn": "Published {date}",
-    "noNotes": "No release notes were published for this version.",
-    "openRelease": "Open release page",
-    "dismissVersion": "Dismiss this version",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "newBuild": "Eine neuere Version von FreeLLMAPI ist installiert.",
+    "reload": "Neu laden"
   },
   "freeTier": {
     "poolsToggle": "Free-Tier-Pools ({count})",
@@ -1198,5 +1221,48 @@
     "renameConfirm": "Kette \"{oldName}\" in \"{name}\" umbenennen? Clients, die auto:{oldName} aufrufen, müssen auf auto:{name} wechseln.",
     "renamePlaceholder": "Neuer Kettenname",
     "renameFailed": "Die Kette konnte nicht umbenannt werden."
+  },
+  "updates": {
+    "versionAvailable": "Version {version} ist verfügbar",
+    "versionReady": "Version {version} ist bereit zur Installation",
+    "releaseNotes": "Versionshinweise",
+    "tryAgain": "Erneut versuchen",
+    "offline": "Prüfen Sie Ihre Internetverbindung und versuchen Sie es erneut."
+  },
+  "search": {
+    "tab": "Search",
+    "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
+    "endpointHint": "Search via",
+    "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
+    "empty": "No search engines yet. They sync from the catalog.",
+    "creditsPerSearchOne": "1 credit / search",
+    "creditsPerSearchOther": "{count} credits / search",
+    "default": "Default",
+    "makeDefault": "Make default",
+    "premiumBadge": "Premium · free from {date}",
+    "thisMonth": "{count} this month",
+    "featureNews": "news",
+    "featureAnswer": "sourced answers",
+    "featureFullContent": "also reads pages",
+    "badge": "Search",
+    "keysSection": "Search",
+    "keysSectionHint": "Web search keys. Used by /v1/search and by Claude Code / Codex web search, never for chat.",
+    "keysModelsSection": "Models",
+    "pickerSearch": "Search",
+    "pickerModels": "Models",
+    "playgroundHeading": "Web search",
+    "playgroundHelp": "Looks things up with your search keys before answering, and lists sources.",
+    "playgroundNoKeys": "Add a search key on the Keys page to turn this on.",
+    "playgroundToggle": "Search the web",
+    "playgroundEngines": "Engines: {chain}",
+    "playgroundFailed": "Web search failed, answering without it: {reason}",
+    "traceSources": "{count} web sources",
+    "searched": "Searched the web · {engine} · {count} sources · {latency} ms",
+    "analyticsByEngine": "Searches by engine",
+    "analyticsSummary": "Search summary",
+    "analyticsSearches": "Searches",
+    "analyticsToday": "Today",
+    "agentsBadgeClaude": "Web search: WebSearch tool served by your search keys",
+    "agentsBadgeCodex": "Web search: web_search tool served by your search keys"
   }
 }

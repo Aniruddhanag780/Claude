@@ -85,6 +85,18 @@ function resolveValue(raw: string, params: any[], state: { i: number }): any {
     state.i++;
     return val;
   }
+  if (/^[@$:][A-Za-z_]\w*$/.test(v)) {
+    const name = v.slice(1);
+    const obj = params[0];
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      if (name in obj) return obj[name];
+      const snake = name.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+      if (snake in obj) return obj[snake];
+      const camel = name.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+      if (camel in obj) return obj[camel];
+      return null;
+    }
+  }
   if (/^NULL$/i.test(v)) return null;
   if (/^'(.*)'$/s.test(v)) return v.replace(/^'(.*)'$/s, '$1').replace(/''/g, "'");
   if (NOW_RE.test(v)) return nowIso();
