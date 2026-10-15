@@ -72,6 +72,8 @@ export type Platform =
   | 'aclide'
   // OpenAI-compatible chat and embeddings; one shared $1 monthly allowance.
   | 'speka'
+  // Built-in chat and embeddings share free monthly credits; catalog only.
+  | 'auray'
   // Ongoing free research API for chat and speech recognition; catalog only.
   | 'typhoon'
   // Permanent free chat aliases, shared fair-use quota; signed catalog only.
@@ -97,6 +99,9 @@ export type Platform =
   | 'septor'
   | 'clod'
   | 'speechify'
+  // Self-hosted TTS: shared 30K tokens/day and 1K API requests/month, no card.
+  // Model rows arrive only through the signed, freshness-gated catalog.
+  | 'freeai'
   | 'blaze'
   // Lucidity Composite, Api.Airforce and DreamPrompting expose daily free
   // allowances; Waterfall and Logfare publish community / fair-use tiers.
@@ -123,6 +128,14 @@ export type Platform =
   | 'openrouter'
   | 'github'
   | 'cohere'
+  // Web search APIs (#1174), not chat providers. Their keys serve POST
+  // /v1/search (and the agents' web_search tools) through the catalog's
+  // searchEngines registry; chat calls to them are rejected. See
+  // SEARCH_PLATFORMS below.
+  | 'tavily'
+  | 'exa'
+  | 'firecrawl'
+  | 'linkup'
   | 'cloudflare'
   | 'zhipu'
   | 'ollama'
@@ -246,6 +259,17 @@ export type Platform =
   // User-configured OpenAI-compatible endpoint (llama.cpp, LM Studio, vLLM,
   // Ollama, any base_url). The endpoint URL lives on the api_keys row; see #117.
   | 'custom';
+
+/** Platforms whose keys serve web search (POST /v1/search and the agents'
+ *  web_search tools), never chat. Search engine rows arrive through the
+ *  catalog's `searchEngines` registry. The server keeps its own runtime copy in
+ *  server/src/lib/search-platforms.ts (shared is type-only on the server). */
+export const SEARCH_PLATFORMS = ['tavily', 'exa', 'firecrawl', 'linkup'] as const;
+export type SearchPlatform = (typeof SEARCH_PLATFORMS)[number];
+
+export function isSearchPlatform(platform: string): platform is SearchPlatform {
+  return (SEARCH_PLATFORMS as readonly string[]).includes(platform);
+}
 
 export interface Model {
   id: number;

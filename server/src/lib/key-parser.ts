@@ -46,6 +46,7 @@ export interface ParseResult {
 export const PREFIX_MAP: Record<string, string> = {
   ACLIDE_: 'aclide',
   SPEKA_: 'speka',
+  AURAY_: 'auray',
   TYPHOON_: 'typhoon',
   PLUGSKY_: 'plugsky',
   INFERBASE_: 'inferbase',
@@ -96,6 +97,10 @@ export const PREFIX_MAP: Record<string, string> = {
   OPENROUTER_: 'openrouter',
   GITHUB_: 'github',
   COHERE_: 'cohere',
+  TAVILY_: 'tavily',
+  EXA_: 'exa',
+  FIRECRAWL_: 'firecrawl',
+  LINKUP_: 'linkup',
   CLOUDFLARE_: 'cloudflare',
   ZHIPU_: 'zhipu',
   OLLAMA_: 'ollama',
@@ -152,6 +157,7 @@ export const AUTH_JSON_PROVIDER_MAP: Record<string, string> = {
   sail: 'sail',
   aclide: 'aclide',
   speka: 'speka',
+  auray: 'auray',
   typhoon: 'typhoon',
   plugsky: 'plugsky',
   inferbase: 'inferbase',
@@ -232,6 +238,10 @@ export const AUTH_JSON_PROVIDER_MAP: Record<string, string> = {
   xfyun: 'xfyun',
   spark: 'xfyun',
   iflytek: 'xfyun',
+  tavily: 'tavily',
+  exa: 'exa',
+  firecrawl: 'firecrawl',
+  linkup: 'linkup',
 };
 
 export function detectPlatform(prefix: string): string | null {
@@ -459,21 +469,49 @@ function splitCsvLine(line: string): string[] {
 }
 
 /**
+ * Split CSV input into complete records, keeping line breaks inside quoted
+ * fields for splitCsvLine() to parse as part of the field value.
+ */
+function splitCsvRecords(content: string): string[] {
+  const records: string[] = [];
+  let recordStart = 0;
+  let inQuotes = false;
+
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i];
+    if (ch === '"') {
+      if (inQuotes && content[i + 1] === '"') {
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (!inQuotes && (ch === '\n' || (ch === '\r' && content[i + 1] === '\n'))) {
+      records.push(content.slice(recordStart, i));
+      if (ch === '\r') i++;
+      recordStart = i + 1;
+    }
+  }
+
+  records.push(content.slice(recordStart));
+  return records.filter(record => record.trim());
+}
+
+/**
  * Parse CSV format: platform,key,label[,base_url] (with optional header row).
  * The trailing base_url column is what makes a 'custom' row importable — an
  * endpoint is identified by its URL, so a custom key without one is orphaned.
  */
 export function parseCsv(content: string): KeyPair[] {
-  const lines = content.split('\n').filter(l => l.trim());
-  if (lines.length === 0) return [];
+  const records = splitCsvRecords(content);
+  if (records.length === 0) return [];
 
   const result: KeyPair[] = [];
 
   // Skip header row if it looks like a CSV header
-  const startIdx = lines[0]!.toLowerCase().startsWith('platform,') ? 1 : 0;
+  const startIdx = records[0]!.toLowerCase().startsWith('platform,') ? 1 : 0;
 
-  for (let i = startIdx; i < lines.length; i++) {
-    const fields = splitCsvLine(lines[i]!);
+  for (let i = startIdx; i < records.length; i++) {
+    const fields = splitCsvLine(records[i]!);
     const platform = (fields[0] ?? '').trim();
     const key = (fields[1] ?? '').trim();
     // Undo the export's CSV formula guard (a leading ' before =, +, -, @, tab

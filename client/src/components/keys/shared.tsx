@@ -29,6 +29,7 @@ export function GetKeyLink({ url }: { url: string }) {
 export const PLATFORMS: { value: Platform; label: string; url: string; keyless?: boolean }[] = [
   { value: 'aclide', label: 'ACLIDE (shared monthly credits)', url: 'https://aclide.com/en/dashboard/api-keys' },
   { value: 'speka', label: 'Speka ($1 shared monthly credits)', url: 'https://speka.me/dashboard/keys' },
+  { value: 'auray', label: 'Auray (50 shared monthly credits)', url: 'https://app.auray.ai' },
   { value: 'typhoon', label: 'Typhoon (free research API)', url: 'https://playground.opentyphoon.ai' },
   { value: 'plugsky', label: 'Plugsky (free chat aliases)', url: 'https://plugsky.com/dashboard' },
   { value: 'inferbase', label: 'Inferbase (shared monthly and daily allowance)', url: 'https://inferbase.ai' },
@@ -47,6 +48,7 @@ export const PLATFORMS: { value: Platform; label: string; url: string; keyless?:
   { value: 'septor', label: 'Septor Labs (daily free-model quota)', url: 'https://septorlabs.com/dashboard' },
   { value: 'clod', label: 'CLōD (shared daily free requests)', url: 'https://newapp.clod.io' },
   { value: 'speechify', label: 'Speechify (monthly free TTS characters)', url: 'https://platform.speechify.ai' },
+  { value: 'freeai', label: 'Free.ai (shared daily free TTS tokens)', url: 'https://free.ai/account/#api-keys' },
   { value: 'blaze', label: 'BlazeAPI (daily free tokens; Discord verification)', url: 'https://blazeapi.org/dashboard' },
   { value: 'lucidity', label: 'Lucidity Composite (daily free-model requests)', url: 'https://composite.lucidity.sh' },
   { value: 'airforce', label: 'Api.Airforce (daily free requests; 1 per minute)', url: 'https://api.airforce' },
