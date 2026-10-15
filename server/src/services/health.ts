@@ -75,7 +75,19 @@ const failureCount = new Map<number, number>();
 // handing it traffic, every attempt dies, and failover costs the request its
 // latency budget (#1510 measured 264 failures vs 8 successes in a day on a
 // 39-key install with zero keys ever showing 'error').
-export const CONSECUTIVE_TRANSPORT_ERRORS_TO_PARK = 6;
+//
+// Opt-in: HEALTH_TRANSPORT_PARK_AFTER sets the streak length (6 is the
+// suggested value, ~30 minutes at the default cadence). Unset or 0 keeps the
+// default "keep trying" behaviour: a transport error never takes a key out of
+// rotation, because a key the router stops using can only come back through a
+// probe, and a provider whose validation endpoint is down while chat still
+// works would otherwise lose every key at once.
+export const SUGGESTED_TRANSPORT_PARK_AFTER = 6;
+
+/** Streak length that parks a key, or 0 when parking is off (the default). */
+export function getTransportParkAfter(): number {
+  return positiveIntEnv(process.env.HEALTH_TRANSPORT_PARK_AFTER, 0);
+}
 
 const transportFailures = new Map<number, number>();
 
@@ -88,9 +100,11 @@ export function clearTransportFailureState(): void {
  *  treats it as proof the provider is reachable. Returns true when this call
  *  parked the key (status written to 'error'). */
 function recordTransportFailure(keyId: number, platform: string | undefined): boolean {
+  const parkAfter = getTransportParkAfter();
+  if (parkAfter === 0) return false;
   const count = (transportFailures.get(keyId) ?? 0) + 1;
   transportFailures.set(keyId, count);
-  if (count < CONSECUTIVE_TRANSPORT_ERRORS_TO_PARK) return false;
+  if (count < parkAfter) return false;
 
   // Park: 'error' is out of rotation (the router only routes healthy/unknown)
   // but stays eligible for re-probing and self-heals. Never touch 'invalid' —
@@ -330,9 +344,9 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     // reached the provider. Confirmed 401/403 (the isValid=false path above) still
     // demotes.
     //
-    // #1510 adds the accumulation this path was missing: a key that has been
-    // unreachable CONSECUTIVELY_TRANSPORT_ERRORS_TO_PARK probes in a row is parked
-    // at 'error' — still re-probed every pass, self-healing on the first answer
+    // #1510 adds the accumulation this path was missing (opt-in via
+    // HEALTH_TRANSPORT_PARK_AFTER): a key that has been unreachable that many
+    // probes in a row is parked at 'error' — still re-probed every pass, self-healing on the first answer
     // or served request, but no longer first-class routing capacity. A 429 is
     // proof the provider is reachable, so it counts as a break in the streak,
     // not an increment.

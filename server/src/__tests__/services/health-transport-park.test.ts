@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 
 const validateKey = vi.fn();
 vi.mock('../../providers/index.js', async (importOriginal) => {
@@ -15,8 +15,10 @@ const {
   checkKeyHealth,
   markKeyHealthyFromRequest,
   clearTransportFailureState,
-  CONSECUTIVE_TRANSPORT_ERRORS_TO_PARK,
+  SUGGESTED_TRANSPORT_PARK_AFTER: CONSECUTIVE_TRANSPORT_ERRORS_TO_PARK,
 } = await import('../../services/health.js');
+
+const ORIGINAL_PARK_AFTER = process.env.HEALTH_TRANSPORT_PARK_AFTER;
 
 /**
  * #1510: transport errors (DNS/timeout/TLS) never accumulated, so a key whose
@@ -36,7 +38,13 @@ describe('transport-error parking (#1510)', () => {
     initDb(':memory:');
   });
 
+  afterAll(() => {
+    if (ORIGINAL_PARK_AFTER === undefined) delete process.env.HEALTH_TRANSPORT_PARK_AFTER;
+    else process.env.HEALTH_TRANSPORT_PARK_AFTER = ORIGINAL_PARK_AFTER;
+  });
+
   beforeEach(() => {
+    process.env.HEALTH_TRANSPORT_PARK_AFTER = String(CONSECUTIVE_TRANSPORT_ERRORS_TO_PARK);
     validateKey.mockReset();
     clearTransportFailureState();
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -62,6 +70,20 @@ describe('transport-error parking (#1510)', () => {
     validateKey.mockRejectedValue(new Error('getaddrinfo ENOTFOUND api.mistral.ai'));
     for (let i = 0; i < times; i++) await checkKeyHealth(id);
   }
+
+  it('parking is off by default: a long unreachable streak keeps the key in rotation', async () => {
+    delete process.env.HEALTH_TRANSPORT_PARK_AFTER;
+    const id = seedKey('healthy');
+    await failTransport(CONSECUTIVE_TRANSPORT_ERRORS_TO_PARK * 3, id);
+    expect(statusOf(id)).toBe('healthy');
+  });
+
+  it('HEALTH_TRANSPORT_PARK_AFTER=0 also keeps parking off', async () => {
+    process.env.HEALTH_TRANSPORT_PARK_AFTER = '0';
+    const id = seedKey('healthy');
+    await failTransport(CONSECUTIVE_TRANSPORT_ERRORS_TO_PARK * 3, id);
+    expect(statusOf(id)).toBe('healthy');
+  });
 
   it('a short unreachable streak never parks the key', async () => {
     const id = seedKey('healthy');
