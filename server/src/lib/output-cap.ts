@@ -10,7 +10,7 @@
 // The catalog has no output-limit column, so the ceiling is learned from the
 // first rejection and applied to every later request on that model through the
 // per-route output budget (resolveMaxTokens clamps max_tokens to it). A
-// A restart forgets the ceilings; the first request after it pays one failover
+// restart forgets the ceilings; the first request after it pays one failover
 // hop to relearn each one.
 //
 // Keyed per model AND per endpoint (`modelStatsKey`), not per model: every
