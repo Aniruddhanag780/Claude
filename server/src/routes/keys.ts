@@ -4,7 +4,9 @@ import { z } from 'zod';
 import { getPostgresPool } from '../db/postgres.js';
 import { encrypt, decrypt, maskKey } from '../lib/crypto.js';
 import { reloadRoutingRegistry } from '../services/router-registry.js';
-import { getProvider, hasProvider } from '../providers/index.js';
+import { getProvider, hasProvider, getAllProviders } from '../providers/index.js';
+import { getDb } from '../db/index.js';
+import { isSearchPlatform } from '../lib/search-platforms.js';
 import type { Platform, KeyStatus } from '@freellmapi/shared/types.js';
 
 export const keysRouter = Router();
@@ -30,21 +32,70 @@ const rotateKeySchema = z.object({
   key: z.string().min(1),
 });
 
-// GET /api/keys/providers - Platform summary
+// GET /api/keys/providers - Platform summary & checklist
 keysRouter.get('/providers', async (_req: Request, res: Response) => {
   try {
     const pool = getPostgresPool();
-    const resRows = await pool.query(`
-      SELECT p.provider_key as platform,
-             COUNT(c.id) as total_keys,
-             COUNT(CASE WHEN c.enabled = true THEN 1 END) as enabled_keys
-      FROM providers p
-      LEFT JOIN credentials c ON c.provider_id = p.id
-      GROUP BY p.provider_key
-    `);
-    res.json(resRows.rows);
-  } catch {
-    res.json([]);
+    let countRows: Array<{ platform: string; total_keys: number; enabled_keys: number }> = [];
+
+    if (pool && !('isMock' in pool && (pool as any).isMock?.())) {
+      const resQuery = await pool.query(`
+        SELECT p.provider_key as platform,
+               COUNT(c.id) as total_keys,
+               COUNT(CASE WHEN c.enabled = true THEN 1 END) as enabled_keys
+        FROM providers p
+        LEFT JOIN credentials c ON c.provider_id = p.id
+        GROUP BY p.provider_key
+      `);
+      countRows = resQuery.rows.map(r => ({
+        platform: r.platform,
+        total_keys: Number(r.total_keys || 0),
+        enabled_keys: Number(r.enabled_keys || 0),
+      }));
+    } else {
+      const db = getDb();
+      countRows = (db.prepare(`
+        SELECT
+          platform,
+          COUNT(*) AS total_keys,
+          SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS enabled_keys
+        FROM api_keys
+        GROUP BY platform
+      `).all() as Array<{ platform: string; total_keys: number; enabled_keys: number }> | undefined) ?? [];
+    }
+
+    const countsByPlatform = new Map(countRows.map(r => [r.platform, r]));
+
+    const providers = getAllProviders()
+      .filter(p => p.platform !== 'custom')
+      .map(p => {
+        const counts = countsByPlatform.get(p.platform);
+        const keyCount = counts?.total_keys ?? 0;
+        return {
+          platform: p.platform,
+          name: p.name,
+          // 'search' keys serve /v1/search and the agents' web_search tools,
+          // never chat (#1174); the dashboard groups them separately.
+          kind: isSearchPlatform(p.platform) ? 'search' as const : 'chat' as const,
+          keyless: p.keyless,
+          configured: keyCount > 0,
+          keyCount,
+          enabledKeyCount: counts?.enabled_keys ?? 0,
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    const configured = providers.filter(p => p.configured).length;
+    res.json({
+      providers,
+      summary: {
+        total: providers.length,
+        configured,
+        unconfigured: providers.length - configured,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message ?? 'Failed to list providers' });
   }
 });
 

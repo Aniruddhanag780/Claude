@@ -1,4 +1,5 @@
-import { getDb, getSetting, setSetting } from '../db/index.js';
+import { getDb, getPostgresPool, getSetting, setSetting } from '../db/index.js';
+import { getActiveRegistry } from './router-registry.js';
 import { parseRetryAfterMs } from '../providers/base.js';
 import { RetryHintTracker } from '../lib/retry-hint.js';
 import { getClientContext } from '../lib/client-context.js';
@@ -324,6 +325,17 @@ function logSearch(row: SearchEngineRow, keyId: number | null, status: 'ok' | 'e
   } catch (e) {
     console.error('Failed to log search request:', e);
   }
+
+  try {
+    const pool = getPostgresPool();
+    if (pool && !('isMock' in pool && (pool as any).isMock?.())) {
+      pool.query(
+        `INSERT INTO search_requests (engine_id, platform, key_id, status, latency_ms, result_count, client_agent, error)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [row.model_id, row.platform, keyId, status, latencyMs, resultCount, clientAgent, error]
+      ).catch((e: any) => console.error('Failed to log search request to Postgres:', e?.message));
+    }
+  } catch {}
 }
 
 /** Bench this key for this engine according to what the upstream said. */
@@ -347,15 +359,19 @@ function coolDown(row: SearchEngineRow, keyId: number, e: SearchError): void {
  *  be attempted. The agents' web_search integration keys off this. */
 export function searchAvailable(): boolean {
   const db = getDb();
+  const registryCreds = getActiveRegistry()?.getAllCredentials() ?? [];
+
   for (const row of orderedEngines()) {
     if (row.enabled !== 1) continue;
     if (row.platform === 'custom') {
       if (row.key_id == null) continue;
+      if (registryCreds.some(c => c.id === row.key_id && c.enabled && !c.runtime.lastHealthError)) return true;
       const k = db.prepare("SELECT 1 FROM api_keys WHERE id = ? AND enabled = 1 AND status IN ('healthy', 'unknown')").get(row.key_id);
       if (k) return true;
       continue;
     }
     if (!ADAPTERS[row.platform]) continue;
+    if (registryCreds.some(c => c.providerKey === row.platform && c.enabled && !c.runtime.lastHealthError)) return true;
     const k = db.prepare("SELECT 1 FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') LIMIT 1").get(row.platform);
     if (k) return true;
   }
@@ -496,24 +512,35 @@ const FREE_LAG_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function listSearchEngines(): SearchEngineView[] {
   const db = getDb();
-  const keyRows = db.prepare(`
+  const keyRows = ((db.prepare(`
     SELECT id, platform, enabled, status FROM api_keys
      WHERE platform = 'custom' OR platform IN (${[...SEARCH_ENGINE_PLATFORMS].map(() => '?').join(', ')})
-  `).all(...SEARCH_ENGINE_PLATFORMS) as { id: number; platform: string; enabled: number; status: string }[];
+  `).all(...SEARCH_ENGINE_PLATFORMS) as { id: number; platform: string; enabled: number; status: string }[] | undefined) ?? []);
   const healthy = (k: { enabled: number; status: string }) => k.enabled === 1 && (k.status === 'healthy' || k.status === 'unknown');
   const monthCounts = new Map(
-    (db.prepare(`
+    ((db.prepare(`
       SELECT platform, engine_id, COUNT(*) AS n FROM search_requests
        WHERE status = 'ok' AND created_at >= datetime('now', 'start of month')
        GROUP BY platform, engine_id
-    `).all() as { platform: string; engine_id: string; n: number }[]).map(r => [`${r.platform}:${r.engine_id}`, r.n]),
+    `).all() as { platform: string; engine_id: string; n: number }[] | undefined) ?? []).map(r => [`${r.platform}:${r.engine_id}`, r.n]),
   );
+
+  const registryCreds = getActiveRegistry()?.getAllCredentials() ?? [];
 
   return orderedEngines().map(row => {
     const meta = parseSearchMeta(row.meta_json);
     const keys = row.platform === 'custom'
       ? keyRows.filter(k => k.id === row.key_id)
       : keyRows.filter(k => k.platform === row.platform);
+    const regKeys = row.platform === 'custom'
+      ? registryCreds.filter(k => k.id === row.key_id)
+      : registryCreds.filter(k => k.providerKey === row.platform);
+
+    const keyCount = keys.length || regKeys.length;
+    const healthyKeyCount = keys.length
+      ? keys.filter(healthy).length
+      : regKeys.filter(k => k.enabled && !k.runtime.lastHealthError).length;
+
     const premiumSince = typeof meta.premiumSince === 'string' ? meta.premiumSince : null;
     const premiumMs = premiumSince ? Date.parse(premiumSince) : NaN;
     return {
@@ -529,8 +556,8 @@ export function listSearchEngines(): SearchEngineView[] {
       premiumSince,
       freeFrom: Number.isFinite(premiumMs) ? new Date(premiumMs + FREE_LAG_MS).toISOString() : null,
       isCustom: row.platform === 'custom',
-      keyCount: keys.length,
-      healthyKeyCount: keys.filter(healthy).length,
+      keyCount,
+      healthyKeyCount,
       searchesThisMonth: monthCounts.get(engineKey(row)) ?? 0,
     };
   });
@@ -592,34 +619,120 @@ export function searchAnalytics(range: SearchAnalyticsRange): SearchAnalytics {
            COALESCE(SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END), 0) AS ok,
            COALESCE(AVG(latency_ms), 0) AS avg_latency
       FROM search_requests ${where}
-  `).get(...args) as { attempts: number; ok: number; avg_latency: number };
-  const today = (db.prepare(`
+  `).get(...args) as { attempts?: number; ok?: number; avg_latency?: number } | undefined;
+
+  const todayRow = db.prepare(`
     SELECT COUNT(*) AS n FROM search_requests WHERE status = 'ok' AND created_at >= datetime('now', 'start of day')
-  `).get() as { n: number }).n;
+  `).get() as { n?: number } | undefined;
+  const today = Number(todayRow?.n ?? 0);
+
+  const attempts = Number(totals?.attempts ?? 0);
+  const ok = Number(totals?.ok ?? 0);
+  const avgLatency = Number(totals?.avg_latency ?? 0);
 
   const names = new Map(allEngineRows().map(r => [r.model_id, r.display_name]));
-  const byEngine = (db.prepare(`
+  const byEngineRows = (db.prepare(`
     SELECT engine_id, COUNT(*) AS n FROM search_requests
      ${where ? `${where} AND` : 'WHERE'} status = 'ok'
      GROUP BY engine_id ORDER BY n DESC, engine_id
-  `).all(...args) as { engine_id: string; n: number }[])
-    .map(r => ({ engineId: r.engine_id, displayName: names.get(r.engine_id) ?? r.engine_id, count: r.n }));
-  const series = (db.prepare(`
+  `).all(...args) as { engine_id: string; n: number }[] | undefined) ?? [];
+
+  const byEngine = byEngineRows.map(r => ({
+    engineId: r.engine_id,
+    displayName: names.get(r.engine_id) ?? r.engine_id,
+    count: Number(r.n ?? 0),
+  }));
+
+  const seriesRows = (db.prepare(`
     SELECT date(created_at) AS day, engine_id, COUNT(*) AS n FROM search_requests
      ${where ? `${where} AND` : 'WHERE'} status = 'ok'
      GROUP BY day, engine_id ORDER BY day, engine_id
-  `).all(...args) as { day: string; engine_id: string; n: number }[])
-    .map(r => ({ date: r.day, engineId: r.engine_id, count: r.n }));
+  `).all(...args) as { day: string; engine_id: string; n: number }[] | undefined) ?? [];
+
+  const series = seriesRows.map(r => ({
+    date: r.day,
+    engineId: r.engine_id,
+    count: Number(r.n ?? 0),
+  }));
 
   return {
-    total: totals.ok,
+    total: ok,
     today,
     // Percent, 0–100, one decimal: the same scale as the chat summary.
-    successRate: totals.attempts > 0 ? Math.round((totals.ok / totals.attempts) * 1000) / 10 : 0,
-    avgLatencyMs: Math.round(totals.avg_latency),
+    successRate: attempts > 0 ? Math.round((ok / attempts) * 1000) / 10 : 0,
+    avgLatencyMs: Math.round(avgLatency),
     byEngine,
     series,
   };
+}
+
+export async function getSearchAnalytics(range: SearchAnalyticsRange): Promise<SearchAnalytics> {
+  const pool = getPostgresPool();
+  if (!pool || ('isMock' in pool && (pool as any).isMock?.())) {
+    return searchAnalytics(range);
+  }
+
+  try {
+    const days = { '24h': 1, '7d': 7, '30d': 30, '90d': 90 } as const;
+    const sinceDate = range === 'all' ? null : new Date(Date.now() - days[range] * 24 * 60 * 60 * 1000);
+    const whereClause = sinceDate ? 'WHERE created_at >= $1' : '';
+    const queryArgs = sinceDate ? [sinceDate.toISOString()] : [];
+
+    const totalsRes = await pool.query(
+      `SELECT COUNT(*) AS attempts,
+              COALESCE(SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END), 0) AS ok,
+              COALESCE(AVG(latency_ms), 0) AS avg_latency
+         FROM search_requests ${whereClause}`,
+      queryArgs
+    );
+    const totals = totalsRes.rows[0] || {};
+    const attempts = Number(totals.attempts || 0);
+    const ok = Number(totals.ok || 0);
+    const avgLatency = Number(totals.avg_latency || 0);
+
+    const todayRes = await pool.query(
+      `SELECT COUNT(*) AS n FROM search_requests WHERE status = 'ok' AND created_at >= date_trunc('day', NOW())`
+    );
+    const today = Number(todayRes.rows[0]?.n || 0);
+
+    const names = new Map(allEngineRows().map(r => [r.model_id, r.display_name]));
+
+    const byEngineRes = await pool.query(
+      `SELECT engine_id, COUNT(*) AS n FROM search_requests
+       ${whereClause ? `${whereClause} AND` : 'WHERE'} status = 'ok'
+       GROUP BY engine_id ORDER BY n DESC, engine_id`,
+      queryArgs
+    );
+    const byEngine = byEngineRes.rows.map(r => ({
+      engineId: r.engine_id,
+      displayName: names.get(r.engine_id) ?? r.engine_id,
+      count: Number(r.n || 0),
+    }));
+
+    const seriesRes = await pool.query(
+      `SELECT TO_CHAR(created_at, 'YYYY-MM-DD') AS day, engine_id, COUNT(*) AS n FROM search_requests
+       ${whereClause ? `${whereClause} AND` : 'WHERE'} status = 'ok'
+       GROUP BY day, engine_id ORDER BY day, engine_id`,
+      queryArgs
+    );
+    const series = seriesRes.rows.map(r => ({
+      date: r.day,
+      engineId: r.engine_id,
+      count: Number(r.n || 0),
+    }));
+
+    return {
+      total: ok,
+      today,
+      successRate: attempts > 0 ? Math.round((ok / attempts) * 1000) / 10 : 0,
+      avgLatencyMs: Math.round(avgLatency),
+      byEngine,
+      series,
+    };
+  } catch (err: any) {
+    console.warn('[search-analytics] Postgres query failed, falling back to sync searchAnalytics:', err?.message ?? err);
+    return searchAnalytics(range);
+  }
 }
 
 /** Search platforms are not chat providers; re-exported for routes that

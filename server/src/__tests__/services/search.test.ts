@@ -65,9 +65,9 @@ describe('search platforms', () => {
 });
 
 describe('search service', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initDb(':memory:');
     seedSearchEngines();
     clearAllCooldowns(Number.MAX_SAFE_INTEGER);
   });

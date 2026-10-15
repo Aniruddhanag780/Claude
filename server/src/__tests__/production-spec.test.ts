@@ -267,7 +267,7 @@ describe('Production Implementation Specification Tests', () => {
       await runMigrations(pool, 'up');
       const statuses = await getMigrationStatuses(pool);
 
-      expect(statuses.length).toBe(4);
+      expect(statuses.length).toBe(7);
       expect(statuses[0].filename).toBe('001_initial_schema.ts');
       expect(statuses[0].status).toBe('applied');
       expect(statuses[1].filename).toBe('002_seed_providers_models.ts');

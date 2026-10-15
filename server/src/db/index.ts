@@ -11,6 +11,8 @@ export { getPostgresPool, initPostgresPool, closePostgresPool };
 
 export async function initDb(connectionString?: string): Promise<pg.Pool> {
   const pool = initPostgresPool(connectionString);
+  settingsCache.clear();
+  cachedUnifiedApiKey = null;
 
   // Run migrations automatically
   try {

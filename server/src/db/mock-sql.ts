@@ -99,6 +99,18 @@ function resolveValue(raw: string, params: any[], state: { i: number }): any {
   }
   if (/^NULL$/i.test(v)) return null;
   if (/^'(.*)'$/s.test(v)) return v.replace(/^'(.*)'$/s, '$1').replace(/''/g, "'");
+  const dtM = v.match(/^datetime\s*\(\s*'?now'?\s*(?:,\s*'([^']*)'\s*)?\)$/i);
+  if (dtM) {
+    const modifier = dtM[1]?.toLowerCase();
+    const d = new Date();
+    if (modifier === 'start of day') {
+      return `${d.toISOString().slice(0, 10)} 00:00:00`;
+    }
+    if (modifier === 'start of month') {
+      return `${d.toISOString().slice(0, 7)}-01 00:00:00`;
+    }
+    return nowIso();
+  }
   if (NOW_RE.test(v)) return nowIso();
   if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
   if (/^-?\d+ms$/i.test(v)) return Number(v.slice(0, -2));
@@ -189,17 +201,43 @@ function project(rows: any[], selectList: string, params: any[]): any[] {
   if (cols.length === 1 && cols[0] === '*') return rows;
   if (!rows.length) return [];
 
-  const isAggregate = cols.some(c => /^(COUNT|MAX|MIN|SUM|AVG)\s*\(/i.test(c));
+  const isAggregate = cols.some(c => /\b(COUNT|MAX|MIN|SUM|AVG)\s*\(/i.test(c));
   if (isAggregate) {
     const out: any = {};
     for (const col of cols) {
-      const agg = col.match(/^(COUNT|MAX|MIN|SUM|AVG)\s*\(\s*([^)]*)\s*\)(?:\s+AS\s+(\w+))?$/i);
-      if (!agg) continue;
-      const fn = AGGREGATES[agg[1].toUpperCase()];
-      const target = agg[2].trim();
-      const vals = rows.map(r => (target === '*' ? 1 : r[target.split('.').pop()!]))
-        .filter(v => v !== null && v !== undefined);
-      out[agg[3] || agg[1].toLowerCase()] = fn ? fn(vals) : null;
+      const alias = col.match(/\s+AS\s+(\w+)$/i)?.[1];
+      const expr = col.replace(/\s+AS\s+\w+$/i, '').trim();
+
+      const aggMatch = expr.match(/(?:COALESCE\s*\(\s*)?(COUNT|MAX|MIN|SUM|AVG)\s*\(\s*([^)]*)\s*\)/i);
+      if (!aggMatch) {
+        if (/^date\s*\(/i.test(expr)) {
+          const field = expr.replace(/^date\s*\(/i, '').replace(/\)$/, '').trim().split('.').pop()!;
+          const dateVal = rows[0]?.[field];
+          out[alias || 'date'] = dateVal ? String(dateVal).slice(0, 10) : null;
+        } else {
+          out[alias || expr.split('.').pop()!] = rows[0]?.[expr.split('.').pop()!];
+        }
+        continue;
+      }
+
+      const aggType = aggMatch[1].toUpperCase();
+      const target = aggMatch[2].trim();
+      const fn = AGGREGATES[aggType];
+      const colName = alias || aggType.toLowerCase();
+
+      let vals: any[];
+      const caseMatch = target.match(/^CASE\s+WHEN\s+(\w+)\s*=\s*'([^']*)'\s+THEN\s+(\d+)\s+ELSE\s+(\d+)\s+END$/i);
+      if (caseMatch) {
+        const [, field, matchVal, thenVal, elseVal] = caseMatch;
+        vals = rows.map(r => (String(r[field]) === matchVal ? Number(thenVal) : Number(elseVal)));
+      } else if (target === '*') {
+        vals = rows.map(() => 1);
+      } else {
+        const field = target.split('.').pop()!;
+        vals = rows.map(r => r[field]).filter(v => v !== null && v !== undefined);
+      }
+
+      out[colName] = fn ? (fn(vals) ?? 0) : 0;
     }
     return [out];
   }
@@ -211,6 +249,12 @@ function project(rows: any[], selectList: string, params: any[]): any[] {
       const expr = col.replace(/\s+AS\s+\w+$/i, '').trim();
       if (/^(datetime|CURRENT_TIMESTAMP)\s*\(/i.test(expr) || /^NOW\(\)$/i.test(expr)) {
         out[alias || 'now'] = nowIso();
+        continue;
+      }
+      if (/^date\s*\(/i.test(expr)) {
+        const field = expr.replace(/^date\s*\(/i, '').replace(/\)$/, '').trim().split('.').pop()!;
+        const dateVal = row[field];
+        out[alias || 'date'] = dateVal ? String(dateVal).slice(0, 10) : null;
         continue;
       }
       if (/^COALESCE\s*\(/i.test(expr)) {
@@ -252,7 +296,8 @@ export function execStatement(
   if (sel) {
     if (/\sJOIN\b/i.test(sel[3])) return null; // joins stay with the specific shims
     const [, selectList, table, rest] = sel;
-    const whereM = rest.match(/\bWHERE\b(.+?)(?=\bORDER\b|\bLIMIT\b|$)/i);
+    const whereM = rest.match(/\bWHERE\b(.+?)(?=\bGROUP\s+BY\b|\bORDER\b|\bLIMIT\b|$)/i);
+    const groupM = rest.match(/\bGROUP\s+BY\s+(.+?)(?=\bORDER\b|\bLIMIT\b|$)/i);
     const orderM = rest.match(/\bORDER\s+BY\s+(.+?)(?=\bLIMIT\b|$)/i);
     const limitM = rest.match(/\bLIMIT\s+(\d+|\?)(?:\s+OFFSET\s+(\d+|\?))?/i);
     // The WHERE's placeholders re-bind for every row, so each evaluation starts
@@ -262,6 +307,34 @@ export function execStatement(
     const whereBase = state.i;
     const rows = tableRows(tables, table.toLowerCase())
       .filter(r => matchesWhere(r, whereM?.[1], params, { i: whereBase }));
+
+    if (groupM) {
+      const groupCols = splitTop(groupM[1], ',').map(c => c.trim().split('.').pop()!);
+      const groups = new Map<string, any[]>();
+      for (const r of rows) {
+        const key = groupCols.map(c => {
+          if (c.startsWith('date(')) {
+            const field = c.replace(/^date\s*\(/i, '').replace(/\)$/, '').trim().split('.').pop()!;
+            return String(r[field] ?? '').slice(0, 10);
+          }
+          return String(r[c] ?? '');
+        }).join('\0');
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(r);
+      }
+      let out: any[] = [];
+      for (const grp of groups.values()) {
+        out.push(...project(grp, selectList, params));
+      }
+      out = sortRows(out, orderM?.[1]);
+      if (limitM) {
+        const limit = Number(resolveValue(limitM[1], params, state));
+        const offset = limitM[2] ? Number(resolveValue(limitM[2], params, state)) : 0;
+        out = out.slice(offset, offset + limit);
+      }
+      return { rows: out, changes: 0, lastInsertRowid: 0 };
+    }
+
     let out = sortRows(rows, orderM?.[1]);
     if (limitM) {
       const limit = Number(resolveValue(limitM[1], params, state));
@@ -272,9 +345,9 @@ export function execStatement(
   }
 
   // ── INSERT (incl. ON CONFLICT upsert) ─────────────────────────────────────
-  const ins = s.match(/^INSERT\s+(?:OR\s+\w+\s+)?INTO\s+([A-Za-z_][\w]*)\s*(?:\(([^)]*)\))?\s*VALUES\s*\((.*?)\)\s*(.*)$/i);
+  const ins = s.match(/^INSERT\s+(?:OR\s+(\w+)\s+)?INTO\s+([A-Za-z_][\w]*)\s*(?:\(([^)]*)\))?\s*VALUES\s*\((.*?)\)\s*(.*)$/i);
   if (ins) {
-    const [, table, colList, valList, tail] = ins;
+    const [, orAction, table, colList, valList, tail] = ins;
     const rows = tableRows(tables, table.toLowerCase());
     const state = { i: 0 };
     const cols = colList ? splitTop(colList, ',').map(c => c.trim()) : Object.keys(rows[0] || {});
@@ -283,6 +356,22 @@ export function execStatement(
     const record: any = { id: nextId(), created_at: nowIso(), updated_at: nowIso() };
     cols.forEach((c, i) => { record[c] = values[i]; });
     if (record.enabled === undefined) record.enabled = 1;
+
+    if (orAction && /IGNORE/i.test(orAction)) {
+      const t = table.toLowerCase();
+      const keys = t === 'media_models' ? ['platform', 'model_id'] :
+                   t === 'models' ? ['provider_id', 'model_id'] :
+                   t === 'providers' ? ['provider_key'] :
+                   t === 'settings' ? ['key'] :
+                   t === 'search_requests' ? [] :
+                   ['id'];
+      if (keys.length > 0) {
+        const existing = rows.find(r => keys.every(k => record[k] !== undefined && compare(r[k], record[k]) === 0));
+        if (existing) {
+          return { changes: 0, lastInsertRowid: existing.id ?? 0 };
+        }
+      }
+    }
 
     const conflictCols = tail.match(/ON\s+CONFLICT\s*\(([^)]*)\)(?:\s+WHERE\s+(.+?))?(?:\s+DO\s+(NOTHING|UPDATE))?/i);
     if (conflictCols) {

@@ -1,6 +1,7 @@
 import { getDb } from '../db/index.js';
 import { decrypt } from '../lib/crypto.js';
 import { reserveMonthlyBudget } from './key-budget.js';
+import { getActiveRegistry } from './router-registry.js';
 
 export interface ReservedProviderCredential {
   id: number;
@@ -28,11 +29,11 @@ export function reserveProviderCredential(
 ): { credential: ReservedProviderCredential | null; budgetBlocked: boolean } {
   if (row.platform === 'custom' && row.key_id == null) return { credential: null, budgetBlocked: false };
   const bound = row.key_id != null;
-  const keys = getDb().prepare(`
+  const keys = ((getDb().prepare(`
     SELECT id, encrypted_key, iv, auth_tag, base_url FROM api_keys
     WHERE ${bound ? 'id' : 'platform'} = ? AND enabled = 1
       AND status IN ('healthy', 'unknown') ORDER BY RANDOM()
-  `).all(bound ? row.key_id : row.platform) as KeyRow[];
+  `).all(bound ? row.key_id : row.platform) as KeyRow[] | undefined) ?? []);
   let budgetBlocked = false;
   for (const keyRow of keys) {
     if (skip(keyRow.id)) continue;
@@ -53,5 +54,28 @@ export function reserveProviderCredential(
       budgetBlocked,
     };
   }
+
+  // Fallback to active router registry in production if api_keys table is empty
+  const registryCreds = getActiveRegistry()?.getAllCredentials() ?? [];
+  const matching = bound
+    ? registryCreds.filter(c => c.id === row.key_id && c.enabled && !c.runtime.lastHealthError)
+    : registryCreds.filter(c => c.providerKey === row.platform && c.enabled && !c.runtime.lastHealthError);
+
+  for (const cred of matching) {
+    if (skip(cred.id)) continue;
+    const reservation = reserveMonthlyBudget(cred.id, estimatedTokens);
+    if (!reservation.allowed) { budgetBlocked = true; continue; }
+    const prov = getActiveRegistry().getAllProviders().find((p: { id: number; baseUrl?: string | null }) => p.id === cred.providerId);
+    return {
+      credential: {
+        id: cred.id,
+        key: cred.decryptedKey,
+        baseUrl: prov?.baseUrl?.trim().replace(/\/+$/, '') ?? null,
+        release: reservation.release,
+      },
+      budgetBlocked,
+    };
+  }
+
   return { credential: null, budgetBlocked };
 }

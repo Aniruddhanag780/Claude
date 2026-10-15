@@ -50,10 +50,27 @@ export function createPostgresPool(connectionString?: string): pg.Pool {
 
   const createdPool = new Pool(poolConfig);
   const poolAny = createdPool as any;
-  poolAny.prepare = (_sql: string) => ({
-    get: () => undefined,
-    all: () => [],
-    run: () => ({ changes: 0, lastInsertRowid: 1 }),
+  const compatTables = new Map<string, any[]>();
+  let compatIdCounter = 1;
+  const nextCompatId = () => compatIdCounter++;
+
+  poolAny.prepare = (sql: string) => ({
+    get: (...args: any[]) => {
+      const generic = execStatement(compatTables, sql, args, nextCompatId);
+      if (generic && generic.rows && generic.rows.length > 0) return generic.rows[0];
+      return undefined;
+    },
+    all: (...args: any[]) => {
+      const argList = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+      const generic = execStatement(compatTables, sql, argList, nextCompatId);
+      if (generic) return generic.rows ?? [];
+      return [];
+    },
+    run: (...args: any[]) => {
+      const generic = execStatement(compatTables, sql, args, nextCompatId);
+      if (generic) return { changes: generic.changes, lastInsertRowid: generic.lastInsertRowid };
+      return { changes: 1, lastInsertRowid: 1 };
+    },
   });
   poolAny.exec = () => {};
   poolAny.transaction = (fn: any) => fn;
@@ -65,12 +82,17 @@ export function createPostgresPool(connectionString?: string): pg.Pool {
  * Initializes the singleton Postgres pool.
  */
 export function initPostgresPool(connectionString?: string): pg.Pool {
+  const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST);
+  const useRealPg = Boolean(process.env.USE_REAL_POSTGRES);
+
+  if (connectionString === ':memory:' && isTest && !useRealPg) {
+    pool = createInMemoryMockPool() as any;
+    return pool!;
+  }
+
   if (pool) {
     return pool;
   }
-
-  const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST);
-  const useRealPg = Boolean(process.env.USE_REAL_POSTGRES);
 
   if (isTest && !useRealPg) {
     pool = createInMemoryMockPool() as any;
@@ -585,56 +607,34 @@ function createInMemoryMockPool() {
           return { changes: 1, lastInsertRowid: record.id };
         }
         if (u.includes('INSERT INTO API_KEYS')) {
-          const apiKeys = tables.get('api_keys') || [];
-          const creds = tables.get('credentials') || [];
-          const provs = tables.get('providers') || [];
-
-          const platform = u.includes("VALUES ('CUSTOM'") ? 'custom' : args[0];
-          let prov = provs.find(p => p.provider_key === platform);
-          if (!prov) {
-            prov = { id: idCounter++, provider_key: platform, display_name: platform, enabled: true };
-            provs.push(prov);
+          const generic = execStatement(tables, sql, args, nextId);
+          if (generic) {
+            const apiKeys = tables.get('api_keys') || [];
+            const record = apiKeys[apiKeys.length - 1];
+            if (record) {
+              const provs = tables.get('providers') || [];
+              let prov = provs.find(p => p.provider_key === record.platform);
+              if (!prov) {
+                prov = { id: idCounter++, provider_key: record.platform, display_name: record.platform, enabled: true };
+                provs.push(prov);
+              }
+              const creds = tables.get('credentials') || [];
+              creds.push({
+                id: record.id,
+                provider_id: prov.id,
+                credential_name: record.label || 'test',
+                encrypted_value: record.encrypted_key,
+                encrypted_key: record.encrypted_key,
+                iv: record.iv,
+                auth_tag: record.auth_tag,
+                circuit_state: record.status === 'invalid' ? 'DISABLED' : 'HEALTHY',
+                enabled: record.enabled !== 0 && record.enabled !== false && record.status !== 'invalid',
+                last_health_error: record.status === 'invalid' ? 'Invalid credential' : null,
+              });
+            }
+            return { changes: generic.changes, lastInsertRowid: generic.lastInsertRowid };
           }
-
-          const encKey = u.includes("VALUES ('CUSTOM'") ? args[0] : (args[2] ?? args[1] ?? 'enc');
-          const iv = u.includes("VALUES ('CUSTOM'") ? args[1] : (args[3] ?? args[2] ?? 'iv');
-          const authTag = u.includes("VALUES ('CUSTOM'") ? args[2] : (args[4] ?? args[3] ?? 'tag');
-          const statusVal = u.includes("VALUES ('CUSTOM'") ? 'unknown' : (args[5] ?? 'healthy');
-          const enabledVal = u.includes("VALUES ('CUSTOM'") ? true : (args[6] !== 0 && args[6] !== false);
-
-          const cred = {
-            id: idCounter++,
-            provider_id: prov.id,
-            credential_name: args[1] || 'test',
-            encrypted_value: encKey,
-            encrypted_key: encKey,
-            iv,
-            auth_tag: authTag,
-            circuit_state: statusVal === 'invalid' ? 'DISABLED' : 'HEALTHY',
-            enabled: enabledVal && statusVal !== 'invalid',
-            last_health_error: statusVal === 'invalid' ? 'Invalid credential' : null,
-          };
-          creds.push(cred);
-
-          const apiKeyRecord = {
-            id: cred.id,
-            platform,
-            label: u.includes("VALUES ('CUSTOM'") ? 'Local STT' : (args[1] || 'test'),
-            encrypted_key: encKey,
-            iv,
-            auth_tag: authTag,
-            status: statusVal,
-            enabled: enabledVal ? 1 : 0,
-            base_url: u.includes("VALUES ('CUSTOM'") ? args[3] : (args[7] ?? null),
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          };
-          apiKeys.push(apiKeyRecord);
-
-          tables.set('api_keys', apiKeys);
-          tables.set('credentials', creds);
-          tables.set('providers', provs);
-          return { changes: 1, lastInsertRowid: cred.id };
+          return { changes: 1, lastInsertRowid: 1 };
         }
 
         if (u.includes('INSERT INTO REQUESTS')) {
@@ -723,6 +723,7 @@ function createInMemoryMockPool() {
     exec: () => {},
     transaction: (fn: any) => fn,
     pragma: () => [],
+    isMock: () => true,
     _mockTables: tables,
   };
 }
