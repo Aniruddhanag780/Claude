@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AurayProvider, AURAY_BASE_URL } from '../../providers/auray.js';
 import { getProvider } from '../../providers/index.js';
 import { AUTH_JSON_PROVIDER_MAP, parseKeysFromFile } from '../../lib/key-parser.js';
+import { supportedParametersFor } from '../../lib/sampling-params.js';
 
 const model = 'glm-5-3-flash';
 const json = (body: unknown, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers });
@@ -20,6 +21,11 @@ describe('Auray catalog-only provider', () => {
     expect(getProvider('auray')!.keyless).toBe(false);
     expect(parseKeysFromFile('AURAY_API_KEY=auray_sk_test_only', 'keys.env').keys[0].platform).toBe('auray');
     expect(AUTH_JSON_PROVIDER_MAP.auray).toBe('auray');
+  });
+
+  it('does not advertise sampling controls that the provider ignores', () => {
+    expect(supportedParametersFor('auray')).toEqual(['max_tokens', 'max_completion_tokens', 'stream', 'response_format', 'reasoning_effort']);
+    expect(supportedParametersFor('auray', { tools: true })).toEqual(['max_tokens', 'max_completion_tokens', 'stream', 'response_format', 'reasoning_effort', 'tools', 'tool_choice']);
   });
 
   it.each([0, 50])('validates an authenticated account with %s credits without inference', async balance => {
