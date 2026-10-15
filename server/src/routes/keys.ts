@@ -56,7 +56,7 @@ const PLATFORMS = [
   'moondream',
   'freeai',
   'google', 'groq', 'cerebras', 'sail', 'electronhub', 'experiential', 'router9', 'septor', 'clod', 'speechify', 'blaze', 'lucidity', 'airforce', 'dreamprompting', 'waterfall', 'logfare', 'bai', 'radeon', 'nvidia', 'mistral',
-  'openrouter', 'github', 'cohere', 'tavily', 'exa', 'firecrawl', 'linkup', 'cloudflare', 'zhipu', 'ollama',
+  'openrouter', 'github', 'cohere', 'tavily', 'exa', 'firecrawl', 'linkup', 'parallel', 'cloudflare', 'zhipu', 'ollama',
   'kilo', 'pollinations', 'llm7', 'huggingface', 'opencode', 'ovh', 'agnes', 'reka', 'siliconflow',
   'routeway', 'bazaarlink', 'ainative', 'aion', 'anyapi', 'requesty', 'navy', 'nara', 'sealion', 'orcarouter', 'unorouter', 'xkiro', 'modelscope',
   'qianfan', 'volcengine', 'longcat', 'xfyun', 'aihorde', 'custom',
@@ -1738,6 +1738,15 @@ keysRouter.delete('/:id', (req: Request, res: Response) => {
         }
       }
     }
+    // #1516: key-bound rows on ANY platform die with their key. The custom
+    // branch above already removed this endpoint's rows (plus tombstones and
+    // the legacy sweep); this covers key_id-pinned rows on standard
+    // platforms, which the catalog prune (key_id IS NULL only) never touches.
+    // Shared catalog rows (key_id NULL) are untouched.
+    db.prepare('DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE key_id = ?)').run(id);
+    db.prepare('DELETE FROM models WHERE key_id = ?').run(id);
+    db.prepare('DELETE FROM embedding_models WHERE key_id = ?').run(id);
+    db.prepare('DELETE FROM media_models WHERE key_id = ?').run(id);
   });
   remove();
 
