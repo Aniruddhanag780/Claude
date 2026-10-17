@@ -347,7 +347,10 @@
     "scoreColumn": "Оценка",
     "minReliabilityFloor": "Минимальный порог надёжности",
     "minReliabilityFloorHint": "Исключает модель из маршрутизации, когда её наблюдаемая доля успешных запросов падает ниже этого значения. 0,8 означает 80 %. Оставьте пустым, чтобы отключить — модели с малой историей всегда сохраняются, чтобы новые модели продолжали пробоваться. Никогда не опустошает всю цепочку.",
-    "minReliabilityFloorOff": "Отключено"
+    "minReliabilityFloorOff": "Отключено",
+    "hedgeAfterMs": "Hedge racing after",
+    "hedgeAfterMsOff": "off",
+    "hedgeAfterMsHint": "When set, if the first candidate hasn't sent its first byte within this window (ms), the next candidate is started in parallel — the faster response wins and the other is canceled (counted as 'canceled', not a failure). Hedged requests can consume provider quota twice: both calls are billed on token-billing platforms. Empty = off. ROUTER_HEDGE_AFTER_MS pins this value; HEDGE_AFTER_MS_<PLATFORM>=0 opts one platform out."
   },
   "penaltyInspector": {
     "title": "Давление маршрутизатора",

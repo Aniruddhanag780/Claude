@@ -347,7 +347,10 @@
     "scoreColumn": "Pontuação",
     "minReliabilityFloor": "Piso mínimo de confiabilidade",
     "minReliabilityFloorHint": "Remove um modelo do roteamento quando sua taxa de sucesso observada cai abaixo deste valor. 0,8 significa 80%. Deixe em branco para desativar — modelos com pouco histórico são sempre mantidos para que modelos novos ainda possam ser testados. Nunca esvazia toda a cadeia.",
-    "minReliabilityFloorOff": "Desativado"
+    "minReliabilityFloorOff": "Desativado",
+    "hedgeAfterMs": "Hedge racing after",
+    "hedgeAfterMsOff": "off",
+    "hedgeAfterMsHint": "When set, if the first candidate hasn't sent its first byte within this window (ms), the next candidate is started in parallel — the faster response wins and the other is canceled (counted as 'canceled', not a failure). Hedged requests can consume provider quota twice: both calls are billed on token-billing platforms. Empty = off. ROUTER_HEDGE_AFTER_MS pins this value; HEDGE_AFTER_MS_<PLATFORM>=0 opts one platform out."
   },
   "penaltyInspector": {
     "title": "Pressão do roteador",

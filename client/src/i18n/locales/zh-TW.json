@@ -347,7 +347,10 @@
     "scoreColumn": "分數",
     "minReliabilityFloor": "最低可靠性門檻",
     "minReliabilityFloorHint": "模型實際成功率低於此值時不再參與路由。0.8 表示 80%。留空表示關閉——歷史樣本太少的模型始終保留，以便新模型仍有機會被嘗試。不會清空整條候選鏈。",
-    "minReliabilityFloorOff": "關閉"
+    "minReliabilityFloorOff": "關閉",
+    "hedgeAfterMs": "競速 hedge 延遲",
+    "hedgeAfterMsOff": "關",
+    "hedgeAfterMsHint": "設定後（毫秒），首選候選在該窗口內未發出首位元組時，並行啟動下一個候選——先完成的響應獲勝，另一個被取消（記為 canceled，不算失敗）。被 hedge 的請求可能雙倍消耗上游額度：按 token 計費的渠道兩次都會計費。留空 = 關閉。ROUTER_HEDGE_AFTER_MS 固定該值；HEDGE_AFTER_MS_<平台>=0 可排除單一平台。"
   },
   "penaltyInspector": {
     "title": "路由壓力",

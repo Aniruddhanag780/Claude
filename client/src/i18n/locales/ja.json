@@ -347,7 +347,10 @@
     "scoreColumn": "スコア",
     "minReliabilityFloor": "最低信頼性しきい値",
     "minReliabilityFloorHint": "観測された成功率がこの値を下回ったモデルをルーティングから除外します。0.8 は 80% を意味します。空欄で無効 — 履歴が少なすぎるモデルは常に保持され、新しいモデルも試行され続けます。チェーン全体が空になることはありません。",
-    "minReliabilityFloorOff": "無効"
+    "minReliabilityFloorOff": "無効",
+    "hedgeAfterMs": "Hedge racing after",
+    "hedgeAfterMsOff": "off",
+    "hedgeAfterMsHint": "When set, if the first candidate hasn't sent its first byte within this window (ms), the next candidate is started in parallel — the faster response wins and the other is canceled (counted as 'canceled', not a failure). Hedged requests can consume provider quota twice: both calls are billed on token-billing platforms. Empty = off. ROUTER_HEDGE_AFTER_MS pins this value; HEDGE_AFTER_MS_<PLATFORM>=0 opts one platform out."
   },
   "penaltyInspector": {
     "title": "ルーターの圧力",

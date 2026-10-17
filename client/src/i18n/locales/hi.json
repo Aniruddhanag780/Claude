@@ -347,7 +347,10 @@
     "scoreColumn": "स्कोर",
     "minReliabilityFloor": "न्यूनतम विश्वसनीयता सीमा",
     "minReliabilityFloorHint": "जब किसी मॉडल की देखी गई सफलता दर इस मान से नीचे गिर जाए, तो उसे रूटिंग से हटा देता है। 0.8 का अर्थ 80% है। अक्षम करने के लिए खाली छोड़ें — बहुत कम इतिहास वाले मॉडल हमेशा रखे जाते हैं ताकि नए मॉडल आज़माए जा सकें। पूरी श्रृंखला कभी खाली नहीं करता।",
-    "minReliabilityFloorOff": "अक्षम"
+    "minReliabilityFloorOff": "अक्षम",
+    "hedgeAfterMs": "Hedge racing after",
+    "hedgeAfterMsOff": "off",
+    "hedgeAfterMsHint": "When set, if the first candidate hasn't sent its first byte within this window (ms), the next candidate is started in parallel — the faster response wins and the other is canceled (counted as 'canceled', not a failure). Hedged requests can consume provider quota twice: both calls are billed on token-billing platforms. Empty = off. ROUTER_HEDGE_AFTER_MS pins this value; HEDGE_AFTER_MS_<PLATFORM>=0 opts one platform out."
   },
   "penaltyInspector": {
     "title": "राउटर का दबाव",

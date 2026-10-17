@@ -49,6 +49,7 @@ import { Tooltip } from '@/components/tooltip'
 import { PenaltyInspector } from '@/components/penalty-inspector'
 import { PeakHoursControls } from '@/components/peak-hours-controls'
 import { ReliabilityFloorControl } from '@/components/reliability-floor-control'
+import { HedgeAfterMsControl } from '@/components/hedge-after-ms-control'
 import { ChainManager } from '@/components/chain-manager'
 
 // `tKey` is the i18n suffix under `strategies.*` (label) and `strategies.*Blurb`.
@@ -495,6 +496,10 @@ export default function FallbackPage() {
                   Shown in every mode; the floor pre-filters the candidate chain
                   regardless of how models are ranked. */}
               <ReliabilityFloorControl />
+
+              {/* Hedged racing (#1347 PR 3): off by default — a hedged request
+                  can bill the provider twice, so the tooltip says so plainly. */}
+              <HedgeAfterMsControl />
             </div>
           )}
 

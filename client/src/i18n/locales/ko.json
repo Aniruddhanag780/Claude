@@ -347,7 +347,10 @@
     "scoreColumn": "점수",
     "minReliabilityFloor": "최소 신뢰성 기준",
     "minReliabilityFloorHint": "관측된 성공률이 이 값 아래로 떨어지면 해당 모델을 라우팅에서 제외합니다. 0.8은 80%를 의미합니다. 비워 두면 비활성화됩니다 — 기록이 너무 적은 모델은 항상 유지되어 새 모델도 계속 시도할 수 있습니다. 전체 체인을 비우지는 않습니다.",
-    "minReliabilityFloorOff": "비활성"
+    "minReliabilityFloorOff": "비활성",
+    "hedgeAfterMs": "Hedge racing after",
+    "hedgeAfterMsOff": "off",
+    "hedgeAfterMsHint": "When set, if the first candidate hasn't sent its first byte within this window (ms), the next candidate is started in parallel — the faster response wins and the other is canceled (counted as 'canceled', not a failure). Hedged requests can consume provider quota twice: both calls are billed on token-billing platforms. Empty = off. ROUTER_HEDGE_AFTER_MS pins this value; HEDGE_AFTER_MS_<PLATFORM>=0 opts one platform out."
   },
   "penaltyInspector": {
     "title": "라우터 압력",
