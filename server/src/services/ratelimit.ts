@@ -3,6 +3,7 @@
 import { getDb, getSetting, setSetting } from '../db/index.js';
 import { isLoopbackOrPrivateUrl } from '../lib/url-guard.js';
 import { parseModelScope, scopeAllows } from '../lib/model-scope.js';
+import { BUILTIN_KEY_CONCURRENCY, isBuiltinKeyConcurrencyEnabled } from '../lib/platform-concurrency.js';
 
 interface Window {
   timestamps: number[];
@@ -88,12 +89,20 @@ function pruneLeases(now: number): void {
  * Some free tiers meter concurrency per credential rather than per minute, so
  * parallel streams on one key mostly 429 each other. But most do not, and
  * capping by default would serialise every provider and cost real throughput —
- * so this is opt-in. There is deliberately no built-in per-platform table: the
- * providers that behave this way are not documented well enough to assert a
- * number for them here, and a wrong default is worse than none.
+ * so every cap here is opt-in.
  *
- * `MAX_CONCURRENT_REQUESTS_PER_KEY_<PLATFORM>` sets it for one platform;
- * `MAX_CONCURRENT_REQUESTS_PER_KEY` sets a fallback for all of them.
+ * Resolution order (first match wins):
+ * 1. `MAX_CONCURRENT_REQUESTS_PER_KEY_<PLATFORM>` — one platform;
+ * 2. `MAX_CONCURRENT_REQUESTS_PER_KEY` — fallback for all platforms;
+ * 3. the built-in per-platform table (lib/platform-concurrency.ts), ONLY when
+ *    the `routing_builtin_key_concurrency` setting is on — off by default, so
+ *    existing installs keep the exact env-var-only, unlimited behaviour;
+ * 4. null — unlimited.
+ *
+ * The built-in table deliberately covers only the major recurring free tiers
+ * with conservative values; unlisted platforms (one-off promo gateways,
+ * per-account quota pools) stay uncapped because a wrong default is worse
+ * than none.
  */
 export function getKeyConcurrencyLimit(platform: string): number | null {
   const raw = process.env[`MAX_CONCURRENT_REQUESTS_PER_KEY_${platform.toUpperCase()}`]
@@ -101,6 +110,9 @@ export function getKeyConcurrencyLimit(platform: string): number | null {
   if (raw !== undefined && raw.trim() !== '') {
     const n = Number(raw);
     if (Number.isInteger(n) && n > 0) return n;
+  }
+  if (isBuiltinKeyConcurrencyEnabled()) {
+    return BUILTIN_KEY_CONCURRENCY[platform] ?? null;
   }
   return null;
 }

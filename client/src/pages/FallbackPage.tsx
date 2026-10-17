@@ -49,6 +49,7 @@ import { Tooltip } from '@/components/tooltip'
 import { PenaltyInspector } from '@/components/penalty-inspector'
 import { PeakHoursControls } from '@/components/peak-hours-controls'
 import { ReliabilityFloorControl } from '@/components/reliability-floor-control'
+import { BuiltinConcurrencyControl } from '@/components/builtin-concurrency-control'
 import { ChainManager } from '@/components/chain-manager'
 
 // `tKey` is the i18n suffix under `strategies.*` (label) and `strategies.*Blurb`.
@@ -495,6 +496,10 @@ export default function FallbackPage() {
                   Shown in every mode; the floor pre-filters the candidate chain
                   regardless of how models are ranked. */}
               <ReliabilityFloorControl />
+              {/* Built-in per-key concurrency defaults (#1347, opt-in): major
+                  free-tier platforms fall back to a conservative built-in cap
+                  unless an env var says otherwise. Off by default. */}
+              <BuiltinConcurrencyControl />
             </div>
           )}
 

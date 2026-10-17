@@ -347,7 +347,9 @@
     "scoreColumn": "スコア",
     "minReliabilityFloor": "最低信頼性しきい値",
     "minReliabilityFloorHint": "観測された成功率がこの値を下回ったモデルをルーティングから除外します。0.8 は 80% を意味します。空欄で無効 — 履歴が少なすぎるモデルは常に保持され、新しいモデルも試行され続けます。チェーン全体が空になることはありません。",
-    "minReliabilityFloorOff": "無効"
+    "minReliabilityFloorOff": "無効",
+    "builtinKeyConcurrency": "Built-in per-key concurrency caps",
+    "builtinKeyConcurrencyHint": "When on, the major free-tier platforms fall back to a conservative built-in per-key concurrency cap unless a MAX_CONCURRENT_REQUESTS_PER_KEY* env var says otherwise. Off by default."
   },
   "penaltyInspector": {
     "title": "ルーターの圧力",

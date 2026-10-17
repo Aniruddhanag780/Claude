@@ -347,7 +347,9 @@
     "scoreColumn": "Banda sonora",
     "minReliabilityFloor": "Minimum reliability floor",
     "minReliabilityFloorHint": "Drop a model from routing once its observed success rate falls below this. 0.8 means 80%. Leave blank to disable — models with too little history are always kept so new models can still be tried. Never empties the whole chain.",
-    "minReliabilityFloorOff": "Disabled"
+    "minReliabilityFloorOff": "Disabled",
+    "builtinKeyConcurrency": "Built-in per-key concurrency caps",
+    "builtinKeyConcurrencyHint": "When on, the major free-tier platforms fall back to a conservative built-in per-key concurrency cap unless a MAX_CONCURRENT_REQUESTS_PER_KEY* env var says otherwise. Off by default."
   },
   "penaltyInspector": {
     "title": "Pressão do router",

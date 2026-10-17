@@ -347,7 +347,9 @@
     "scoreColumn": "Оценка",
     "minReliabilityFloor": "Минимальный порог надёжности",
     "minReliabilityFloorHint": "Исключает модель из маршрутизации, когда её наблюдаемая доля успешных запросов падает ниже этого значения. 0,8 означает 80 %. Оставьте пустым, чтобы отключить — модели с малой историей всегда сохраняются, чтобы новые модели продолжали пробоваться. Никогда не опустошает всю цепочку.",
-    "minReliabilityFloorOff": "Отключено"
+    "minReliabilityFloorOff": "Отключено",
+    "builtinKeyConcurrency": "Built-in per-key concurrency caps",
+    "builtinKeyConcurrencyHint": "When on, the major free-tier platforms fall back to a conservative built-in per-key concurrency cap unless a MAX_CONCURRENT_REQUESTS_PER_KEY* env var says otherwise. Off by default."
   },
   "penaltyInspector": {
     "title": "Давление маршрутизатора",

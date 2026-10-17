@@ -347,7 +347,9 @@
     "scoreColumn": "النتيجة",
     "minReliabilityFloor": "الحد الأدنى للموثوقية",
     "minReliabilityFloorHint": "يستبعد النموذج من التوجيه عندما تنخفض نسبة نجاحه المرصودة دون هذه القيمة. 0.8 تعني 80٪. اتركه فارغًا للتعطيل — تُحفظ دائمًا النماذج ذات السجلّ القليل حتى تظل النماذج الجديدة قابلة للتجربة. لا يُفرِّغ السلسلة كاملة أبدًا.",
-    "minReliabilityFloorOff": "معطّل"
+    "minReliabilityFloorOff": "معطّل",
+    "builtinKeyConcurrency": "Built-in per-key concurrency caps",
+    "builtinKeyConcurrencyHint": "When on, the major free-tier platforms fall back to a conservative built-in per-key concurrency cap unless a MAX_CONCURRENT_REQUESTS_PER_KEY* env var says otherwise. Off by default."
   },
   "penaltyInspector": {
     "title": "ضغط جهاز التوجيه",
