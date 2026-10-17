@@ -25,6 +25,7 @@ import {
   setCompressionConfig,
 } from '../services/compression/config.js';
 import { getHeadroomThresholds, setHeadroomThresholds, getTaskWeightShare, setTaskWeightShare, getMinReliabilityFloor, setMinReliabilityFloor, isProviderMomentAttributionEnabled, setProviderMomentAttribution } from '../services/router.js';
+import { isBuiltinKeyConcurrencyEnabled, setBuiltinKeyConcurrency } from '../lib/platform-concurrency.js';
 import { MCP_ENABLED_SETTING, isMcpServerEnabled } from './mcp.js';
 import { z } from 'zod';
 import { getAppVersion } from '../lib/app-version.js';
@@ -450,6 +451,30 @@ settingsRouter.put('/provider-moment-attribution', (req: Request, res: Response)
   }
   setProviderMomentAttribution(parsed.data.enabled);
   res.json({ enabled: isProviderMomentAttributionEnabled() });
+});
+
+// Built-in per-key concurrency defaults (#1347 PR 2, opt-in): when enabled,
+// platforms listed in BUILTIN_KEY_CONCURRENCY fall back to their conservative
+// built-in cap when no MAX_CONCURRENT_REQUESTS_PER_KEY* env var is set. Off by
+// default; the ROUTER_BUILTIN_KEY_CONCURRENCY env var pins the behaviour.
+settingsRouter.get('/builtin-key-concurrency', (_req: Request, res: Response) => {
+  res.json({ enabled: isBuiltinKeyConcurrencyEnabled() });
+});
+
+const builtinKeyConcurrencyPutSchema = z.object({
+  enabled: z.boolean(),
+});
+
+// Update the built-in concurrency toggle. Takes effect on the next attempt —
+// the limit is consulted per dispatch.
+settingsRouter.put('/builtin-key-concurrency', (req: Request, res: Response) => {
+  const parsed = builtinKeyConcurrencyPutSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: 'Invalid builtin-key-concurrency: send {"enabled": true|false}', type: 'invalid_request_error' } });
+    return;
+  }
+  setBuiltinKeyConcurrency(parsed.data.enabled);
+  res.json({ enabled: isBuiltinKeyConcurrencyEnabled() });
 });
 
 // Update the guardrails. Partial: send just the knob you want to change.

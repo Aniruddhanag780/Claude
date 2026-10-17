@@ -51,6 +51,7 @@ import { PeakHoursControls } from '@/components/peak-hours-controls'
 import { ReliabilityFloorControl } from '@/components/reliability-floor-control'
 import { ProviderMomentControl } from '@/components/provider-moment-control'
 import { DecisionRoutingPopover, DecisionSetupGuide } from '@/components/decision-routing-popover'
+import { BuiltinConcurrencyControl } from '@/components/builtin-concurrency-control'
 import { ChainManager } from '@/components/chain-manager'
 
 // `tKey` is the i18n suffix under `strategies.*` (label) and `strategies.*Blurb`.
@@ -526,6 +527,10 @@ export default function FallbackPage() {
                   timeouts and transport drops steer the key without counting
                   against the model's reliability. Off by default. */}
               <ProviderMomentControl />
+              {/* Built-in per-key concurrency defaults (#1347, opt-in): major
+                  free-tier platforms fall back to a conservative built-in cap
+                  unless an env var says otherwise. Off by default. */}
+              <BuiltinConcurrencyControl />
             </div>
           )}
 
