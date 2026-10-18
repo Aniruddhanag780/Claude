@@ -65,6 +65,10 @@ export interface DecisionRoutingStatus {
   minProbability: number
   /** False when no decision model has a usable key: every request routes as Balanced. */
   ready: boolean
+  /** Whether any decision model is turned on for the setup guide to point at. */
+  hasModels: boolean
+  /** Providers whose key would make Decision routing ready, in priority order. */
+  keyPlatforms: string[]
   counts: { smartest: number; fastest: number; balanced: number; reliable: number }
   fallbacks: Partial<Record<'low_confidence' | 'timeout' | 'unavailable' | 'error', number>>
 }

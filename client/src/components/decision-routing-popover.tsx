@@ -1,10 +1,12 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { SlidersHorizontal } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { KeyRound, SlidersHorizontal } from 'lucide-react'
 import { useI18n } from '@/i18n'
 import { apiFetch } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+import { PLATFORMS } from '@/components/keys/shared'
 import type { DecisionModel } from '@/lib/decision'
 import type { DecisionRoutingStatus } from '@/lib/routing'
 
@@ -61,7 +63,10 @@ export function DecisionRoutingPopover({ status, onSave, saving }: {
           </div>
 
           {!status.ready && (
-            <p className="text-xs text-amber-600 dark:text-amber-500">{t('strategies.decisionNotReady')}</p>
+            <div className="space-y-2">
+              <p className="text-xs text-amber-600 dark:text-amber-500">{t('strategies.decisionNotReady')}</p>
+              <DecisionSetupActions status={status} />
+            </div>
           )}
 
           <label className="block text-xs">
@@ -114,6 +119,59 @@ export function DecisionRoutingPopover({ status, onSave, saving }: {
           <Button size="sm" className="w-full" disabled={!dirty || saving} onClick={apply}>
             {saving ? t('common.applying') : dirty ? t('common.apply') : t('common.applied')}
           </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+// What gets Decision routing working: one "Add <provider> key" button per
+// provider that has an enabled decision model (opens Keys with that provider
+// preselected), or a pointer to Models → Decision when none is turned on.
+function DecisionSetupActions({ status }: { status: DecisionRoutingStatus }) {
+  const { t } = useI18n()
+  const navigate = useNavigate()
+  const label = (platform: string) => PLATFORMS.find(p => p.value === platform)?.label ?? platform
+  return (
+    <div className="space-y-2">
+      {status.hasModels ? (
+        <div className="flex flex-col gap-1.5">
+          {status.keyPlatforms.map(platform => (
+            <Button key={platform} size="sm" className="w-full justify-start" onClick={() => navigate(`/keys?add=${encodeURIComponent(platform)}`)}>
+              <KeyRound className="size-3.5" />
+              {t('strategies.decisionAddKey', { provider: label(platform) })}
+            </Button>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">{t('strategies.decisionNoModels')}</p>
+      )}
+      <Button size="sm" variant="outline" className="w-full" onClick={() => navigate('/models/decision')}>
+        {t('strategies.decisionOpenModels')}
+      </Button>
+    </div>
+  )
+}
+
+// The Decision pill while nothing can decide yet (#1354): instead of switching
+// to a strategy that would silently route everything as Balanced, a click
+// opens this guide to the one key that makes it work. `children` is the pill.
+export function DecisionSetupGuide({ status, className, children }: {
+  status: DecisionRoutingStatus
+  className: string
+  children: ReactNode
+}) {
+  const { t } = useI18n()
+  return (
+    <Popover>
+      <PopoverTrigger className={className}>{children}</PopoverTrigger>
+      <PopoverContent align="start" className="w-80">
+        <div className="space-y-3">
+          <div>
+            <h3 className="text-sm font-medium">{t('strategies.decisionSetupTitle')}</h3>
+            <p className="mt-0.5 text-xs text-muted-foreground">{t('strategies.decisionSetupHelp')}</p>
+          </div>
+          <DecisionSetupActions status={status} />
         </div>
       </PopoverContent>
     </Popover>

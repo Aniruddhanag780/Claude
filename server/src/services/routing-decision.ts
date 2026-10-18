@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import type { ChatMessage, ChatContent } from '@freellmapi/shared/types.js';
 import { getSetting, setSetting } from '../db/index.js';
 import { setRequestRoutingStrategy } from '../lib/client-context.js';
-import { DecisionError, decisionsAvailable, runDecision } from './decision.js';
+import { DecisionError, listDecisionModels, runDecision } from './decision.js';
 import { getRoutingStrategy } from './router.js';
 import type { PresetStrategy } from './scoring.js';
 
@@ -231,8 +231,23 @@ export function routingStrategyHeader(pick: DecisionPick): string {
   return pick.source === 'decision' || pick.source === 'cache' ? pick.strategy : `${pick.strategy}; fallback=${pick.source}`;
 }
 
-/** Settings + since-boot stats for the dashboard. `ready` is false when no
- *  decision model has a usable key, so every request would route as Balanced. */
+/** Settings + since-boot stats for the dashboard, plus what the setup guide
+ *  needs. Mirrors the chain routing would use: the pinned model, or with
+ *  'auto' every enabled decision model except the skipped platforms.
+ *  - `ready`: one of those has a usable key (else every request is Balanced).
+ *  - `hasModels`: there is at least one such model to add a key for.
+ *  - `keyPlatforms`: providers whose key would make it ready, in priority order. */
 export function getDecisionRoutingStatus() {
-  return { ...getDecisionRoutingSettings(), ready: decisionsAvailable(), ...getDecisionRoutingStats() };
+  const settings = getDecisionRoutingSettings();
+  const candidates = listDecisionModels()
+    .filter(m => m.enabled)
+    .filter(m => settings.model === 'auto' ? !AUTO_SKIP_PLATFORMS.has(m.platform) : m.modelId === settings.model)
+    .sort((a, b) => a.priority - b.priority || a.id - b.id);
+  return {
+    ...settings,
+    ready: candidates.some(m => m.healthyKeyCount > 0),
+    hasModels: candidates.length > 0,
+    keyPlatforms: [...new Set(candidates.map(m => m.platform))],
+    ...getDecisionRoutingStats(),
+  };
 }

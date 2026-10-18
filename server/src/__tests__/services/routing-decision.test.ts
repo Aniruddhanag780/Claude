@@ -235,3 +235,34 @@ describe('effectiveRoutingStrategy', () => {
     expect(await inRequest(async () => effectiveRoutingStrategy())).toBe('balanced');
   });
 });
+
+describe('decision routing status (setup guide)', () => {
+  beforeEach(() => {
+    process.env.ENCRYPTION_KEY = '0'.repeat(64);
+    initDb(':memory:');
+    resetDecisionRoutingCache();
+  });
+
+  it('has no models to offer before the catalog delivers any', async () => {
+    const { getDecisionRoutingStatus } = await import('../../services/routing-decision.js');
+    expect(getDecisionRoutingStatus()).toMatchObject({ ready: false, hasModels: false, keyPlatforms: [] });
+  });
+
+  it('names the providers whose key would make it ready, until one exists', async () => {
+    const { getDecisionRoutingStatus } = await import('../../services/routing-decision.js');
+    seedDecisionModels();
+    expect(getDecisionRoutingStatus()).toMatchObject({ ready: false, hasModels: true, keyPlatforms: ['cloudflare', 'openrouter'] });
+    addKey('openrouter', 'sk-or');
+    expect(getDecisionRoutingStatus()).toMatchObject({ ready: true, keyPlatforms: ['cloudflare', 'openrouter'] });
+  });
+
+  it("does not count a BeatAPI key as ready under 'auto', but does when BeatAPI is pinned", async () => {
+    const { getDecisionRoutingStatus } = await import('../../services/routing-decision.js');
+    getDb().prepare(`INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label)
+                     VALUES ('beatapi', 'jev-1.14-free', 'JEV', 'decision', 0, 1, '')`).run();
+    addKey('beatapi', 'sk-beat');
+    expect(getDecisionRoutingStatus()).toMatchObject({ ready: false, hasModels: false, keyPlatforms: [] });
+    setDecisionRoutingSettings({ model: 'jev-1.14-free' });
+    expect(getDecisionRoutingStatus()).toMatchObject({ ready: true, hasModels: true, keyPlatforms: ['beatapi'] });
+  });
+});

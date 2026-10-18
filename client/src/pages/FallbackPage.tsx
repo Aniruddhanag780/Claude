@@ -50,7 +50,7 @@ import { PenaltyInspector } from '@/components/penalty-inspector'
 import { PeakHoursControls } from '@/components/peak-hours-controls'
 import { ReliabilityFloorControl } from '@/components/reliability-floor-control'
 import { ProviderMomentControl } from '@/components/provider-moment-control'
-import { DecisionRoutingPopover } from '@/components/decision-routing-popover'
+import { DecisionRoutingPopover, DecisionSetupGuide } from '@/components/decision-routing-popover'
 import { ChainManager } from '@/components/chain-manager'
 
 // `tKey` is the i18n suffix under `strategies.*` (label) and `strategies.*Blurb`.
@@ -378,21 +378,37 @@ export default function FallbackPage() {
               secondary hangs off that toggle so the card reads as one choice. */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border p-1">
-              {STRATEGIES.map(s => (
-                <Tooltip key={s.key} text={t(`strategies.${s.tKey}Blurb`)}>
-                  <button
-                    disabled={strategyMutation.isPending}
-                    onClick={() => strategyMutation.mutate({ strategy: s.key })}
-                    className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
-                      s.key === strategy
-                        ? 'bg-foreground text-background font-medium'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-muted'
-                    }`}
-                  >
-                    {t(`strategies.${s.tKey}`)}
-                  </button>
-                </Tooltip>
-              ))}
+              {STRATEGIES.map(s => {
+                const pillClass = `px-3 py-1.5 text-xs rounded-lg transition-colors ${
+                  s.key === strategy
+                    ? 'bg-foreground text-background font-medium'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                }`
+                // Decision with nothing able to decide (#1354): the pill opens a
+                // setup guide instead of switching to a strategy that would
+                // route everything as Balanced.
+                const needsSetup = s.key === 'decision' && strategy !== 'decision' && routing?.decision && !routing.decision.ready
+                // The guide explains itself, so it skips the hover blurb, which
+                // would otherwise sit on top of the guide's buttons.
+                if (needsSetup && routing?.decision) {
+                  return (
+                    <DecisionSetupGuide key={s.key} status={routing.decision} className={pillClass}>
+                      {t(`strategies.${s.tKey}`)}
+                    </DecisionSetupGuide>
+                  )
+                }
+                return (
+                  <Tooltip key={s.key} text={t(`strategies.${s.tKey}Blurb`)}>
+                    <button
+                      disabled={strategyMutation.isPending}
+                      onClick={() => strategyMutation.mutate({ strategy: s.key })}
+                      className={pillClass}
+                    >
+                      {t(`strategies.${s.tKey}`)}
+                    </button>
+                  </Tooltip>
+                )
+              })}
               {strategy === 'custom' && routing && (
                 <CustomWeightsPopover
                   saved={routing.customWeights}
