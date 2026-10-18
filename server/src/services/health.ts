@@ -12,7 +12,10 @@ import { sanitizeProviderErrorMessage } from '../lib/error-redaction.js';
 import { providerLog } from '../lib/server-logs.js';
 import { triggerBuiltinModelDiscovery } from './builtin-model-discovery.js';
 
-const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+// Default base cadence for the scheduled health pass: 5 minutes (ms). Can be
+// overridden at startup with HEALTH_CHECK_INTERVAL_MS (milliseconds).
+const DEFAULT_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const CHECK_INTERVAL_MS = positiveIntEnv(process.env.HEALTH_CHECK_INTERVAL_MS, DEFAULT_HEALTH_CHECK_INTERVAL_MS);
 const CONSECUTIVE_FAILURES_TO_DISABLE = 3;
 const DEFAULT_HEALTH_CHECK_CONCURRENCY = 8;
 const DEFAULT_MIN_SPACING_MS = 1000;

@@ -50,6 +50,8 @@ register(new OpenAICompatProvider({
 1. **绝不要把公开的模型列表端点当成密钥有效的证据**（pollinations #608、modelscope）：如果 `GET /v1/models` 未鉴权也返回 200，就改为探测某个需要鉴权的东西。
 2. **如果校验消耗计量额度，就缓存它或找一条免费探测** ——见 [#882](02-quotas-and-cooldowns.md#健康检查不得燃烧计量额度882)。健康检查每约 5 分钟对每条已存密钥跑一轮。
 
+默认值可以通过 HEALTH_CHECK_INTERVAL_MS（毫秒）更改；更改后需要重启服务以生效。
+
 ## 5. 有意识地播种目录
 
 模型行来自两个地方，选错了会把付费模型泄漏给免费用户：

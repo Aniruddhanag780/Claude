@@ -50,6 +50,8 @@ Env-tunable timeouts come automatically via `PROVIDER_TIMEOUT_<PLATFORM>` (#547)
 1. **Never trust a public models endpoint as proof of a valid key** (pollinations #608, modelscope): if `GET /v1/models` answers 200 unauthenticated, probe something authenticated instead.
 2. **If validation consumes metered quota, cache it or find a free probe** — see [#882](02-quotas-and-cooldowns.md#health-checks-must-not-burn-metered-quota-882). Health runs every ~5 minutes against every stored key.
 
+This default cadence can be adjusted with HEALTH_CHECK_INTERVAL_MS (milliseconds); restart is required after setting it.
+
 ## 5. Seed the catalog deliberately
 
 Model rows come from two places, and picking wrong leaks paid models to free users:

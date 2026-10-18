@@ -71,6 +71,8 @@ Headers and error bodies only show quota when a request happens to carry them. P
 
 Health runs a scheduled pass every 5 minutes (±20% jitter, keys validated more recently than 3.5 minutes skipped, default concurrency 8, ≥1s spacing between same-provider probes). That cadence is fine for free validation endpoints but poisonous where validation itself costs quota:
 
+This default can be changed with the HEALTH_CHECK_INTERVAL_MS environment variable (milliseconds); a server restart is required for the change to take effect.
+
 - ModelScope validates keys with a paid 1-token chat completion (`GET /v1/models` does not enforce auth), spending magic-grain quota — at the default cadence roughly 288 paid probes/key/day. Fix (#882): tokens not prefixed `ms-` are rejected locally with zero network calls, and a successful validation is cached per key for `MODELSCOPE_VALIDATE_CACHE_MS` (default 24h).
 - Pollinations' public `/v1/models` answers 200 even for revoked keys, so validation targets the authenticated `/account/key`; AI Horde treats any reachable endpoint as healthy rather than spending queue slots.
 
