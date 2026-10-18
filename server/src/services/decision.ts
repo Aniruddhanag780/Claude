@@ -76,6 +76,10 @@ export interface DecisionOptions {
   signal?: AbortSignal;
   /** Overrides the request-scoped client agent (tests, internal callers). */
   clientAgent?: string | null;
+  /** With 'auto', leave these platforms out of the chain. Decision routing
+   *  (#1354) asks once per chat turn, which BeatAPI's free 1 request/minute
+   *  cannot keep up with. A pinned model is never skipped. */
+  skipPlatforms?: ReadonlySet<string>;
 }
 
 interface DecisionModelRow {
@@ -280,9 +284,9 @@ export function decisionsAvailable(): boolean {
   return allDecisionRows().some(r => r.enabled === 1 && ADAPTERS[r.platform] && hasUsableKey(r.platform));
 }
 
-function decisionChain(model: string | undefined): DecisionModelRow[] {
+function decisionChain(model: string | undefined, skipPlatforms?: ReadonlySet<string>): DecisionModelRow[] {
   const enabled = allDecisionRows().filter(r => r.enabled === 1 && ADAPTERS[r.platform]);
-  if (!model || model === 'auto') return enabled;
+  if (!model || model === 'auto') return skipPlatforms ? enabled.filter(r => !skipPlatforms.has(r.platform)) : enabled;
   const pinned = enabled.filter(r => r.model_id === model);
   if (pinned.length === 0) {
     const known = allDecisionRows().some(r => r.model_id === model);
@@ -297,7 +301,7 @@ function decisionChain(model: string | undefined): DecisionModelRow[] {
 }
 
 export async function runDecision(body: DecisionRequest, opts: DecisionOptions = {}): Promise<DecisionResponse> {
-  const chain = decisionChain(opts.model);
+  const chain = decisionChain(opts.model, opts.skipPlatforms);
   const clientAgent = opts.clientAgent !== undefined ? opts.clientAgent : getClientContext().agent;
   const questionCount = Object.keys(body.questions).length;
 

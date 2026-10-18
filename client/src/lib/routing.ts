@@ -56,7 +56,18 @@ export interface FallbackEntry {
   groupLabel?: string
 }
 
-export type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'fastest' | 'reliable' | 'custom'
+export type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'fastest' | 'reliable' | 'custom' | 'decision'
+
+/** The 'decision' strategy's settings and since-restart picks (#1354): a
+ *  decision model picks one of four presets per request, Balanced when unsure. */
+export interface DecisionRoutingStatus {
+  model: string
+  minProbability: number
+  /** False when no decision model has a usable key: every request routes as Balanced. */
+  ready: boolean
+  counts: { smartest: number; fastest: number; balanced: number; reliable: number }
+  fallbacks: Partial<Record<'low_confidence' | 'timeout' | 'unavailable' | 'error', number>>
+}
 
 // How the gateway picks between several keys of ONE platform, once a model has
 // been chosen (#919). Separate from RoutingStrategy, which ranks models: the
@@ -84,6 +95,8 @@ export interface RoutingScore {
 
 export interface RoutingData {
   strategy: RoutingStrategy
+  /** Optional so an older server (no decision routing) still renders. */
+  decision?: DecisionRoutingStatus
   weights: RoutingWeights | null
   customWeights: RoutingWeights
   /** Exploration toggle: when on, unmeasured models get a guaranteed chance to

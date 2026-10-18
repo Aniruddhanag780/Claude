@@ -50,6 +50,7 @@ import { PenaltyInspector } from '@/components/penalty-inspector'
 import { PeakHoursControls } from '@/components/peak-hours-controls'
 import { ReliabilityFloorControl } from '@/components/reliability-floor-control'
 import { ProviderMomentControl } from '@/components/provider-moment-control'
+import { DecisionRoutingPopover } from '@/components/decision-routing-popover'
 import { ChainManager } from '@/components/chain-manager'
 
 // `tKey` is the i18n suffix under `strategies.*` (label) and `strategies.*Blurb`.
@@ -61,6 +62,7 @@ const STRATEGIES: { key: RoutingStrategy; tKey: string }[] = [
   { key: 'fastest', tKey: 'fastest' },
   { key: 'reliable', tKey: 'reliable' },
   { key: 'custom', tKey: 'custom' },
+  { key: 'decision', tKey: 'decision' },
 ]
 
 // Minimum-context filter buckets for the Models page toolbar. `key` is the token
@@ -181,6 +183,7 @@ export default function FallbackPage() {
       strategy: RoutingStrategy; weights?: RoutingWeights; exploreEnabled?: boolean
       peakHoursAdjust?: boolean; peakStartHour?: number; peakEndHour?: number; peakTimezone?: string
       keySelectionStrategy?: KeySelectionStrategy; cooldownCeilingMs?: number | null
+      decisionModel?: string; decisionMinProbability?: number
     }) =>
       apiFetch('/api/fallback/routing', { method: 'PUT', body: JSON.stringify(payload) }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] }),
@@ -395,6 +398,13 @@ export default function FallbackPage() {
                   saved={routing.customWeights}
                   saving={strategyMutation.isPending}
                   onSave={w => strategyMutation.mutate({ strategy: 'custom', weights: w })}
+                />
+              )}
+              {strategy === 'decision' && routing?.decision && (
+                <DecisionRoutingPopover
+                  status={routing.decision}
+                  saving={strategyMutation.isPending}
+                  onSave={settings => strategyMutation.mutate({ strategy: 'decision', ...settings })}
                 />
               )}
             </div>
