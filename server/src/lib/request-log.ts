@@ -1,7 +1,8 @@
+import { getDb } from '../db/index.js';
 import { recordRequestTelemetry } from '../services/analytics-aggregator.js';
 import { getActiveRegistry } from '../services/router-registry.js';
 import { settleMonthlyUsage } from '../services/key-budget.js';
-import type { RequestTrace } from './attempt-trace.js';
+import { noteRequestRowId, type RequestTrace } from './attempt-trace.js';
 
 // Memory-first zero-DB request logging
 export function logRequest(
@@ -55,12 +56,42 @@ export function logRequest(
       isRateLimit: !!isRateLimit,
       isTimeout: !!isTimeout,
     });
+
+    const db = getDb();
+    if (typeof db?.query === 'function') {
+      const qPromise = db.query(
+        `INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms, requested_model, served_model, client_agent)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id`,
+        [platform, modelId, keyId, status, inputTokens || 0, outputTokens || 0, latencyMs || 0, error || null, _ttfbMs, _requestedModel, _servedModel, _caller]
+      );
+      if (qPromise && typeof qPromise.then === 'function') {
+        qPromise.then((res: any) => {
+          const insertedId = res?.rows?.[0]?.id;
+          if (insertedId != null) noteRequestRowId(insertedId);
+        }).catch(() => {});
+      }
+    }
   } catch (e) {
     // Analytics logging failure must never crash inference
     console.error('[request-log] Error recording telemetry:', e);
   }
 }
 
-export function persistRequestAttempts(_trace: RequestTrace): void {
-  // Runtime request attempts are tracked in memory metrics
+export function persistRequestAttempts(trace: RequestTrace): void {
+  if (trace.records.length === 0 || trace.lastRequestRowId == null) return;
+  try {
+    const db = getDb();
+    if (typeof db?.query === 'function') {
+      for (const r of trace.records) {
+        db.query(
+          `INSERT INTO request_attempts (request_id, ordinal, platform, model_id, key_ordinal, key_label, outcome, start_offset_ms, duration_ms, error_summary)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [trace.lastRequestRowId, r.ordinal, r.platform, r.modelId, r.keyOrdinal, r.keyLabel, r.outcome, r.startOffsetMs, r.durationMs, r.errorSummary]
+        ).catch(() => {});
+      }
+    }
+  } catch (e) {
+    console.error('Failed to persist request attempts:', e);
+  }
 }

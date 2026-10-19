@@ -295,7 +295,7 @@ export async function reloadRoutingRegistry(): Promise<RouterRegistry> {
         const providerKey = providerKeyMap.get(row.provider_id) || 'unknown';
         const cooldownUntilMs = row.cooldown_until ? new Date(row.cooldown_until).getTime() : 0;
         const isOnCd = cooldownUntilMs > now;
-        const isUsable = Boolean(row.enabled) && !decryptFailed && Boolean(decrypted);
+        const isUsable = Boolean(row.enabled) && !decryptFailed && (Boolean(decrypted) || row.credential_type === 'keyless');
 
         // Preserve previous in-memory runtime telemetry if credential existed in previous registry
         const existingCred = activeRegistry?.getCredentialById(row.id);
@@ -343,7 +343,7 @@ export async function reloadRoutingRegistry(): Promise<RouterRegistry> {
 
       // 3. Fetch models
       const modelRows = await pool.query(`
-        SELECT id, provider_id, model_id, canonical_name, display_name, enabled,
+        SELECT id, provider_id, platform, model_id, canonical_name, display_name, enabled,
                context_window, max_output_tokens, supports_streaming, supports_tools,
                supports_vision, supports_structured_output, supports_reasoning,
                input_price, output_price, priority,
@@ -355,7 +355,7 @@ export async function reloadRoutingRegistry(): Promise<RouterRegistry> {
       const models: ModelRecord[] = modelRows.rows.map((row: any) => ({
         id: row.id,
         providerId: row.provider_id,
-        providerKey: providerKeyMap.get(row.provider_id) || 'unknown',
+        providerKey: row.platform || providerKeyMap.get(row.provider_id) || 'unknown',
         modelId: row.model_id,
         canonicalName: row.canonical_name,
         displayName: row.display_name,

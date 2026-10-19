@@ -8,8 +8,26 @@ import { getProvider, hasProvider, getAllProviders } from '../providers/index.js
 import { getDb } from '../db/index.js';
 import { isSearchPlatform } from '../lib/search-platforms.js';
 import type { Platform, KeyStatus } from '@freellmapi/shared/types.js';
-import { endpointScopeForBaseUrl } from '../lib/endpoint-scope.js';
+import { endpointScopeForBaseUrl, normalizeBaseUrl } from '../lib/endpoint-scope.js';
 import { ensureModelInProfiles } from '../services/profile-models.js';
+import {
+  customEndpointKeyIds,
+  resolveCustomEndpointKey,
+  endpointHasCredential,
+  setCustomEndpointGroup,
+  normalizeGroupLabel,
+} from '../services/custom-endpoint.js';
+import { registerCustomModels, registerCustomChatModels } from '../services/custom-model-register.js';
+import { registerCustomMediaModel } from '../services/custom-media-register.js';
+import { probeEmbeddingDimensions, registerCustomEmbeddingModel } from '../services/embeddings.js';
+import { clearCooldownsForKey } from '../services/ratelimit.js';
+import {
+  discoverEndpointModels,
+  probeEndpointModel,
+  classifyModelId,
+  ModelDiscoveryError,
+} from '../services/model-discovery.js';
+import { assessProviderUrl } from '../lib/url-guard.js';
 
 export const keysRouter = Router();
 
@@ -466,245 +484,368 @@ keysRouter.post('/:id/test', async (req: Request, res: Response) => {
   }
 });
 
-// Custom endpoint discovery & registration routes
-keysRouter.post('/custom', async (req: Request, res: Response) => {
-  try {
-    const { baseUrl, model, apiKey = '', label = '', groupLabel = null } = req.body || {};
-    if (!baseUrl) {
-      res.status(400).json({ error: 'baseUrl is required' });
-      return;
+interface CustomEndpointRef {
+  baseUrl: string;
+  keyId: number | null;
+  storedKey: string | null;
+}
+
+async function rejectUnsafeBaseUrl(baseUrl: string, res: Response): Promise<boolean> {
+  const verdict = await assessProviderUrl(baseUrl);
+  if (verdict.allowed) return false;
+  res.status(400).json({ error: { message: `baseUrl rejected: ${verdict.reason}` } });
+  return true;
+}
+
+function resolveEndpointRef(ref: { keyId?: number; baseUrl?: string }): CustomEndpointRef {
+  const db = getDb();
+  const requestedBaseUrl = ref.baseUrl === undefined ? undefined : normalizeBaseUrl(ref.baseUrl);
+
+  if (ref.keyId !== undefined) {
+    const row = db.prepare('SELECT id, platform, base_url, encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?')
+      .get(ref.keyId) as { id: number; platform: string; base_url: string | null; encrypted_key: string; iv: string; auth_tag: string } | undefined;
+    if (!row || row.platform !== 'custom' || !row.base_url) {
+      throw Object.assign(new Error('keyId does not name a custom endpoint'), { status: 400 });
     }
-
-    const pool = getPostgresPool();
-    // 1. Find or create custom provider
-    let providerId: number;
-    const pRes = await pool.query("SELECT id FROM providers WHERE provider_key = 'custom' AND base_url = $1", [baseUrl]);
-    if (pRes.rows.length > 0) {
-      providerId = pRes.rows[0].id;
-    } else {
-      const newP = await pool.query(
-        `INSERT INTO providers (provider_key, display_name, base_url, enabled, priority)
-         VALUES ('custom', $1, $2, true, 5)
-         RETURNING id`,
-        [label || 'Custom Endpoint', baseUrl]
-      );
-      providerId = newP.rows[0].id;
+    if (requestedBaseUrl !== undefined && requestedBaseUrl !== row.base_url) {
+      throw Object.assign(new Error('baseUrl does not match the endpoint keyId belongs to'), { status: 400 });
     }
-
-    // 2. Encrypt and add credential
-    const enc = encrypt(apiKey);
-    const credRes = await pool.query(
-      `INSERT INTO credentials (
-         provider_id, credential_name, encrypted_value, iv, auth_tag,
-         credential_type, enabled, priority, group_label
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, true, 0, $7)
-       RETURNING id`,
-      [providerId, label, enc.encrypted, enc.iv, enc.authTag, apiKey ? 'api_key' : 'keyless', groupLabel || null]
-    );
-
-    const keyId = credRes.rows[0].id;
-    await pool.query(
-      `INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, base_url, group_label, status, enabled)
-       VALUES ($1, 'custom', $2, $3, $4, $5, $6, $7, 'healthy', 1)
-       ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, encrypted_key = EXCLUDED.encrypted_key, iv = EXCLUDED.iv, auth_tag = EXCLUDED.auth_tag, base_url = EXCLUDED.base_url`,
-      [keyId, label, enc.encrypted, enc.iv, enc.authTag, baseUrl, groupLabel || null]
-    ).catch(() => {});
-
-    // 3. Register initial model if supplied
-    const modelEntries: string[] = [];
-    if (typeof model === 'string' && model.trim()) {
-      modelEntries.push(model.trim());
-    }
-    if (Array.isArray(req.body?.models)) {
-      for (const m of req.body.models) {
-        const id = typeof m === 'string' ? m : m?.modelId || m?.model;
-        if (id && !modelEntries.includes(id)) {
-          modelEntries.push(id);
-        }
-      }
-    }
-
-    const endpointScope = endpointScopeForBaseUrl(baseUrl);
-    for (const mId of modelEntries) {
-      const insRes = await pool.query(
-        `INSERT INTO models (
-           provider_id, platform, source, model_id, canonical_name, display_name, enabled,
-           supports_streaming, supports_tools, supports_vision, supports_structured_output, priority,
-           key_id, endpoint_scope
-         )
-         VALUES ($1, 'custom', 'user', $2, $2, $2, true, true, true, false, false, 0, $3, $4)
-         ON CONFLICT (provider_id, model_id) DO UPDATE SET
-           key_id = EXCLUDED.key_id,
-           endpoint_scope = EXCLUDED.endpoint_scope,
-           supports_tools = EXCLUDED.supports_tools,
-           enabled = true
-         RETURNING id`,
-        [providerId, mId, keyId, endpointScope]
-      );
-      const modelDbId = insRes.rows[0]?.id;
-      if (modelDbId) {
-        await pool.query(
-          `INSERT INTO fallback_config (model_db_id, priority, enabled)
-           VALUES ($1, (SELECT COALESCE(MAX(priority), 0) + 1 FROM fallback_config), 1)
-           ON CONFLICT (model_db_id) DO NOTHING`,
-          [modelDbId]
-        ).catch(() => {});
-        ensureModelInProfiles(getDb(), modelDbId);
-      }
-    }
-
-    await reloadRoutingRegistry();
-    res.status(201).json({ success: true, keyId, providerId, baseUrl, model, groupLabel });
-  } catch (err: any) {
-    console.error('[keys] Error registering custom endpoint:', err);
-    res.status(500).json({ error: err?.message || 'Failed to register custom endpoint' });
+    let storedKey: string | null = null;
+    try {
+      storedKey = decrypt(row.encrypted_key, row.iv, row.auth_tag);
+    } catch { /* an undecryptable row still names the endpoint */ }
+    return { baseUrl: row.base_url, keyId: row.id, storedKey };
   }
-});
+
+  if (!requestedBaseUrl) {
+    throw Object.assign(new Error('baseUrl or keyId is required'), { status: 400 });
+  }
+
+  const rows = db.prepare(`
+    SELECT id, encrypted_key, iv, auth_tag FROM api_keys
+     WHERE platform = 'custom' AND base_url = ? ORDER BY id
+  `).all(requestedBaseUrl) as Array<{ id: number; encrypted_key: string; iv: string; auth_tag: string }>;
+  for (const row of rows) {
+    try {
+      return { baseUrl: requestedBaseUrl, keyId: row.id, storedKey: decrypt(row.encrypted_key, row.iv, row.auth_tag) };
+    } catch { /* try the next credential */ }
+  }
+  return { baseUrl: requestedBaseUrl, keyId: rows[0]?.id ?? null, storedKey: null };
+}
+
+const discoverModelsSchema = z.object({
+  baseUrl: z.string().url('baseUrl must be a valid URL').optional(),
+  keyId: z.number().int().positive().optional(),
+  apiKey: z.string().optional(),
+}).refine(
+  d => d.baseUrl !== undefined || d.keyId !== undefined,
+  { message: 'baseUrl or keyId is required' },
+);
 
 keysRouter.post('/custom/discover-models', async (req: Request, res: Response) => {
+  const parsed = discoverModelsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+
+  let endpoint: CustomEndpointRef;
   try {
-    const { baseUrl, keyId, apiKey } = req.body || {};
-    if (!baseUrl && !keyId) {
-      res.status(400).json({ error: 'baseUrl or keyId is required' });
-      return;
-    }
+    endpoint = resolveEndpointRef(parsed.data);
+  } catch (err: any) {
+    res.status(err.status ?? 400).json({ error: { message: err.message } });
+    return;
+  }
 
-    let targetUrl = baseUrl;
-    let targetKey = apiKey || '';
-    const resolvedKeyId = keyId;
+  if (await rejectUnsafeBaseUrl(endpoint.baseUrl, res)) return;
 
-    const pool = getPostgresPool();
-    if (keyId && !targetUrl) {
-      const credRes = await pool.query(
-        `SELECT c.id, c.encrypted_value, c.iv, c.auth_tag, p.base_url
-         FROM credentials c
-         JOIN providers p ON p.id = c.provider_id
-         WHERE c.id = $1`,
-        [keyId]
-      );
-      if (credRes.rows.length === 0) {
-        res.status(404).json({ error: 'Key not found' });
-        return;
+  const apiKey = parsed.data.apiKey?.trim() || endpoint.storedKey || 'no-key';
+
+  try {
+    const discovered = await discoverEndpointModels(endpoint.baseUrl, apiKey);
+
+    const db = getDb();
+    const registeredIds = new Set<string>();
+    if (endpoint.keyId != null) {
+      const poolIds = [...customEndpointKeyIds(db, endpoint.keyId)];
+      if (poolIds.length > 0) {
+        const placeholders = poolIds.map(() => '?').join(', ');
+        const rows = db.prepare(
+          `SELECT model_id FROM models WHERE platform = 'custom' AND key_id IN (${placeholders})`,
+        ).all(...poolIds) as { model_id: string }[];
+        for (const row of rows) registeredIds.add(row.model_id);
       }
-      targetUrl = credRes.rows[0].base_url;
-      try {
-        targetKey = decrypt(credRes.rows[0].encrypted_value, credRes.rows[0].iv, credRes.rows[0].auth_tag);
-      } catch {}
     }
 
-    if (!targetUrl) {
-      res.status(400).json({ error: 'Endpoint base URL could not be resolved' });
-      return;
-    }
-
-    // Call external endpoint /models
-    const modelsEndpoint = targetUrl.replace(/\/+$/, '') + '/models';
-    const response = await fetch(modelsEndpoint, {
-      headers: {
-        ...(targetKey ? { Authorization: `Bearer ${targetKey}` } : {}),
-      },
-    });
-
-    if (!response.ok) {
-      const status = response.status === 401 ? 401 : 502;
-      res.status(status).json({ error: `Discovery failed with upstream status ${response.status}` });
-      return;
-    }
-
-    const data: any = await response.json();
-    const rawList = Array.isArray(data?.data) ? data.data : (Array.isArray(data?.models) ? data.models : (Array.isArray(data) ? data : []));
-    
-    // Check registered models
-    const existingModels = await pool.query(
-      `SELECT m.model_id FROM models m
-       JOIN providers p ON p.id = m.provider_id
-       WHERE p.base_url = $1`,
-      [targetUrl]
-    );
-    const registeredSet = new Set(existingModels.rows.map(r => r.model_id));
-
-    const models = rawList.map((m: any) => {
-      const id = typeof m === 'string' ? m : (m.id || m.name);
-      return {
-        id,
-        ownedBy: m.owned_by || m.ownedBy || 'custom',
-        registered: registeredSet.has(id),
-      };
-    });
-
+    const models = discovered.map(m => ({ ...m, registered: registeredIds.has(m.id) }));
     res.json({
-      baseUrl: targetUrl,
-      keyId: resolvedKeyId,
+      baseUrl: endpoint.baseUrl,
+      keyId: endpoint.keyId,
       models,
+      total: models.length,
+      registeredCount: models.filter(m => m.registered).length,
     });
   } catch (err: any) {
-    console.error('[keys] Discovery error:', err);
-    res.status(502).json({ error: 'Endpoint discovery unreachable: ' + err?.message });
+    if (err instanceof ModelDiscoveryError) {
+      res.status(err.status).json({ error: { message: err.message, type: 'upstream_error' } });
+      return;
+    }
+    res.status(502).json({ error: { message: `Model discovery failed: ${err?.message ?? 'unknown error'}` } });
   }
 });
 
-keysRouter.post('/custom/bulk-models', async (req: Request, res: Response) => {
+const modelEntrySchema = z.union([
+  z.string().min(1),
+  z.object({
+    model: z.string().min(1),
+    displayName: z.string().optional(),
+    supportsTools: z.boolean().optional(),
+    supportsVision: z.boolean().optional(),
+  }),
+]);
+
+const customProviderSchema = z.object({
+  baseUrl: z.string().url('baseUrl must be a valid URL').optional(),
+  keyId: z.number().int().positive().optional(),
+  model: z.string().optional(),
+  models: z.array(modelEntrySchema).optional(),
+  displayName: z.string().optional(),
+  apiKey: z.string().optional(),
+  label: z.string().optional(),
+  supportsTools: z.boolean().optional(),
+  supportsVision: z.boolean().optional(),
+  groupLabel: z.string().trim().max(80).optional(),
+}).refine(
+  d => d.baseUrl !== undefined || d.keyId !== undefined,
+  { message: 'baseUrl or keyId is required' },
+);
+
+keysRouter.post('/custom', async (req: Request, res: Response) => {
+  const parsed = customProviderSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+
+  let endpoint: CustomEndpointRef;
   try {
-    const { baseUrl, keyId, models = [] } = req.body || {};
-    if (!models || !Array.isArray(models) || models.length === 0) {
-      res.status(400).json({ error: 'models array is required' });
-      return;
-    }
-
-    const pool = getPostgresPool();
-    let providerId: number | undefined;
-
-    if (keyId) {
-      const pRes = await pool.query('SELECT provider_id FROM credentials WHERE id = $1', [keyId]);
-      if (pRes.rows.length > 0) providerId = pRes.rows[0].provider_id;
-    }
-
-    if (!providerId && baseUrl) {
-      const pRes = await pool.query('SELECT id FROM providers WHERE base_url = $1', [baseUrl]);
-      if (pRes.rows.length > 0) providerId = pRes.rows[0].id;
-    }
-
-    if (!providerId) {
-      res.status(400).json({ error: 'Provider not found for bulk registration' });
-      return;
-    }
-
-    const registered: string[] = [];
-    for (const modelId of models) {
-      const mRes = await pool.query(
-        `INSERT INTO models (
-           provider_id, platform, source, model_id, canonical_name, display_name, enabled,
-           supports_streaming, supports_tools, supports_vision, supports_structured_output, priority
-         )
-         VALUES ($1, 'custom', 'user', $2, $2, $2, true, true, true, false, false, 0)
-         ON CONFLICT (provider_id, model_id) DO NOTHING
-         RETURNING model_id`,
-        [providerId, modelId]
-      );
-      if (mRes.rowCount && mRes.rowCount > 0) {
-        registered.push(modelId);
-      }
-    }
-
-    await reloadRoutingRegistry();
-    res.status(201).json({ success: true, registered, count: registered.length });
+    endpoint = resolveEndpointRef(parsed.data);
   } catch (err: any) {
-    console.error('[keys] Bulk models error:', err);
-    res.status(500).json({ error: err?.message || 'Bulk registration failed' });
+    res.status(err.status ?? 400).json({ error: { message: err.message } });
+    return;
   }
+  const baseUrl = endpoint.baseUrl;
+
+  if (await rejectUnsafeBaseUrl(baseUrl, res)) return;
+
+  const providedKey = parsed.data.apiKey?.trim() || undefined;
+  const label = parsed.data.label?.trim() || undefined;
+
+  const topTools = parsed.data.supportsTools;
+  const topVision = parsed.data.supportsVision;
+  const entries: { modelId: string; displayName: string | null; supportsTools?: boolean; supportsVision?: boolean }[] = [];
+  const seen = new Set<string>();
+  const addEntry = (rawId: string, rawDisplay?: string, tools?: boolean, vision?: boolean) => {
+    const modelId = rawId.trim();
+    if (!modelId || seen.has(modelId)) return;
+    seen.add(modelId);
+    entries.push({
+      modelId,
+      displayName: rawDisplay?.trim() || null,
+      supportsTools: tools ?? topTools,
+      supportsVision: vision ?? topVision,
+    });
+  };
+  if (parsed.data.model?.trim()) addEntry(parsed.data.model, parsed.data.displayName);
+  for (const m of parsed.data.models ?? []) {
+    if (typeof m === 'string') addEntry(m);
+    else addEntry(m.model, m.displayName, m.supportsTools, m.supportsVision);
+  }
+  const soleName = parsed.data.displayName?.trim();
+  if (soleName && !parsed.data.model?.trim() && entries.length === 1 && entries[0]!.displayName === null) {
+    entries[0]!.displayName = soleName;
+  }
+
+  const db = getDb();
+
+  if (entries.length === 0) {
+    if (!providedKey) {
+      res.status(400).json({ error: { message: 'model or models is required' } });
+      return;
+    }
+    if (endpoint.keyId === null) {
+      res.status(400).json({ error: { message: 'model or models is required to register a new endpoint' } });
+      return;
+    }
+    if (endpointHasCredential(db, baseUrl, providedKey)) {
+      res.status(409).json({ error: { message: 'this endpoint already has that key' } });
+      return;
+    }
+    const added = resolveCustomEndpointKey(db, baseUrl, providedKey, label, endpoint.keyId);
+    if (parsed.data.groupLabel !== undefined) setCustomEndpointGroup(db, added.keyId, normalizeGroupLabel(parsed.data.groupLabel));
+    res.status(added.created ? 201 : 200).json({
+      success: true,
+      keyId: added.keyId,
+      platform: 'custom',
+      baseUrl,
+      models: [],
+      created: 0,
+      alreadyRegistered: 0,
+      maskedKey: maskKey(added.storedKey),
+    });
+    return;
+  }
+
+  const overridden = (e: typeof entries[number]) => e.supportsTools !== undefined || e.supportsVision !== undefined;
+  const kindOf = (e: typeof entries[number]) => overridden(e) ? undefined : classifyModelId(e.modelId);
+  const chatEntries = entries.filter(e => kindOf(e) === undefined || kindOf(e) === 'embedding');
+  const embedEntries = chatEntries.filter(e => kindOf(e) === 'embedding');
+  const pureChatEntries = chatEntries.filter(e => kindOf(e) !== 'embedding');
+  const mediaEntries = entries.filter(e => {
+    const kind = kindOf(e);
+    return kind === 'image' || kind === 'audio' || kind === 'transcription';
+  });
+
+  const { keyId, storedKey, registered } = registerCustomModels(
+    db, baseUrl, providedKey, label, endpoint.keyId ?? undefined, pureChatEntries,
+  );
+  if (parsed.data.groupLabel !== undefined) setCustomEndpointGroup(db, keyId, normalizeGroupLabel(parsed.data.groupLabel));
+
+  const mediaRegistered: Array<{ modelDbId: number; model: string; modality: string; created: boolean }> = [];
+  const perModelErrors: Array<{ model: string; error: string }> = [];
+  for (const e of mediaEntries) {
+    try {
+      mediaRegistered.push(db.transaction(() => registerCustomMediaModel(db, keyId, {
+        modelId: e.modelId,
+        displayName: e.displayName,
+        modality: kindOf(e) as 'image' | 'audio' | 'transcription',
+      }))());
+    } catch (err: any) {
+      perModelErrors.push({ model: e.modelId, error: err?.message ?? 'media registration failed' });
+    }
+  }
+
+  const embeddingsRegistered: Array<{ model: string }> = [];
+  for (const e of embedEntries) {
+    try {
+      const existing = db.prepare(
+        "SELECT dimensions FROM embedding_models WHERE platform = 'custom' AND model_id = ?",
+      ).get(e.modelId) as { dimensions: number } | undefined;
+      const dimensions = existing?.dimensions ?? await probeEmbeddingDimensions(baseUrl, providedKey ?? storedKey, e.modelId);
+      registerCustomEmbeddingModel(db, {
+        keyId,
+        modelId: e.modelId,
+        displayName: e.displayName,
+        family: e.modelId,
+        dimensions,
+        maxInputTokens: null,
+        quotaLabel: 'custom endpoint',
+      });
+      embeddingsRegistered.push({ model: e.modelId });
+    } catch (err: any) {
+      perModelErrors.push({ model: e.modelId, error: err?.message ?? 'embedding registration failed' });
+    }
+  }
+
+  await reloadRoutingRegistry().catch(() => {});
+
+  const first = registered[0];
+  res.status(201).json({
+    success: true,
+    keyId,
+    platform: 'custom',
+    baseUrl,
+    model: first?.model,
+    displayName: first?.displayName,
+    modelDbId: first?.modelDbId,
+    models: registered.map(r => ({
+      modelDbId: r.modelDbId,
+      model: r.model,
+      displayName: r.displayName,
+      supportsTools: r.supportsTools,
+      supportsVision: r.supportsVision,
+      created: r.created,
+    })),
+    mediaModels: mediaRegistered,
+    embeddingModels: embeddingsRegistered,
+    created: registered.filter(r => r.created).length + mediaRegistered.filter(r => r.created).length,
+    alreadyRegistered: registered.filter(r => !r.created).length + mediaRegistered.filter(r => !r.created).length,
+    maskedKey: maskKey(storedKey),
+    errors: perModelErrors.length > 0 ? perModelErrors : undefined,
+  });
 });
+
+const probeModelsSchema = z.object({
+  baseUrl: z.string().url('baseUrl must be a valid URL').optional(),
+  keyId: z.number().int().positive().optional(),
+  apiKey: z.string().optional(),
+}).refine(
+  d => d.baseUrl !== undefined || d.keyId !== undefined,
+  { message: 'baseUrl or keyId is required' },
+);
 
 keysRouter.post('/custom/probe', async (req: Request, res: Response) => {
+  const parsed = probeModelsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+
+  let endpoint: CustomEndpointRef;
   try {
-    const { model } = req.body || {};
+    endpoint = resolveEndpointRef(parsed.data);
+  } catch (err: any) {
+    res.status(err.status ?? 400).json({ error: { message: err.message } });
+    return;
+  }
+
+  if (await rejectUnsafeBaseUrl(endpoint.baseUrl, res)) return;
+
+  const apiKey = parsed.data.apiKey?.trim() || endpoint.storedKey || 'no-key';
+
+  let registeredModelId: string | null = null;
+  let poolIds: number[] = [];
+  if (endpoint.keyId != null) {
+    const db = getDb();
+    poolIds = [...customEndpointKeyIds(db, endpoint.keyId)];
+    const placeholders = poolIds.map(() => '?').join(', ');
+    const row = db.prepare(
+      `SELECT model_id FROM models WHERE platform = 'custom' AND key_id IN (${placeholders}) ORDER BY id LIMIT 1`,
+    ).get(...poolIds) as { model_id: string } | undefined;
+    registeredModelId = row?.model_id ?? null;
+  }
+
+  try {
+    const probe = await probeEndpointModel(endpoint.baseUrl, apiKey, registeredModelId);
+
+    if (endpoint.keyId != null) {
+      getDb().prepare(`
+        INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, ttfb_ms, request_type)
+        VALUES ('custom', ?, ?, 'success', ?, ?, ?, ?, 'chat')
+      `).run(probe.modelId, endpoint.keyId, probe.inputTokens, probe.outputTokens, probe.latencyMs, probe.latencyMs);
+
+      clearCooldownsForKey(endpoint.keyId);
+    }
+
+    if (probe.toolCalls && poolIds.length > 0) {
+      const placeholders = poolIds.map(() => '?').join(', ');
+      getDb().prepare(
+        `UPDATE models SET supports_tools = 1
+          WHERE platform = 'custom' AND model_id = ? AND key_id IN (${placeholders})`,
+      ).run(probe.modelId, ...poolIds);
+    }
+
     res.json({
-      ok: true,
-      latencyMs: 85,
-      capabilities: { streaming: true, tools: true, vision: false },
-      model: model || 'default',
+      modelId: probe.modelId,
+      latencyMs: probe.latencyMs,
+      ...(probe.reasoning !== undefined ? { reasoning: probe.reasoning } : {}),
+      ...(probe.toolCalls !== undefined ? { toolCalls: probe.toolCalls } : {}),
     });
   } catch (err: any) {
-    res.status(502).json({ ok: false, error: err?.message });
+    if (err instanceof ModelDiscoveryError) {
+      res.status(err.status).json({ error: { message: err.message, type: 'upstream_error' } });
+      return;
+    }
+    res.status(502).json({ error: { message: `Probe failed: ${err?.message ?? 'unknown error'}` } });
   }
 });

@@ -1451,7 +1451,7 @@ function getActiveChain(db: Db): ChainRow[] {
     rows = [];
   }
 
-  if (!rows || rows.length === 0) {
+  if ((!rows || rows.length === 0) && profileId == null) {
     try {
       const regRows = registryChainRows();
       if (regRows && regRows.length > 0) return regRows;

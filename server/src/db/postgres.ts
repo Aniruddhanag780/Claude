@@ -382,7 +382,7 @@ function createInMemoryMockPool(storageKey?: string) {
     'embedding_models', 'custom_model_tombstones', 'catalog_model_tombstones',
     'quirks', 'quirk_targets', 'provider_quota_observations',
     'provider_quota_state', 'response_cache', 'idempotency_claims',
-    'server_logs', 'backups', 'search_requests'
+    'server_logs', 'backups', 'search_requests', 'request_attempts'
   ];
   for (const name of standardTables) {
     if (!tables.has(name)) {
@@ -576,9 +576,19 @@ function createInMemoryMockPool(storageKey?: string) {
         const matched = rows.filter(r => r.email === params[0]);
         return { rows: matched, rowCount: matched.length };
       }
-      if (tableName === 'sessions' && upper.includes('WHERE TOKEN_HASH = $1')) {
-        const matched = rows.filter(r => r.token_hash === params[0]);
-        return { rows: matched, rowCount: matched.length };
+      if (tableName === 'sessions') {
+        const generic = execStatement(tables, trimmed, params, nextId);
+        if (generic) return { rows: generic.rows ?? [], rowCount: generic.rows?.length ?? 0 };
+        if (upper.includes('TOKEN_HASH')) {
+          const users = tables.get('users') || [];
+          const matched = rows
+            .filter(r => r.token_hash === params[0])
+            .map(s => {
+              const u = users.find(user => user.id === s.user_id);
+              return { user_id: s.user_id, expires_at_ms: s.expires_at_ms, email: u?.email ?? '' };
+            });
+          return { rows: matched, rowCount: matched.length };
+        }
       }
       if (tableName === 'settings') {
         const generic = execStatement(tables, trimmed, params, nextId);
@@ -821,8 +831,8 @@ function createInMemoryMockPool(storageKey?: string) {
           return rows[0];
         }
         if (u.includes('FROM REQUESTS')) {
-          const rows = tables.get('requests') || [];
-          return rows[rows.length - 1];
+          const generic = execStatement(tables, sql, args, nextId);
+          return generic?.rows?.[0];
         }
         // Not one of the hand-written shapes above: run it for real. This is
         // what makes the tables restored by 006_compat_tables usable in tests

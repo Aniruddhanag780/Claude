@@ -23,6 +23,15 @@ export async function up(client: pg.PoolClient | pg.Pool): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_key_monthly_usage_month ON key_monthly_usage(month);
 
+    INSERT INTO key_monthly_usage (key_id, month, requests, tokens)
+    SELECT key_id, to_char(COALESCE(NULLIF(created_at, '')::timestamp, NOW()), 'YYYY-MM') AS month,
+           COUNT(*) AS requests,
+           SUM(GREATEST(0, COALESCE(input_tokens, 0)) + GREATEST(0, COALESCE(output_tokens, 0))) AS tokens
+      FROM requests
+     WHERE key_id IS NOT NULL AND status = 'success'
+     GROUP BY key_id, to_char(COALESCE(NULLIF(created_at, '')::timestamp, NOW()), 'YYYY-MM')
+    ON CONFLICT (key_id, month) DO NOTHING;
+
     -- Legacy key surface: router fallback paths, declarative config, custom
     -- endpoints, provider-credential reservation and health probes all read or
     -- write these rows. Key ids are preserved by the migration script so the

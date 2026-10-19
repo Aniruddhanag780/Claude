@@ -258,9 +258,9 @@ describe('median seeding for custom models (#488)', () => {
     rows.forEach(([label, intel, speed], i) => insert.run(`cat-${i}`, `Cat ${i}`, intel, speed, label));
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initDb(':memory:');
     getDb().prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
     seedCatalog();
     app = createApp();

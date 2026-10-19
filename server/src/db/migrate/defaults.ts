@@ -10,6 +10,7 @@ import * as legacyKeyUsage from '../migrations/008_legacy_key_usage.js';
 import * as seedFallbackAndDefaultProfile from '../migrations/009_seed_fallback_and_default_profile.js';
 import * as modelsPlatformAndSource from '../migrations/010_models_platform_and_source.js';
 import * as addProxyToCredentialsAndApiKeys from '../migrations/011_add_proxy_to_credentials_and_api_keys.js';
+import * as requestAttemptsAndServedModel from '../migrations/012_request_attempts_and_served_model.js';
 
 export interface MigrationModule {
   up(client: pg.PoolClient | pg.Pool): Promise<void> | void;
@@ -32,6 +33,7 @@ export const LEGACY_KEY_USAGE_FILENAME = '008_legacy_key_usage.ts';
 export const SEED_FALLBACK_AND_DEFAULT_PROFILE_FILENAME = '009_seed_fallback_and_default_profile.ts';
 export const MODELS_PLATFORM_AND_SOURCE_FILENAME = '010_models_platform_and_source.ts';
 export const ADD_PROXY_TO_CREDENTIALS_AND_API_KEYS_FILENAME = '011_add_proxy_to_credentials_and_api_keys.ts';
+export const REQUEST_ATTEMPTS_AND_SERVED_MODEL_FILENAME = '012_request_attempts_and_served_model.ts';
 
 export const DEFAULT_MIGRATIONS: readonly DefaultMigration[] = [
   { filename: INITIAL_SCHEMA_FILENAME, module: initialSchema },
@@ -45,4 +47,5 @@ export const DEFAULT_MIGRATIONS: readonly DefaultMigration[] = [
   { filename: SEED_FALLBACK_AND_DEFAULT_PROFILE_FILENAME, module: seedFallbackAndDefaultProfile },
   { filename: MODELS_PLATFORM_AND_SOURCE_FILENAME, module: modelsPlatformAndSource },
   { filename: ADD_PROXY_TO_CREDENTIALS_AND_API_KEYS_FILENAME, module: addProxyToCredentialsAndApiKeys },
+  { filename: REQUEST_ATTEMPTS_AND_SERVED_MODEL_FILENAME, module: requestAttemptsAndServedModel },
 ];

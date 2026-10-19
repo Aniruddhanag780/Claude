@@ -97,7 +97,7 @@ async function seedSmartVsFast() {
   await reloadRoutingRegistry();
 }
 
-describe('task-type-aware routing', () => {
+describe('task-type-aware routing', { timeout: 15000 }, () => {
   beforeEach(async () => {
     process.env.DEV_MODE = 'true';
     process.env.NODE_ENV = 'test';

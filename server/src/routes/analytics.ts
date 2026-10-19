@@ -1,9 +1,11 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getPostgresPool } from '../db/postgres.js';
+import { getDb } from '../db/index.js';
 import { analyticsAggregator } from '../services/analytics-aggregator.js';
 import { FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M } from '../db/model-pricing.js';
 import { searchAnalytics, getSearchAnalytics, type SearchAnalyticsRange } from '../services/search.js';
+import { normalizeBaseUrl } from '../lib/endpoint-scope.js';
 
 export const analyticsRouter = Router();
 
@@ -797,19 +799,178 @@ analyticsRouter.get('/error-distribution', async (req: Request, res: Response) =
   }
 });
 
-// Recent calls — one row per proxied request. Requires raw per-request logging
-// which the memory-first hourly aggregator does not persist; returns an empty
-// paged response so the table renders gracefully.
+const ENDPOINT_ID_SQL = "COALESCE(rtrim(trim(k.base_url), '/'), '')";
+
+const toSqliteDateTime = (timestamp: number) =>
+  new Date(timestamp).toISOString().slice(0, 19).replace('T', ' ');
+
+function getSinceTimestamp(range: string): string {
+  const now = Date.now();
+  switch (range) {
+    case '24h':
+      return toSqliteDateTime(now - 24 * 60 * 60 * 1000);
+    case '30d':
+      return toSqliteDateTime(now - 30 * 24 * 60 * 60 * 1000);
+    case '90d':
+      return toSqliteDateTime(now - 90 * 24 * 60 * 60 * 1000);
+    case '7d':
+    default:
+      return toSqliteDateTime(now - 7 * 24 * 60 * 60 * 1000);
+  }
+}
+
+// Recent calls — one row per proxied request, newest first, with the caller's
+// IP and User-Agent. Reads the raw `requests` table.
 analyticsRouter.get('/requests', (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? '7d';
+  const since = getSinceTimestamp(range);
+  const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 100, 1), 500);
+  const offset = Math.max(parseInt(req.query.offset as string, 10) || 0, 0);
+
   const status = req.query.status as string | undefined;
   if (status !== undefined && status !== 'success' && status !== 'error' && status !== 'canceled') {
     res.status(400).json({ error: "invalid status filter (expected 'success', 'error' or 'canceled')" });
     return;
   }
-  res.json({ total: 0, rows: [] });
+
+  const provider = req.query.provider as string | undefined;
+  const platform = req.query.platform as string | undefined;
+  let providerFilterSql = '';
+  const providerFilterParams: string[] = [];
+  if (provider !== undefined) {
+    if (provider.length > 256 || /[\r\n]/.test(provider)) {
+      res.status(400).json({ error: 'invalid provider filter' });
+      return;
+    }
+    if (provider === 'custom') {
+      providerFilterSql = ` AND r.platform = 'custom' AND ${ENDPOINT_ID_SQL} = ''`;
+    } else if (provider.startsWith('custom:')) {
+      providerFilterSql = ` AND r.platform = 'custom' AND ${ENDPOINT_ID_SQL} = ?`;
+      providerFilterParams.push(normalizeBaseUrl(provider.slice('custom:'.length)));
+    } else if (/^[A-Za-z0-9_-]{1,64}$/.test(provider)) {
+      providerFilterSql = ' AND r.platform = ?';
+      providerFilterParams.push(provider);
+    } else {
+      res.status(400).json({ error: 'invalid provider filter' });
+      return;
+    }
+  } else if (platform !== undefined) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(platform)) {
+      res.status(400).json({ error: 'invalid platform filter' });
+      return;
+    }
+    providerFilterSql = ' AND r.platform = ?';
+    providerFilterParams.push(platform);
+  }
+  const db = getDb();
+
+  const filterSql =
+    (status !== undefined ? ' AND r.status = ?' : '') +
+    providerFilterSql;
+  const filterParams = [
+    ...(status !== undefined ? [status] : []),
+    ...providerFilterParams,
+  ];
+
+  const total = (db.prepare(
+    `SELECT COUNT(*) as c FROM requests r
+       LEFT JOIN api_keys k ON k.id = r.key_id
+      WHERE r.created_at >= ?${filterSql}`
+  ).get(since, ...filterParams) as { c: number } | undefined)?.c ?? 0;
+
+  const rows = db.prepare(`
+    SELECT r.id, r.platform, r.model_id, r.requested_model, r.request_type, r.status,
+           r.input_tokens, r.output_tokens, r.latency_ms, r.error,
+           r.client_ip, r.client_user_agent, r.client_agent,
+           strftime('%Y-%m-%dT%H:%M:%SZ', r.created_at) as created_at_iso,
+           (SELECT COUNT(*) FROM request_attempts a WHERE a.request_id = r.id) as attempt_count,
+           k.label as key_label
+    FROM requests r
+    LEFT JOIN api_keys k ON k.id = r.key_id
+    WHERE r.created_at >= ?${filterSql}
+    ORDER BY r.created_at DESC, r.id DESC
+    LIMIT ? OFFSET ?
+  `).all(since, ...filterParams, limit, offset) as any[];
+
+  res.json({
+    total,
+    rows: (rows || []).map(r => ({
+      id: r.id,
+      platform: r.platform,
+      modelId: r.model_id,
+      requestedModel: r.requested_model,
+      requestType: r.request_type,
+      status: r.status,
+      inputTokens: r.input_tokens,
+      outputTokens: r.output_tokens,
+      latencyMs: r.latency_ms,
+      error: r.error,
+      clientIp: r.client_ip,
+      clientUserAgent: r.client_user_agent,
+      clientAgent: r.client_agent,
+      createdAt: r.created_at_iso,
+      keyLabel: r.key_label ?? null,
+      attemptCount: Number(r.attempt_count || 0),
+    })),
+  });
 });
 
-// Per-request detail (failover ladder). No raw requests are stored.
-analyticsRouter.get('/requests/:id', (_req: Request, res: Response) => {
-  res.status(404).json({ error: 'request not found' });
+// Per-request detail (failover ladder).
+analyticsRouter.get('/requests/:id', (req: Request, res: Response) => {
+  const id = Number.parseInt(req.params.id as string, 10);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: 'invalid request id' });
+    return;
+  }
+  const db = getDb();
+
+  const r = db.prepare(`
+    SELECT id, platform, model_id, requested_model, served_model, request_type, status,
+           input_tokens, output_tokens, latency_ms, ttfb_ms, error,
+           client_ip, client_user_agent, client_agent,
+           strftime('%Y-%m-%dT%H:%M:%SZ', created_at) as created_at_iso
+    FROM requests
+    WHERE id = ?
+  `).get(id) as any;
+  if (!r) {
+    res.status(404).json({ error: 'request not found' });
+    return;
+  }
+
+  const attempts = db.prepare(`
+    SELECT ordinal, platform, model_id, key_ordinal, key_label, outcome, start_offset_ms, duration_ms, error_summary
+    FROM request_attempts
+    WHERE request_id = ?
+    ORDER BY ordinal ASC
+  `).all(id) as any[];
+
+  res.json({
+    id: r.id,
+    platform: r.platform,
+    modelId: r.model_id,
+    requestedModel: r.requested_model,
+    servedModel: r.served_model,
+    requestType: r.request_type,
+    status: r.status,
+    inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
+    latencyMs: r.latency_ms,
+    ttfbMs: r.ttfb_ms,
+    error: r.error,
+    clientIp: r.client_ip,
+    clientUserAgent: r.client_user_agent,
+    clientAgent: r.client_agent,
+    createdAt: r.created_at_iso,
+    attempts: (attempts || []).map(a => ({
+      ordinal: a.ordinal,
+      platform: a.platform,
+      modelId: a.model_id,
+      keyOrdinal: a.key_ordinal,
+      keyLabel: a.key_label ?? null,
+      outcome: a.outcome,
+      startOffsetMs: a.start_offset_ms,
+      durationMs: a.duration_ms,
+      errorSummary: a.error_summary ?? null,
+    })),
+  });
 });

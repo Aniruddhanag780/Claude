@@ -69,11 +69,45 @@ function splitTop(text: string, sep: string): string[] {
   return out;
 }
 
+function findTopKeyword(text: string, kw: string): number {
+  let depth = 0;
+  let quote: string | null = null;
+  const kwUpper = kw.toUpperCase();
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote && text[i - 1] !== '\\') quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    else if (depth === 0) {
+      if ((i === 0 || /\s/.test(text[i - 1])) && text.slice(i, i + kw.length).toUpperCase() === kwUpper) {
+        const next = text[i + kw.length];
+        if (!next || /\s/.test(next)) {
+          return i;
+        }
+      }
+    }
+  }
+  return -1;
+}
+
 let totalChangesCount = 0;
 
 function compare(a: any, b: any): number {
   if (a === null || a === undefined) return b === null || b === undefined ? 0 : -1;
   if (b === null || b === undefined) return 1;
+  if (typeof a === 'boolean' || typeof b === 'boolean' || a === 'true' || a === 'false' || b === 'true' || b === 'false') {
+    const toBool = (x: any) => x === true || x === 1 || x === 'true' || x === '1';
+    const ba = toBool(a);
+    const bb = toBool(b);
+    return ba === bb ? 0 : ba ? 1 : -1;
+  }
   const na = Number(a);
   const nb = Number(b);
   if (!Number.isNaN(na) && !Number.isNaN(nb) && a !== '' && b !== '') return na < nb ? -1 : na > nb ? 1 : 0;
@@ -139,6 +173,8 @@ function resolveValue(raw: string, params: any[], state: { i: number }): any {
     }
   }
   if (/^NULL$/i.test(v)) return null;
+  if (/^TRUE$/i.test(v)) return true;
+  if (/^FALSE$/i.test(v)) return false;
   if (/^'(.*)'$/s.test(v)) return v.replace(/^'(.*)'$/s, '$1').replace(/''/g, "'");
   const dtM = v.match(/^datetime\s*\(\s*'?now'?\s*(?:,\s*'([^']*)'\s*)?\)$/i);
   if (dtM) {
@@ -469,7 +505,7 @@ function evalCaseExpr(row: any, expr: string, params: any[]): any {
   return null;
 }
 
-function extractAgg(expr: string): { aggType: string; target: string } | null {
+function extractAgg(expr: string): { aggType: string; target: string; fallback?: any } | null {
   const m = expr.match(/^(?:COALESCE\s*\(\s*)?(COUNT|MAX|MIN|SUM|AVG)\s*\(/i);
   if (!m) return null;
   const aggType = m[1].toUpperCase();
@@ -488,10 +524,18 @@ function extractAgg(expr: string): { aggType: string; target: string } | null {
   }
   if (endIdx === -1) return null;
   const target = expr.slice(startIdx, endIdx).trim();
-  return { aggType, target };
+  let fallback: any = undefined;
+  if (/^COALESCE\s*\(/i.test(expr)) {
+    const remainder = expr.slice(endIdx + 1).replace(/\)$/, '').trim();
+    if (remainder.startsWith(',')) {
+      const fbStr = remainder.slice(1).trim();
+      fallback = !isNaN(Number(fbStr)) ? Number(fbStr) : fbStr.replace(/^['"]|['"]$/g, '');
+    }
+  }
+  return { aggType, target, fallback };
 }
 
-function project(rows: any[], selectList: string, params: any[]): any[] {
+function project(rows: any[], selectList: string, params: any[], tables?: SqlTables): any[] {
   const cols = splitTop(selectList, ',').map(c => c.trim()).filter(Boolean);
   if (cols.length === 1 && cols[0] === '*') return rows;
 
@@ -542,7 +586,10 @@ function project(rows: any[], selectList: string, params: any[]): any[] {
         vals = rows.map(r => r[field]).filter(v => v !== null && v !== undefined);
       }
 
-      const val = fn ? (fn(vals) ?? null) : null;
+      let val = fn ? (fn(vals) ?? null) : null;
+      if (val === null && agg.fallback !== undefined) {
+        val = agg.fallback;
+      }
       out[colName] = val;
       if (aggType === 'COUNT' && !alias) {
         out.count = val;
@@ -639,6 +686,30 @@ function project(rows: any[], selectList: string, params: any[]): any[] {
       }
       if (/^'(.*)'$/s.test(expr)) {
         out[alias || expr] = expr.slice(1, -1).replace(/''/g, "'");
+        continue;
+      }
+      if (expr.startsWith('(') && expr.endsWith(')')) {
+        const inner = expr.slice(1, -1).trim();
+        if (tables && /^SELECT\b/i.test(inner)) {
+          let subSql = inner;
+          for (const [k, v] of Object.entries(row)) {
+            if (v !== undefined && v !== null && (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')) {
+              const valStr = typeof v === 'string' ? `'${String(v).replace(/'/g, "''")}'` : String(v);
+              const bare = k.split('.').pop()!;
+              subSql = subSql.replace(new RegExp(`\\b[A-Za-z_]\\w*\\.${bare}\\b`, 'g'), valStr);
+            }
+          }
+          const subRes = execStatement(tables, subSql, params, () => 0);
+          if (subRes && subRes.rows && subRes.rows.length > 0) {
+            const firstRow = subRes.rows[0];
+            const firstVal = Object.values(firstRow)[0];
+            out[alias || 'subquery'] = firstVal !== undefined ? firstVal : null;
+            continue;
+          }
+          out[alias || 'subquery'] = null;
+          continue;
+        }
+        out[alias || 'subquery'] = row[alias || 'subquery'] ?? null;
         continue;
       }
       const bare = expr.split('.').pop()!;
@@ -753,9 +824,24 @@ export function execStatement(
   }
 
   // ── SELECT (plain + aliased INNER/LEFT JOIN) ──────────────────────────────
-  const sel = s.match(/^SELECT\s+(?:DISTINCT\s+)?(.+?)\s+FROM\s+([A-Za-z_][\w]*)(.*)$/i);
-  if (sel) {
-    const [, selectList, table, rest] = sel;
+  let selMatch: { selectList: string; table: string; rest: string } | null = null;
+  if (/^SELECT\b/i.test(s)) {
+    const fromIdx = findTopKeyword(s, 'FROM');
+    if (fromIdx !== -1) {
+      const selectPart = s.slice(0, fromIdx);
+      const selPrefix = selectPart.match(/^SELECT\s+(?:DISTINCT\s+)?([\s\S]+)$/i);
+      if (selPrefix) {
+        const selectList = selPrefix[1].trim();
+        const afterFrom = s.slice(fromIdx + 4).trim();
+        const tableMatch = afterFrom.match(/^([A-Za-z_][\w]*)([\s\S]*)$/);
+        if (tableMatch) {
+          selMatch = { selectList, table: tableMatch[1], rest: tableMatch[2] };
+        }
+      }
+    }
+  }
+  if (selMatch) {
+    const { selectList, table, rest } = selMatch;
 
     const baseTable = table.toLowerCase();
     const base = baseTable === 'sqlite_master'
@@ -855,7 +941,7 @@ export function execStatement(
       }
       let out: any[] = [];
       for (const grp of groups.values()) {
-        out.push(...project(grp, selectList, params));
+        out.push(...project(grp, selectList, params, tables));
       }
       out = sortRows(out, orderM?.[1]);
       if (limitM) {
@@ -876,7 +962,7 @@ export function execStatement(
       const offset = offsetVal !== undefined && offsetVal !== null ? Number(offsetVal) : 0;
       out = limit >= 0 ? out.slice(offset, offset + limit) : out.slice(offset);
     }
-    let projected = project(out, selectList, params);
+    let projected = project(out, selectList, params, tables);
     if (/^SELECT\s+DISTINCT\b/i.test(s)) {
       const seen = new Set<string>();
       projected = projected.filter(r => {
@@ -890,127 +976,168 @@ export function execStatement(
   }
 
   // ── INSERT (incl. ON CONFLICT upsert) ─────────────────────────────────────
-  const insHead = s.match(/^INSERT\s+(?:OR\s+(\w+)\s+)?INTO\s+([A-Za-z_][\w]*)\s*(?:\(([^)]*)\))?\s*VALUES\s*\(/i);
-  if (insHead) {
+  const insHead = s.match(/^INSERT\s+(?:OR\s+(\w+)\s+)?INTO\s+([A-Za-z_][\w]*)\s*(?:\(([^)]*)\))?\s*VALUES\s*/i);
+  if (insHead && s.slice(insHead[0].length).trim().startsWith('(')) {
     const [, orAction, table, colList] = insHead;
-    const valStart = insHead[0].length;
-    let depth = 1;
-    let quote: string | null = null;
-    let valEnd = -1;
-    for (let i = valStart; i < s.length; i++) {
-      const ch = s[i];
-      if (quote) {
-        if (ch === quote && s[i - 1] !== '\\') quote = null;
-        continue;
+    let pos = insHead[0].length;
+    const tuples: string[] = [];
+    let tail = '';
+
+    while (pos < s.length) {
+      while (pos < s.length && /\s/.test(s[pos])) pos++;
+      if (s[pos] !== '(') {
+        tail = s.slice(pos).trim();
+        break;
       }
-      if (ch === "'" || ch === '"') {
-        quote = ch;
-        continue;
-      }
-      if (ch === '(') depth++;
-      else if (ch === ')') {
-        depth--;
-        if (depth === 0) {
-          valEnd = i;
-          break;
+      pos++; // skip '('
+      let depth = 1;
+      let quote: string | null = null;
+      const tupleStart = pos;
+      while (pos < s.length && depth > 0) {
+        const ch = s[pos];
+        if (quote) {
+          if (ch === quote && s[pos - 1] !== '\\') quote = null;
+        } else if (ch === "'" || ch === '"') {
+          quote = ch;
+        } else if (ch === '(') {
+          depth++;
+        } else if (ch === ')') {
+          depth--;
+          if (depth === 0) break;
         }
+        pos++;
+      }
+      tuples.push(s.slice(tupleStart, pos));
+      pos++; // skip ')'
+      while (pos < s.length && /\s/.test(s[pos])) pos++;
+      if (pos < s.length && s[pos] === ',') {
+        pos++;
+      } else {
+        tail = s.slice(pos).trim();
+        break;
       }
     }
-    const valList = valEnd !== -1 ? s.slice(valStart, valEnd) : '';
-    const tail = valEnd !== -1 ? s.slice(valEnd + 1).trim() : '';
+
     const rows = tableRows(tables, table.toLowerCase());
     const state = { i: 0 };
     const cols = colList ? splitTop(colList, ',').map(c => c.trim()) : Object.keys(rows[0] || {});
-    const values = splitTop(valList, ',').map(v => resolveValue(v, params, state));
+    const insertedRecords: any[] = [];
+    let totalChanges = 0;
+    let lastRowId = 0;
 
-    const record: any = { id: nextId(), created_at: nowIso(), updated_at: nowIso() };
-    cols.forEach((c, i) => { record[c] = values[i]; });
-    if (record.enabled === undefined) record.enabled = 1;
-    if (table.toLowerCase() === 'models') {
-      if (record.endpoint_scope === undefined) record.endpoint_scope = '';
-      if (record.source === undefined) record.source = 'user';
-    }
-    if (table.toLowerCase() === 'requests') {
-      if (record.input_tokens === undefined) record.input_tokens = 0;
-      if (record.output_tokens === undefined) record.output_tokens = 0;
-      if (record.latency_ms === undefined) record.latency_ms = 0;
-      if (record.status === undefined) record.status = 'success';
-      if (record.request_type === undefined) record.request_type = 'chat';
-    }
-
-    if (orAction && /IGNORE/i.test(orAction)) {
-      const t = table.toLowerCase();
-      const keys = t === 'media_models' ? ['platform', 'model_id'] :
-                   t === 'models' ? ['provider_id', 'model_id'] :
-                   t === 'providers' ? ['provider_key'] :
-                   t === 'settings' ? ['key'] :
-                   t === 'search_requests' ? [] :
-                   ['id'];
-      if (keys.length > 0) {
-        const existing = rows.find(r => keys.every(k => record[k] !== undefined && compare(r[k], record[k]) === 0));
-        if (existing) {
-          return { changes: 0, lastInsertRowid: existing.id ?? 0 };
-        }
-      }
-    }
-
-    const conflictCols = tail.match(/ON\s+CONFLICT\s*\(([^)]*)\)(?:\s+WHERE\s+(.+?))?(?:\s+DO\s+(NOTHING|UPDATE))?/i);
-    if (conflictCols) {
-      const keys = splitTop(conflictCols[1], ',').map(c => c.trim().split('.').pop()!);
-      const existing = rows.find(r => keys.every(k => compare(r[k], record[k]) === 0));
-      if (existing) {
-        // conflictCols[3] is the ACTION word on its own ('UPDATE' / 'NOTHING').
-        if (!/UPDATE/i.test(conflictCols[3] || '')) {
-          return { changes: 0, lastInsertRowid: existing.id ?? 0 };
-        }
-        const updateM = tail.match(/\bDO\s+UPDATE\s+SET\s+([\s\S]+?)(?:\s+WHERE\s+([\s\S]+))?$/i);
-        if (updateM) {
-          const assignments = updateM[1].trim();
-          const whereClause = updateM[2]?.trim();
-          if (whereClause) {
-            const evalRow: any = { ...existing };
-            for (const [k, v] of Object.entries(record)) {
-              evalRow[`excluded.${k}`] = v;
-            }
-            for (const [k, v] of Object.entries(existing)) {
-              evalRow[`${table.toLowerCase()}.${k}`] = v;
-            }
-            if (!matchesWhere(evalRow, whereClause, params, state)) {
-              return { changes: 0, lastInsertRowid: existing.id ?? 0 };
-            }
+    for (const valList of tuples) {
+      const values = splitTop(valList, ',').map(v => resolveValue(v, params, state));
+      const record: any = { id: nextId(), created_at: nowIso(), updated_at: nowIso() };
+      cols.forEach((c, i) => { record[c] = values[i]; });
+      if (record.enabled === undefined) record.enabled = 1;
+      if (table.toLowerCase() === 'models') {
+        if (record.endpoint_scope === undefined) record.endpoint_scope = '';
+        if (record.source === undefined) record.source = 'user';
+        if (record.platform && !record.provider_id) {
+          const provs = tableRows(tables, 'providers');
+          let prov = provs.find(p => p.provider_key === record.platform);
+          if (!prov) {
+            prov = { id: nextId(), provider_key: record.platform, display_name: record.platform, enabled: true };
+            provs.push(prov);
           }
-          applyResolved(existing, resolveAssignments(assignments, params, state, record, existing));
+          record.provider_id = prov.id;
+        } else if (record.provider_id && !record.platform) {
+          const provs = tableRows(tables, 'providers');
+          const prov = provs.find(p => p.id === record.provider_id);
+          if (prov) {
+            record.platform = prov.provider_key;
+          }
         }
-        return { changes: 1, lastInsertRowid: existing.id ?? 0 };
+      }
+      if (table.toLowerCase() === 'requests') {
+        if (record.input_tokens === undefined) record.input_tokens = 0;
+        if (record.output_tokens === undefined) record.output_tokens = 0;
+        if (record.latency_ms === undefined) record.latency_ms = 0;
+        if (record.status === undefined) record.status = 'success';
+        if (record.request_type === undefined) record.request_type = 'chat';
+      }
+
+      if (orAction && /IGNORE/i.test(orAction)) {
+        const t = table.toLowerCase();
+        const keys = t === 'media_models' ? ['platform', 'model_id'] :
+                     t === 'models' ? ['provider_id', 'model_id'] :
+                     t === 'providers' ? ['provider_key'] :
+                     t === 'settings' ? ['key'] :
+                     t === 'search_requests' ? [] :
+                     ['id'];
+        if (keys.length > 0) {
+          const existing = rows.find(r => keys.every(k => record[k] !== undefined && compare(r[k], record[k]) === 0));
+          if (existing) {
+            lastRowId = existing.id ?? 0;
+            continue;
+          }
+        }
+      }
+
+      const conflictCols = tail.match(/ON\s+CONFLICT\s*\(([^)]*)\)(?:\s+WHERE\s+(.+?))?(?:\s+DO\s+(NOTHING|UPDATE))?/i);
+      if (conflictCols) {
+        const keys = splitTop(conflictCols[1], ',').map(c => c.trim().split('.').pop()!);
+        const existing = rows.find(r => keys.every(k => compare(r[k], record[k]) === 0));
+        if (existing) {
+          if (!/UPDATE/i.test(conflictCols[3] || '')) {
+            lastRowId = existing.id ?? 0;
+            continue;
+          }
+          const updateM = tail.match(/\bDO\s+UPDATE\s+SET\s+([\s\S]+?)(?:\s+WHERE\s+([\s\S]+))?$/i);
+          if (updateM) {
+            const assignments = updateM[1].trim();
+            const whereClause = updateM[2]?.trim();
+            if (whereClause) {
+              const evalRow: any = { ...existing };
+              for (const [k, v] of Object.entries(record)) {
+                evalRow[`excluded.${k}`] = v;
+              }
+              for (const [k, v] of Object.entries(existing)) {
+                evalRow[`${table.toLowerCase()}.${k}`] = v;
+              }
+              if (!matchesWhere(evalRow, whereClause, params, state)) {
+                lastRowId = existing.id ?? 0;
+                continue;
+              }
+            }
+            applyResolved(existing, resolveAssignments(assignments, params, state, record, existing));
+          }
+          totalChanges += 1;
+          lastRowId = existing.id ?? 0;
+          continue;
+        }
+      }
+
+      rows.push(record);
+      insertedRecords.push(record);
+      totalChanges += 1;
+      lastRowId = record.id;
+
+      if (table.toLowerCase() === 'requests' && record.key_id != null && record.status === 'success') {
+        const month = typeof record.created_at === 'string' && record.created_at.length >= 7
+          ? record.created_at.slice(0, 7)
+          : new Date().toISOString().slice(0, 7);
+        const addedTokens = Math.max(0, Number(record.input_tokens) || 0) + Math.max(0, Number(record.output_tokens) || 0);
+        const kmRows = tableRows(tables, 'key_monthly_usage');
+        const existing = kmRows.find((r: any) => Number(r.key_id) === Number(record.key_id) && r.month === month);
+        if (existing) {
+          existing.requests = (Number(existing.requests) || 0) + 1;
+          existing.tokens = (Number(existing.tokens) || 0) + addedTokens;
+        } else {
+          kmRows.push({
+            id: nextId(),
+            key_id: Number(record.key_id),
+            month,
+            requests: 1,
+            tokens: addedTokens,
+            created_at: nowIso(),
+            updated_at: nowIso(),
+          });
+        }
       }
     }
 
-    rows.push(record);
-
-    if (table.toLowerCase() === 'requests' && record.key_id != null && record.status === 'success') {
-      const month = typeof record.created_at === 'string' && record.created_at.length >= 7
-        ? record.created_at.slice(0, 7)
-        : new Date().toISOString().slice(0, 7);
-      const addedTokens = Math.max(0, Number(record.input_tokens) || 0) + Math.max(0, Number(record.output_tokens) || 0);
-      const kmRows = tableRows(tables, 'key_monthly_usage');
-      const existing = kmRows.find((r: any) => Number(r.key_id) === Number(record.key_id) && r.month === month);
-      if (existing) {
-        existing.requests = (Number(existing.requests) || 0) + 1;
-        existing.tokens = (Number(existing.tokens) || 0) + addedTokens;
-      } else {
-        kmRows.push({
-          id: nextId(),
-          key_id: Number(record.key_id),
-          month,
-          requests: 1,
-          tokens: addedTokens,
-          created_at: nowIso(),
-          updated_at: nowIso(),
-        });
-      }
-    }
-
-    return { changes: 1, lastInsertRowid: record.id, rows: [record] };
+    return { changes: totalChanges, lastInsertRowid: lastRowId, rows: insertedRecords };
   }
 
   // ── UPDATE ────────────────────────────────────────────────────────────────
@@ -1065,6 +1192,12 @@ export function execStatement(
       keep = rows.filter(r => !matchesWhere(r, where, params));
     }
     const changes = rows.length - keep.length;
+    if (table.toLowerCase() === 'requests' && tables.has('request_attempts')) {
+      const removedRequests = rows.filter(r => !keep.includes(r));
+      const removedIds = new Set(removedRequests.map(r => r.id));
+      const attempts = tableRows(tables, 'request_attempts');
+      tables.set('request_attempts', attempts.filter(a => !removedIds.has(a.request_id)));
+    }
     tables.set(table.toLowerCase(), keep);
     totalChangesCount += changes;
     return { changes, lastInsertRowid: 0 };
