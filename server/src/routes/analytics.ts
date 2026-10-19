@@ -729,10 +729,36 @@ analyticsRouter.get('/by-client', (_req: Request, res: Response) => {
   res.json([]);
 });
 
-// Recent errors. Error messages are not persisted by the memory-first
-// aggregator, so this stays empty until raw request logging returns.
-analyticsRouter.get('/errors', (_req: Request, res: Response) => {
-  res.json([]);
+// Recent errors. Reads recent error requests from the database.
+analyticsRouter.get('/errors', async (req: Request, res: Response) => {
+  try {
+    const range = (req.query.range as string) ?? '7d';
+    const cutoff = getCutoffDate(range);
+    const pool = getPostgresPool();
+
+    const dbRes = await pool.query(
+      `SELECT r.id, r.platform, r.model_id, r.error, r.latency_ms, r.created_at
+       FROM requests r
+       WHERE r.status = 'error' AND r.created_at >= $1
+       ORDER BY r.created_at DESC
+       LIMIT 50`,
+      [cutoff.toISOString()]
+    );
+
+    res.json(dbRes.rows.map(r => ({
+      id: r.id,
+      platform: r.platform,
+      providerId: r.platform,
+      endpoint: r.platform,
+      modelId: r.model_id,
+      error: r.error,
+      latencyMs: r.latency_ms,
+      createdAt: r.created_at,
+    })));
+  } catch (err: any) {
+    console.error('[analytics] Error fetching errors:', err);
+    res.status(500).json({ error: 'Failed to fetch errors' });
+  }
 });
 
 // Error distribution. Only aggregate failure counts are available; categorize
