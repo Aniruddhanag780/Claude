@@ -83,7 +83,7 @@ describe('a relay that rejects tool calls stops costing every tool request a hop
 
   beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initDb(':memory:');
     resetToolCapability();
     app = createApp();
     dashToken = mintDashboardToken();

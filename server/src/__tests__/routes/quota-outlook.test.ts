@@ -19,6 +19,7 @@ afterEach(()=>{server.close();vi.restoreAllMocks();});
 it('requires dashboard authentication, not the unified inference key', async () => {
   for(const credential of [null,getUnifiedApiKey()]) {
     const response=await httpFetch(origin+'/api/fallback/quota-forecast',{headers:credential?{Authorization:'Bearer '+credential}:{}});
+    console.log('TEST DEBUG status:', response.status, 'body:', await response.text());
     expect(response.status).toBe(401);
   }
   const response=await httpFetch(origin+'/api/fallback/quota-forecast',{headers:{Authorization:'Bearer '+token}});

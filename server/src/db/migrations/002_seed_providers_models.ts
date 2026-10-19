@@ -1,11 +1,6 @@
 import pg from 'pg';
 
 export async function up(client: pg.PoolClient | pg.Pool): Promise<void> {
-  // Check if providers exist
-  const countRes = await client.query('SELECT COUNT(*) as count FROM providers');
-  const count = parseInt(countRes.rows[0]?.count || '0', 10);
-  if (count > 0) return;
-
   const defaultProviders = [
     { key: 'google', name: 'Google Gemini', url: 'https://generativelanguage.googleapis.com', priority: 10 },
     { key: 'groq', name: 'Groq', url: 'https://api.groq.com/openai/v1', priority: 9 },
@@ -28,13 +23,20 @@ export async function up(client: pg.PoolClient | pg.Pool): Promise<void> {
   const providerMap = new Map<string, number>();
 
   for (const p of defaultProviders) {
-    const res = await client.query(
-      `INSERT INTO providers (provider_key, display_name, base_url, enabled, priority)
-       VALUES ($1, $2, $3, true, $4)
-       RETURNING id`,
-      [p.key, p.name, p.url, p.priority]
-    );
-    providerMap.set(p.key, res.rows[0].id);
+    let providerId: number;
+    const existing = await client.query('SELECT id FROM providers WHERE provider_key = $1', [p.key]);
+    if (existing.rows.length > 0) {
+      providerId = existing.rows[0].id;
+    } else {
+      const res = await client.query(
+        `INSERT INTO providers (provider_key, display_name, base_url, enabled, priority)
+         VALUES ($1, $2, $3, true, $4)
+         RETURNING id`,
+        [p.key, p.name, p.url, p.priority]
+      );
+      providerId = res.rows[0].id;
+    }
+    providerMap.set(p.key, providerId);
   }
 
   // Seed default models
@@ -53,11 +55,13 @@ export async function up(client: pg.PoolClient | pg.Pool): Promise<void> {
     { provider: 'openrouter', modelId: 'deepseek/deepseek-v3.1:free', canonical: 'deepseek-v3.1', name: 'DeepSeek V3.1 (free)', ctx: 131072, maxOut: 8192, stream: true, tools: true, vision: false, structOut: true, reasoning: true, priority: 9 },
     { provider: 'openrouter', modelId: 'moonshotai/kimi-k2:free', canonical: 'kimi-k2', name: 'Kimi K2 (free)', ctx: 131072, maxOut: 8192, stream: true, tools: true, vision: false, structOut: true, reasoning: false, priority: 8 },
     { provider: 'openrouter', modelId: 'qwen/qwen3-coder:free', canonical: 'qwen3-coder', name: 'Qwen3 Coder (free)', ctx: 262144, maxOut: 8192, stream: true, tools: true, vision: false, structOut: true, reasoning: true, priority: 8 },
+    { provider: 'openrouter', modelId: 'moonshotai/kimi-k2.6:free', canonical: 'kimi-k2.6', name: 'Kimi K2.6 (OR free)', ctx: 262144, maxOut: 8192, stream: true, tools: true, vision: false, structOut: true, reasoning: false, priority: 3 },
     // Mistral
     { provider: 'mistral', modelId: 'mistral-large-latest', canonical: 'mistral-large', name: 'Mistral Large 3', ctx: 131072, maxOut: 8192, stream: true, tools: true, vision: true, structOut: true, reasoning: false, priority: 8 },
     { provider: 'mistral', modelId: 'codestral-latest', canonical: 'codestral', name: 'Codestral', ctx: 32000, maxOut: 4096, stream: true, tools: true, vision: false, structOut: true, reasoning: false, priority: 7 },
     // GitHub
     { provider: 'github', modelId: 'openai/gpt-5', canonical: 'gpt-5', name: 'GPT-5 (GitHub)', ctx: 128000, maxOut: 8192, stream: true, tools: true, vision: true, structOut: true, reasoning: true, priority: 10 },
+    { provider: 'github', modelId: 'openai/gpt-4.1', canonical: 'gpt-4.1', name: 'GPT-4.1 (GitHub)', ctx: 8000, maxOut: 4000, stream: true, tools: true, vision: false, structOut: true, reasoning: false, priority: 20 },
     // Zhipu
     { provider: 'zhipu', modelId: 'glm-4.5-flash', canonical: 'glm-4.5-flash', name: 'GLM-4.5 Flash', ctx: 131072, maxOut: 8192, stream: true, tools: true, vision: false, structOut: true, reasoning: false, priority: 7 },
   ];

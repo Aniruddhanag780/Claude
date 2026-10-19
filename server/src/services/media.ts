@@ -853,7 +853,7 @@ export async function runImageGeneration(model: string | undefined, params: Imag
   for (const row of chain) {
     const { credential, budgetBlocked } = KEYLESS_CAPABLE.has(row.platform)
       ? { credential: { id: null, key: null, baseUrl: null, release: () => {} }, budgetBlocked: false }
-      : reserveProviderCredential(row, 0);
+      : await reserveProviderCredential(row, 0);
     if (!credential) {
       if (budgetBlocked) {
         lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');
@@ -895,7 +895,7 @@ export async function runVideoGeneration(
   const hints = new RetryHintTracker();
   for (const row of chain) {
     throwIfClientGone(clientSignal);
-    const { credential, budgetBlocked } = reserveProviderCredential(row, 0,
+    const { credential, budgetBlocked } = await reserveProviderCredential(row, 0,
       keyId => isOnCooldown(row.platform, row.model_id, keyId));
     if (!credential) {
       if (budgetBlocked) {
@@ -1188,7 +1188,7 @@ export async function runTranscription(model: string | undefined, p: Transcripti
   // Only a chain rate limited end to end earns a Retry-After (the soonest).
   const hints = new RetryHintTracker();
   for (const m of usable) {
-    const { credential, budgetBlocked } = reserveProviderCredential({ platform: m.platform, key_id: m.keyId }, 0,
+    const { credential, budgetBlocked } = await reserveProviderCredential({ platform: m.platform, key_id: m.keyId }, 0,
       keyId => isOnCooldown(m.platform, m.modelId, keyId));
     if (!credential) {
       if (budgetBlocked) {
@@ -1230,7 +1230,7 @@ export async function runSpeech(model: string | undefined, params: SpeechParams)
   for (const row of chain) {
     const { credential, budgetBlocked } = KEYLESS_CAPABLE.has(row.platform)
       ? { credential: { id: null, key: null, baseUrl: null, release: () => {} }, budgetBlocked: false }
-      : reserveProviderCredential(row, 0);
+      : await reserveProviderCredential(row, 0);
     if (!credential) {
       if (budgetBlocked) {
         lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');

@@ -287,6 +287,9 @@ export async function reloadRoutingRegistry(): Promise<RouterRegistry> {
         } catch {
           decrypted = '';
           decryptFailed = true;
+          try {
+            await pool.query("UPDATE api_keys SET status = 'error', last_checked_at = NOW() WHERE id = $1", [row.id]);
+          } catch {}
         }
 
         const providerKey = providerKeyMap.get(row.provider_id) || 'unknown';

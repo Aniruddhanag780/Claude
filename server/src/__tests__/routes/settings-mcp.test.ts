@@ -26,7 +26,7 @@ describe('/api/settings/enable-mcp', () => {
 
   beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    await initDb();
+    await initDb(':memory:');
     app = createApp();
     token = mintDashboardToken();
   });
@@ -76,7 +76,7 @@ describe('/mcp lifecycle gate (#925)', () => {
 
   beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    await initDb();
+    await initDb(':memory:');
     app = createApp();
     token = mintDashboardToken();
     unifiedKey = getUnifiedApiKey();

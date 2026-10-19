@@ -31,9 +31,9 @@ describe('revocable URL-token aliases', () => {
   let app: Express;
   let dashboardToken: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initDb(':memory:');
     app = createApp();
     dashboardToken = mintDashboardToken();
   });

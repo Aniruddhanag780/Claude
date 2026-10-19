@@ -190,7 +190,7 @@ describe('Router', () => {
        LIMIT 1
     `).get() as { id: number };
 
-    db.prepare('UPDATE models SET priority = 100 WHERE id = ?').run(groq.id);
+    db.prepare('UPDATE models SET priority = 1 WHERE id = ?').run(groq.id);
     db.prepare('UPDATE models SET tpm_limit = NULL, tpd_limit = NULL WHERE id = ?').run(groq.id);
 
     const googleKey = encrypt('test-google-key');
@@ -205,7 +205,7 @@ describe('Router', () => {
        LIMIT 1
     `).get() as { id: number };
     expect(google).toBeDefined();
-    db.prepare('UPDATE models SET priority = 50 WHERE id = ?').run(google.id);
+    db.prepare('UPDATE models SET priority = 2 WHERE id = ?').run(google.id);
     db.prepare('UPDATE models SET tpm_limit = NULL, tpd_limit = NULL WHERE id = ?').run(google.id);
 
     await reloadRoutingRegistry();
@@ -274,29 +274,32 @@ describe('Router', () => {
 });
 
 describe('Router explicit pin vs upstream retirement (#1394)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initDb(':memory:');
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     const db = getDb();
     setRoutingStrategy('priority');
     db.prepare('DELETE FROM api_keys').run();
     db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+    db.prepare('DELETE FROM catalog_model_tombstones').run();
+    await reloadRoutingRegistry();
   });
 
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it('does not inject a pinned model carrying an upstream_eol tombstone into the chain', () => {
+  it('does not inject a pinned model carrying an upstream_eol tombstone into the chain', async () => {
     const db = getDb();
     const { encrypted, iv, authTag } = encrypt('test-groq-key');
     db.prepare(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run('groq', 'test', encrypted, iv, authTag, 'healthy', 1);
+    await reloadRoutingRegistry();
 
     // Retire a groq model upstream: chain off + tombstone, row stays enabled=1
     // (the documented retirement contract).
@@ -315,13 +318,14 @@ describe('Router explicit pin vs upstream retirement (#1394)', () => {
     expect(result.modelDbId).not.toBe(target.id);
   });
 
-  it('still pins a model whose tombstone is from the user, not upstream', () => {
+  it('still pins a model whose tombstone is from the user, not upstream', async () => {
     const db = getDb();
     const { encrypted, iv, authTag } = encrypt('test-groq-key');
     db.prepare(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run('groq', 'test', encrypted, iv, authTag, 'healthy', 1);
+    await reloadRoutingRegistry();
 
     const target = db.prepare(
       "SELECT id, model_id FROM models WHERE platform = 'groq' AND enabled = 1 ORDER BY intelligence_rank DESC LIMIT 1",
@@ -338,17 +342,18 @@ describe('Router explicit pin vs upstream retirement (#1394)', () => {
 });
 
 describe('Router exhaustion diagnostics (issue _1)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initDb(':memory:');
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     const db = getDb();
     setRoutingStrategy('priority');
     db.prepare('DELETE FROM api_keys').run();
     db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
     db.prepare('DELETE FROM rate_limit_cooldowns').run();
+    await reloadRoutingRegistry();
   });
 
   afterEach(() => {

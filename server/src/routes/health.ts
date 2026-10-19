@@ -5,7 +5,6 @@ import { getPostgresPool } from '../db/postgres.js';
 import { getDb } from '../db/index.js';
 import { hasProvider, resolveProvider } from '../providers/index.js';
 import { checkKeyHealth, checkAllKeys, pollKeyQuota, supportsQuotaPolling } from '../services/health.js';
-import { getDegradationStatus } from '../services/degradation.js';
 import { getQuotaStateForKeys } from '../services/provider-quota.js';
 import type { Platform } from '@freellmapi/shared/types.js';
 

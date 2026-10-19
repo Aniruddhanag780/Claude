@@ -221,26 +221,26 @@ settingsRouter.put('/agent-compatibility', (req: Request, res: Response) => {
   });
 });
 
-settingsRouter.get('/url-tokens', (_req: Request, res: Response) => {
-  res.json({ tokens: listUrlTokens() });
+settingsRouter.get('/url-tokens', async (_req: Request, res: Response) => {
+  res.json({ tokens: await listUrlTokens() });
 });
 
-settingsRouter.post('/url-tokens', (req: Request, res: Response) => {
+settingsRouter.post('/url-tokens', async (req: Request, res: Response) => {
   const parsed = z.object({ label: z.string().max(120).optional() }).safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: 'Invalid URL token label', type: 'invalid_request_error' } });
     return;
   }
-  res.status(201).json(mintUrlToken(parsed.data.label ?? ''));
+  res.status(201).json(await mintUrlToken(parsed.data.label ?? ''));
 });
 
-settingsRouter.delete('/url-tokens/:id', (req: Request, res: Response) => {
+settingsRouter.delete('/url-tokens/:id', async (req: Request, res: Response) => {
   const id = Number.parseInt(String(req.params.id), 10);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: { message: 'Invalid URL token id', type: 'invalid_request_error' } });
     return;
   }
-  if (!revokeUrlToken(id)) {
+  if (!(await revokeUrlToken(id))) {
     res.status(404).json({ error: { message: 'Active URL token not found', type: 'not_found_error' } });
     return;
   }

@@ -8,6 +8,8 @@ import { getProvider, hasProvider, getAllProviders } from '../providers/index.js
 import { getDb } from '../db/index.js';
 import { isSearchPlatform } from '../lib/search-platforms.js';
 import type { Platform, KeyStatus } from '@freellmapi/shared/types.js';
+import { endpointScopeForBaseUrl } from '../lib/endpoint-scope.js';
+import { ensureModelInProfiles } from '../services/profile-models.js';
 
 export const keysRouter = Router();
 
@@ -229,6 +231,14 @@ keysRouter.post('/', async (req: Request, res: Response) => {
       ]
     );
 
+    const credId = credRes.rows[0].id;
+    await pool.query(
+      `INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, group_label, status, enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'healthy', 1)
+       ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, encrypted_key = EXCLUDED.encrypted_key, iv = EXCLUDED.iv, auth_tag = EXCLUDED.auth_tag`,
+      [credId, platform, label, enc.encrypted, enc.iv, enc.authTag, groupLabel || null]
+    ).catch(() => {});
+
     // Atomically reload in-memory routing registry
     await reloadRoutingRegistry();
 
@@ -362,6 +372,7 @@ keysRouter.delete('/:id', async (req: Request, res: Response) => {
       return;
     }
 
+    await pool.query('DELETE FROM api_keys WHERE id = $1', [id]).catch(() => {});
     await reloadRoutingRegistry();
     res.json({ success: true, id });
   } catch (err: any) {
@@ -493,18 +504,54 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
     );
 
     const keyId = credRes.rows[0].id;
+    await pool.query(
+      `INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, base_url, group_label, status, enabled)
+       VALUES ($1, 'custom', $2, $3, $4, $5, $6, $7, 'healthy', 1)
+       ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, encrypted_key = EXCLUDED.encrypted_key, iv = EXCLUDED.iv, auth_tag = EXCLUDED.auth_tag, base_url = EXCLUDED.base_url`,
+      [keyId, label, enc.encrypted, enc.iv, enc.authTag, baseUrl, groupLabel || null]
+    ).catch(() => {});
 
     // 3. Register initial model if supplied
-    if (model) {
-      await pool.query(
+    const modelEntries: string[] = [];
+    if (typeof model === 'string' && model.trim()) {
+      modelEntries.push(model.trim());
+    }
+    if (Array.isArray(req.body?.models)) {
+      for (const m of req.body.models) {
+        const id = typeof m === 'string' ? m : m?.modelId || m?.model;
+        if (id && !modelEntries.includes(id)) {
+          modelEntries.push(id);
+        }
+      }
+    }
+
+    const endpointScope = endpointScopeForBaseUrl(baseUrl);
+    for (const mId of modelEntries) {
+      const insRes = await pool.query(
         `INSERT INTO models (
-           provider_id, model_id, canonical_name, display_name, enabled,
-           supports_streaming, supports_tools, supports_vision, supports_structured_output, priority
+           provider_id, platform, source, model_id, canonical_name, display_name, enabled,
+           supports_streaming, supports_tools, supports_vision, supports_structured_output, priority,
+           key_id, endpoint_scope
          )
-         VALUES ($1, $2, $2, $2, true, true, false, false, false, 0)
-         ON CONFLICT (provider_id, model_id) DO NOTHING`,
-        [providerId, model]
+         VALUES ($1, 'custom', 'user', $2, $2, $2, true, true, true, false, false, 0, $3, $4)
+         ON CONFLICT (provider_id, model_id) DO UPDATE SET
+           key_id = EXCLUDED.key_id,
+           endpoint_scope = EXCLUDED.endpoint_scope,
+           supports_tools = EXCLUDED.supports_tools,
+           enabled = true
+         RETURNING id`,
+        [providerId, mId, keyId, endpointScope]
       );
+      const modelDbId = insRes.rows[0]?.id;
+      if (modelDbId) {
+        await pool.query(
+          `INSERT INTO fallback_config (model_db_id, priority, enabled)
+           VALUES ($1, (SELECT COALESCE(MAX(priority), 0) + 1 FROM fallback_config), 1)
+           ON CONFLICT (model_db_id) DO NOTHING`,
+          [modelDbId]
+        ).catch(() => {});
+        ensureModelInProfiles(getDb(), modelDbId);
+      }
     }
 
     await reloadRoutingRegistry();
@@ -627,10 +674,10 @@ keysRouter.post('/custom/bulk-models', async (req: Request, res: Response) => {
     for (const modelId of models) {
       const mRes = await pool.query(
         `INSERT INTO models (
-           provider_id, model_id, canonical_name, display_name, enabled,
+           provider_id, platform, source, model_id, canonical_name, display_name, enabled,
            supports_streaming, supports_tools, supports_vision, supports_structured_output, priority
          )
-         VALUES ($1, $2, $2, $2, true, true, false, false, false, 0)
+         VALUES ($1, 'custom', 'user', $2, $2, $2, true, true, true, false, false, 0)
          ON CONFLICT (provider_id, model_id) DO NOTHING
          RETURNING model_id`,
         [providerId, modelId]

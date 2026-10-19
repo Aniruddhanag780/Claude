@@ -76,6 +76,26 @@ export async function up(client: pg.PoolClient | pg.Pool): Promise<void> {
       UNIQUE(platform, model_id)
     );
 
+    INSERT INTO embedding_models (family, platform, model_id, display_name, dimensions, max_input_tokens, priority, enabled, quota_label)
+    VALUES
+      ('gemini-embedding-001', 'google', 'gemini-embedding-001', 'Gemini Embedding', 3072, 2048, 1, 1, '100 rpm · 1K req/day'),
+      ('llama-nemotron-embed-vl-1b-v2', 'nvidia', 'nvidia/llama-nemotron-embed-vl-1b-v2', 'Nemotron Embed VL 1B', 2048, 8192, 1, 1, '~40 rpm'),
+      ('llama-nemotron-embed-vl-1b-v2', 'openrouter', 'nvidia/llama-nemotron-embed-vl-1b-v2', 'Nemotron Embed VL 1B (OR)', 2048, 8192, 2, 1, '$0/M tok'),
+      ('llama-nemotron-embed-1b-v2', 'nvidia', 'nvidia/llama-nemotron-embed-1b-v2', 'Nemotron Embed 1B', 2048, 8192, 1, 1, '~40 rpm'),
+      ('nv-embedqa-e5-v5', 'nvidia', 'nvidia/nv-embedqa-e5-v5', 'NV-EmbedQA E5 v5', 1024, 512, 1, 1, '~40 rpm'),
+      ('text-embedding-3-small', 'github', 'openai/text-embedding-3-small', 'Text Embedding 3 Small', 1536, 8191, 1, 1, 'rate-limited free'),
+      ('text-embedding-3-large', 'github', 'openai/text-embedding-3-large', 'Text Embedding 3 Large', 3072, 8191, 1, 1, 'rate-limited free'),
+      ('bge-m3', 'cloudflare', '@cf/baai/bge-m3', 'BGE-M3', 1024, 8192, 1, 1, '10K neurons/day (shared)'),
+      ('bge-m3', 'huggingface', 'BAAI/bge-m3', 'BGE-M3 (HF)', 1024, 8192, 2, 1, '$0.10/mo credits'),
+      ('embeddinggemma-300m', 'cloudflare', '@cf/google/embeddinggemma-300m', 'EmbeddingGemma 300M', 768, 2048, 1, 1, '10K neurons/day (shared)'),
+      ('qwen3-embedding-0.6b', 'cloudflare', '@cf/qwen/qwen3-embedding-0.6b', 'Qwen3 Embedding 0.6B', 1024, 4096, 1, 1, '10K neurons/day (shared)'),
+      ('embed-v4.0', 'cohere', 'embed-v4.0', 'Cohere Embed v4', 1536, 128000, 1, 0, '1K calls/mo (shared w/ chat)')
+    ON CONFLICT (platform, model_id) DO NOTHING;
+
+    INSERT INTO settings (key, value)
+    VALUES ('embeddings_default_family', 'gemini-embedding-001')
+    ON CONFLICT (key) DO NOTHING;
+
     -- Custom model tombstones: an operator-deleted model must not come back on
     -- the next catalog sync, so the deletion is recorded by (endpoint, model).
     CREATE TABLE IF NOT EXISTS custom_model_tombstones (
@@ -83,6 +103,28 @@ export async function up(client: pg.PoolClient | pg.Pool): Promise<void> {
       model_id TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (endpoint_scope, model_id)
+    );
+
+    -- Catalog model tombstones: keep track of user-deleted or upstream-retired models
+    CREATE TABLE IF NOT EXISTS catalog_model_tombstones (
+      kind TEXT NOT NULL DEFAULT 'chat',
+      platform TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'user',
+      reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (kind, platform, model_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_catalog_model_tombstones_platform_model
+      ON catalog_model_tombstones(platform, model_id);
+
+    -- Model overrides: user customizations to model metadata that survive catalog syncs
+    CREATE TABLE IF NOT EXISTS model_overrides (
+      platform TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      overrides_json TEXT NOT NULL DEFAULT '{}',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (platform, model_id)
     );
 
     -- Provider-specific request quirks the dashboard can show and toggle.
@@ -230,6 +272,8 @@ export async function down(client: pg.PoolClient | pg.Pool): Promise<void> {
     DROP TABLE IF EXISTS provider_quota_observations;
     DROP TABLE IF EXISTS quirk_targets;
     DROP TABLE IF EXISTS quirks;
+    DROP TABLE IF EXISTS model_overrides;
+    DROP TABLE IF EXISTS catalog_model_tombstones;
     DROP TABLE IF EXISTS custom_model_tombstones;
     DROP TABLE IF EXISTS embedding_models;
     DROP TABLE IF EXISTS fallback_config;

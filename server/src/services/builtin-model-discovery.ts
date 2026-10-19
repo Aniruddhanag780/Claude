@@ -107,12 +107,10 @@ export function ineligibleMessage(platform: string, reason: IneligibleReason | u
 // (or the bundled baseline) wrote, or any embedding / media row, which only
 // the catalog and the bundled baseline write for a built-in platform.
 function hasCatalogOwnedRows(db: Db, platform: string): boolean {
-  const row = db.prepare(`
-    SELECT (SELECT COUNT(*) FROM models           WHERE platform = ? AND source = 'catalog')
-         + (SELECT COUNT(*) FROM embedding_models WHERE platform = ?)
-         + (SELECT COUNT(*) FROM media_models     WHERE platform = ?) AS c
-  `).get(platform, platform, platform) as { c: number };
-  return row.c > 0;
+  const chat = (db.prepare("SELECT COUNT(*) AS n FROM models WHERE platform = ? AND source = 'catalog'").get(platform) as { n: number } | undefined)?.n ?? 0;
+  const embed = (db.prepare("SELECT COUNT(*) AS n FROM embedding_models WHERE platform = ?").get(platform) as { n: number } | undefined)?.n ?? 0;
+  const media = (db.prepare("SELECT COUNT(*) AS n FROM media_models WHERE platform = ?").get(platform) as { n: number } | undefined)?.n ?? 0;
+  return (Number(chat) + Number(embed) + Number(media)) > 0;
 }
 
 interface KeyRow {

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { initDb, getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { runTranscription, MediaError, listMediaModels, MAX_TRANSCRIPTION_BYTES } from '../../services/media.js';
-import { isOnCooldown, clearCooldownsForKey } from '../../services/ratelimit.js';
+import { isOnCooldown, clearAllCooldowns } from '../../services/ratelimit.js';
 
 const realFetch = globalThis.fetch;
 
@@ -57,7 +57,7 @@ describe('transcription service', () => {
     getDb().prepare("DELETE FROM api_keys").run();
     // Cooldowns live in a module-level map that outlives the per-test :memory:
     // DB; key ids restart at 1 in every test, so stale entries must be purged.
-    for (let id = 1; id <= 10; id++) clearCooldownsForKey(id);
+    clearAllCooldowns();
     seedTranscriptionModels();
   });
 

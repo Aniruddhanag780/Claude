@@ -410,7 +410,7 @@ export async function runSearch(query: string, opts: SearchOptions = {}): Promis
     const tried = new Set<number>();
     for (;;) {
       if (opts.signal?.aborted) throw new SearchError('search cancelled by the client', 499);
-      const { credential, budgetBlocked } = reserveProviderCredential(
+      const { credential, budgetBlocked } = await reserveProviderCredential(
         row,
         0,
         keyId => tried.has(keyId) || isOnCooldown(row.platform, row.model_id, keyId),

@@ -86,7 +86,7 @@ describe('mock SQL engine', () => {
 
   it('treats DDL and unknown statements as no-ops / unsupported', () => {
     expect(run(`CREATE TABLE IF NOT EXISTS x (id INTEGER)`)?.changes).toBe(0);
-    expect(run(`SELECT a.id FROM a JOIN b ON b.id = a.id`)).toBeNull();
+    expect(run(`EXPLAIN SELECT 1`)).toBeNull();
     expect(run(`PRAGMA table_info(profiles)`)?.changes).toBe(0);
   });
 });

@@ -101,6 +101,9 @@ function recordInvalidFailure(keyId: number, platform?: string): void {
 
   if (count >= CONSECUTIVE_FAILURES_TO_DISABLE) {
     pool().query('UPDATE credentials SET enabled = false, updated_at = NOW() WHERE id = $1', [keyId]);
+    try {
+      getDb().prepare('UPDATE api_keys SET enabled = 0 WHERE id = ?').run(keyId);
+    } catch {}
     providerLog(
       'warn',
       `[Health] Auto-disabled key ${keyId} after ${count} consecutive failures`,
@@ -122,21 +125,26 @@ interface CredentialRow {
   status: string;
   last_health_error: string | null;
   model_scope: any;
+  proxy_encrypted?: string | null;
+  proxy_iv?: string | null;
+  proxy_auth_tag?: string | null;
 }
 
 const CREDENTIAL_SELECT = `
-  SELECT c.id, p.provider_key AS platform, p.base_url,
+  SELECT c.id, p.provider_key AS platform, c.base_url,
          c.credential_name, c.encrypted_value, c.iv, c.auth_tag,
-         c.enabled, c.last_health_error, c.model_scope
+         c.enabled, c.last_health_error, c.model_scope, c.status,
+         c.proxy_encrypted, c.proxy_iv, c.proxy_auth_tag
   FROM credentials c
   JOIN providers p ON p.id = c.provider_id
   WHERE c.id = $1
 `;
 
 const CREDENTIAL_SELECT_ENABLED = `
-  SELECT c.id, p.provider_key AS platform, p.base_url,
+  SELECT c.id, p.provider_key AS platform, c.base_url,
          c.credential_name, c.encrypted_value, c.iv, c.auth_tag,
-         c.enabled, c.last_health_error, c.model_scope
+         c.enabled, c.last_health_error, c.model_scope, c.status,
+         c.proxy_encrypted, c.proxy_iv, c.proxy_auth_tag
   FROM credentials c
   JOIN providers p ON p.id = c.provider_id
   WHERE c.id = $1 AND c.enabled = true
@@ -221,8 +229,21 @@ export async function maybePollKeyQuota(keyId: number): Promise<boolean> {
 }
 
 export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
-  const { rows } = await pool().query<CredentialRow>(CREDENTIAL_SELECT, [keyId]);
-  const row = rows[0];
+  let row: any;
+  try {
+    const { rows } = await pool().query<CredentialRow>(CREDENTIAL_SELECT, [keyId]);
+    row = rows[0];
+  } catch {}
+
+  if (!row) {
+    try {
+      const dbRow = getDb().prepare('SELECT * FROM api_keys WHERE id = ?').get(keyId) as any;
+      if (dbRow) {
+        row = dbRow;
+      }
+    } catch {}
+  }
+
   if (!row) return 'error';
 
   const provider = resolveProvider(row.platform as Platform, row.base_url);
@@ -233,14 +254,17 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
   // an older probe stored is cleared so the dashboard stops showing it.
   if (provider.supportsKeyValidation === false) {
     if (row.last_health_error != null) {
-      await pool().query('UPDATE credentials SET last_health_error = NULL WHERE id = $1', [keyId]);
+      try {
+        getDb().prepare('UPDATE api_keys SET last_health_error = NULL WHERE id = ?').run(keyId);
+      } catch {}
+      await pool().query('UPDATE credentials SET last_health_error = NULL WHERE id = $1', [keyId]).catch(() => {});
     }
     return (row.status ?? 'healthy') as KeyStatus;
   }
 
   try {
-    const apiKey = decrypt(row.encrypted_value, row.iv, row.auth_tag);
-    const validation = await withKeyProxy(decryptProxyUrl(undefined), () => provider.validateKey(apiKey, {
+    const apiKey = decrypt(row.encrypted_value || row.encrypted_key, row.iv, row.auth_tag);
+    const validation = await withKeyProxy(decryptProxyUrl(row), () => provider.validateKey(apiKey, {
       platform: row.platform as Platform,
       keyId,
       quotaPoolKey: inferQuotaPoolKey(row.platform as Platform, null),
@@ -258,12 +282,20 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
 
     const status: KeyStatus = isValid ? 'healthy' : 'invalid';
 
+    try {
+      getDb().prepare(`
+        UPDATE api_keys
+        SET status = ?, last_health_error = ?, last_checked_at = datetime('now')
+        WHERE id = ?
+      `).run(status, lastError, keyId);
+    } catch {}
+
     await pool().query(
       `UPDATE credentials
-       SET last_health_error = $1, last_checked_at = NOW(), updated_at = NOW()
-       WHERE id = $2`,
-      [lastError, keyId],
-    );
+       SET status = $1, last_health_error = $2, last_checked_at = NOW(), updated_at = NOW()
+       WHERE id = $3`,
+      [status, lastError, keyId],
+    ).catch(() => {});
 
     if (isValid) {
       failureCount.delete(keyId);
@@ -295,7 +327,7 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     const lastError = sanitizeProviderErrorMessage(err?.message ?? err);
     console.error(
       `[Health] Key ${keyId} (${row.platform}, base=${row.base_url ?? 'default'}) ` +
-      `transport error: ${lastError} — status preserved as 'error'`,
+      `transport error: ${lastError} — status preserved as '${row.status ?? 'healthy'}'`,
     );
     // Do NOT write status='error'. selectKeyForModel only considers keys with
     // status IN ('healthy','unknown'), so demoting here silently removes the
@@ -303,13 +335,21 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     // evidence about the network, not about the key. Record the diagnostic
     // and the timestamp; leave the verdict to a probe that actually reached the
     // provider.
+    try {
+      getDb().prepare(`
+        UPDATE api_keys
+        SET last_health_error = ?, last_checked_at = datetime('now')
+        WHERE id = ?
+      `).run(lastError, keyId);
+    } catch {}
+
     await pool().query(
       `UPDATE credentials
        SET last_health_error = $1, last_checked_at = NOW(), updated_at = NOW()
        WHERE id = $2`,
       [lastError, keyId],
-    );
-    return 'error';
+    ).catch(() => {});
+    return (row.status ?? 'healthy') as KeyStatus;
   }
 }
 
@@ -318,8 +358,17 @@ export type KeyProbeOutcome = 'valid' | 'invalid' | 'error';
 
 export async function probeKeyValidity(keyId: number): Promise<KeyProbeOutcome> {
   try {
-    const { rows } = await pool().query<CredentialRow>(CREDENTIAL_SELECT_ENABLED, [keyId]);
-    const row = rows[0];
+    let row: any;
+    try {
+      const { rows } = await pool().query<CredentialRow>(CREDENTIAL_SELECT_ENABLED, [keyId]);
+      row = rows[0];
+    } catch {}
+    if (!row) {
+      try {
+        const dbRow = getDb().prepare('SELECT * FROM api_keys WHERE id = ? AND enabled = 1').get(keyId) as any;
+        if (dbRow) row = dbRow;
+      } catch {}
+    }
     if (!row) return 'error';
 
     const provider = resolveProvider(row.platform as Platform, row.base_url);
@@ -328,8 +377,8 @@ export async function probeKeyValidity(keyId: number): Promise<KeyProbeOutcome> 
     // runs out, as it would after an inconclusive probe.
     if (provider.supportsKeyValidation === false) return 'error';
 
-    const apiKey = decrypt(row.encrypted_value, row.iv, row.auth_tag);
-    const validation = await withKeyProxy(decryptProxyUrl(undefined), () => provider.validateKey(apiKey, {
+    const apiKey = decrypt(row.encrypted_value || row.encrypted_key, row.iv, row.auth_tag);
+    const validation = await withKeyProxy(decryptProxyUrl(row), () => provider.validateKey(apiKey, {
       platform: row.platform as Platform,
       keyId,
       quotaPoolKey: inferQuotaPoolKey(row.platform as Platform, null),
@@ -373,6 +422,7 @@ interface HealthKeyRow {
   platform: string;
   base_url: string | null;
   enabled: boolean;
+  status?: string;
   last_health_error: string | null;
   cooldown_until: Date | null;
   age_ms: number | null;
@@ -430,28 +480,45 @@ async function runHealthPass(opts: HealthPassOptions): Promise<HealthPassResult>
   const sleep = opts.sleep ?? realSleep;
   const check = opts.check ?? checkKeyHealth;
 
-  const { rows } = await pool().query<HealthKeyRow>(`
-    SELECT c.id, p.provider_key AS platform, p.base_url,
-           c.enabled, c.last_health_error, c.cooldown_until,
-           EXTRACT(EPOCH FROM (NOW() - c.last_checked_at)) * 1000 AS age_ms
-    FROM credentials c
-    JOIN providers p ON p.id = c.provider_id
-    WHERE c.enabled = true
-  `);
+  let rows: HealthKeyRow[] = [];
+  try {
+    const res = await pool().query<HealthKeyRow>(`
+      SELECT c.id, p.provider_key AS platform, p.base_url,
+             c.enabled, c.status, c.last_health_error, c.cooldown_until,
+             EXTRACT(EPOCH FROM (NOW() - c.last_checked_at)) * 1000 AS age_ms
+      FROM credentials c
+      JOIN providers p ON p.id = c.provider_id
+      WHERE c.enabled = true
+    `);
+    rows = res.rows;
+  } catch {}
+
+  if (rows.length === 0) {
+    try {
+      const dbRows = getDb().prepare(`
+        SELECT id, platform, base_url, enabled, status, last_health_error,
+               NULL as cooldown_until,
+               CASE WHEN last_checked_at IS NULL THEN NULL
+                    ELSE (unixepoch('now') - unixepoch(last_checked_at)) * 1000 END as age_ms
+        FROM api_keys
+        WHERE enabled = 1
+      `).all() as any[];
+      if (dbRows?.length) {
+        rows = dbRows.map(r => ({ ...r, enabled: Boolean(r.enabled) }));
+      }
+    } catch {}
+  }
 
   const skippedKeyIds: number[] = [];
   const skipMs = opts.force ? 0 : getValidationRateLimitSkipMs();
   const due = rows.filter(row => {
     if (opts.force) return true;
-    // A key the provider just rate-limited stays out until the skip window
-    // passes — even one parked at 'error'. A 429 is fresher, more specific
-    // evidence than the eagerness to re-ask an errored key (#1369).
     const limitedAt = validationRateLimitedAt.get(row.id);
     if (limitedAt !== undefined && now() - limitedAt < skipMs) {
       skippedKeyIds.push(row.id);
       return false;
     }
-    if (row.last_health_error) return true;
+    if (row.status === 'error') return true;
     if (row.age_ms !== null && row.age_ms < RECENT_CHECK_SKIP_MS) {
       skippedKeyIds.push(row.id);
       return false;

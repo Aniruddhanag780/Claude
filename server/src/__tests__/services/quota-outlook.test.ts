@@ -17,9 +17,9 @@ function traffic(count: number, key = 1, platform = 'groq', model = 'llama') {
     VALUES (?,?,?,'success',10,5,100,'2026-09-14 19:59:00')`);
   for (let i = 0; i < count; i++) insert.run(platform,model,key);
 }
-beforeEach(() => {
+beforeEach(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initDb(':memory:');
   vi.spyOn(Date, 'now').mockReturnValue(NOW);
 });
 afterEach(() => vi.restoreAllMocks());
@@ -94,7 +94,6 @@ describe('dashboard quota outlook', () => {
     expect(getDb().prepare('SELECT total_changes() AS n').get()).toEqual(changes);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
-});
 
 
 it('records usage independently for a provider with no quota readings or request limits', () => {
@@ -148,4 +147,5 @@ it('includes keyless successful usage but excludes failed, old and future traffi
 it('normalizes SQLite UTC reset timestamps before projecting exhaustion', () => {
   signal({remaining:100,reset:'2026-09-14 20:30:00'});traffic(10);
   expect(getQuotaOutlook().pools[0]).toMatchObject({resetAt:'2026-09-14T20:30:00.000Z',status:'resets_first',estimatedExhaustionAt:null});
+});
 });

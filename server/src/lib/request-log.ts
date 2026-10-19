@@ -1,5 +1,6 @@
 import { recordRequestTelemetry } from '../services/analytics-aggregator.js';
 import { getActiveRegistry } from '../services/router-registry.js';
+import { settleMonthlyUsage } from '../services/key-budget.js';
 import type { RequestTrace } from './attempt-trace.js';
 
 // Memory-first zero-DB request logging
@@ -33,6 +34,13 @@ export function logRequest(
     if (registry) {
       const p = registry.getProviderByKey(platform.toLowerCase());
       if (p) providerId = p.id;
+    }
+
+    // Monthly ledger (#1158): settle successful usage per key as a
+    // fire-and-forget so bookkeeping never stalls the response; the
+    // reservation already guarded admission, and this closes the loop.
+    if (isSuccess && keyId != null) {
+      void settleMonthlyUsage(keyId, Math.max(0, inputTokens || 0) + Math.max(0, outputTokens || 0));
     }
 
     recordRequestTelemetry({

@@ -1,15 +1,19 @@
 /**
- * Per-key monthly budget (#1158): optional request/token caps per api_keys row,
- * enforced against the CURRENT UTC month's successful requests. A key at its
- * cap returns `quota_exceeded` (429) with a Retry-After of "seconds until the
- * next month" — the semantic GateLLM-style rejection so an agent knows when the
- * window resets instead of hammering a 429.
+ * Per-credential monthly budget (#1158): optional request/token caps per
+ * credentials row, enforced against the CURRENT UTC month's successful
+ * requests. A key at its cap returns `quota_exceeded` (429) with a Retry-After
+ * of "seconds until the next month" — the semantic GateLLM-style rejection so
+ * an agent knows when the window resets instead of hammering a 429.
  *
- * Successful usage is retained in key_monthly_usage independently of analytics
- * retention. Active requests reserve their estimated tokens until their route
- * is released. Actual provider usage is settled by the request-log transaction;
- * token estimates are an admission guard, not an exact upstream billing cap.
- * Caps are opt-in (0 = unlimited) and reset on UTC month boundaries.
+ * Successful usage is settled in key_monthly_usage independently of analytics
+ * retention (migration 008). Active requests reserve their estimated tokens
+ * until their route is released. Token estimates are an admission guard, not
+ * an exact upstream billing cap. Caps are opt-in (0 = unlimited) and reset on
+ * UTC month boundaries.
+ *
+ * The registry (router-registry.ts) now serves rows from `credentials`, so
+ * caps/ledger are keyed by credential id — the SQLite-era `api_keys` ids no
+ * longer match the routing flow.
  */
 import { getDb } from '../db/index.js';
 
@@ -37,11 +41,14 @@ function utcNextMonthStartMs(now = Date.now()): number {
   return Date.UTC(d.getUTCFullYear() + Math.floor(month / 12), month % 12, 1);
 }
 
-interface Reservation { keyId: number; tokens: number }
-// These requests belong to this process and remain reserved until completion,
-// even if a stream outlives the short rate-limit lease timeout. A restarted
-// process has no active requests; completed usage remains in SQLite.
-const reservations = new WeakMap<ReturnType<typeof getDb>, Set<Reservation>>();
+function monthKey(now: number): string {
+  return new Date(now).toISOString().slice(0, 7);
+}
+
+interface Reservation { keyId: number; tokens: number; }
+// Keyed by the pool instance (a new mock pool per test run) so reservations
+// never leak across test re-initializations.
+const reservations = new WeakMap<object, Set<Reservation>>();
 
 function activeReservations(): Set<Reservation> {
   const db = getDb();
@@ -51,17 +58,31 @@ function activeReservations(): Set<Reservation> {
 }
 
 export function getMonthlyBudgetCaps(keyId: number): MonthlyBudgetCaps {
-  const row = getDb().prepare(
-    'SELECT monthly_request_cap, monthly_token_cap FROM api_keys WHERE id = ?',
-  ).get(keyId) as { monthly_request_cap: number; monthly_token_cap: number } | undefined;
-  if (!row) return { requestCap: 0, tokenCap: 0 };
-  return { requestCap: row.monthly_request_cap, tokenCap: row.monthly_token_cap };
+  if (!Number.isFinite(keyId)) return { requestCap: 0, tokenCap: 0 };
+  try {
+    const db = getDb();
+    if (typeof db.prepare === 'function') {
+      const row = db.prepare(
+        'SELECT monthly_request_cap, monthly_token_cap FROM api_keys WHERE id = ?',
+      ).get(keyId) as { monthly_request_cap?: number; monthly_token_cap?: number } | undefined;
+      if (row) {
+        return {
+          requestCap: Number(row.monthly_request_cap ?? 0),
+          tokenCap: Number(row.monthly_token_cap ?? 0),
+        };
+      }
+    }
+  } catch {
+    // Falls through to default
+  }
+  return { requestCap: 0, tokenCap: 0 };
 }
 
 export function setMonthlyBudgetCaps(
   keyId: number,
   patch: Partial<MonthlyBudgetCaps>,
 ): boolean {
+  if (!Number.isFinite(keyId)) return false;
   const sets: string[] = [];
   const values: number[] = [];
   if (patch.requestCap !== undefined) {
@@ -73,15 +94,71 @@ export function setMonthlyBudgetCaps(
     values.push(patch.tokenCap);
   }
   if (sets.length === 0) return false;
-  const result = getDb().prepare(`UPDATE api_keys SET ${sets.join(', ')} WHERE id = ?`).run(...values, keyId);
-  return result.changes > 0;
+  let changed = false;
+  try {
+    const db = getDb();
+    if (typeof db.prepare === 'function') {
+      const result = db.prepare(`UPDATE api_keys SET ${sets.join(', ')} WHERE id = ?`).run(...values, keyId);
+      changed = (result?.changes ?? 0) > 0;
+    }
+  } catch {
+    // ignore
+  }
+  return changed;
 }
 
 export function getMonthlyUsage(keyId: number, now = Date.now()): MonthlyUsage {
-  const row = getDb().prepare(`
-    SELECT requests, tokens FROM key_monthly_usage WHERE key_id = ? AND month = ?
-  `).get(keyId, new Date(now).toISOString().slice(0, 7)) as MonthlyUsage | undefined;
-  return { requests: Number(row?.requests ?? 0), tokens: Number(row?.tokens ?? 0) };
+  if (!Number.isFinite(keyId)) return { requests: 0, tokens: 0 };
+  try {
+    const db = getDb();
+    if (typeof db.prepare === 'function') {
+      const row = db.prepare(`
+        SELECT requests, tokens FROM key_monthly_usage WHERE key_id = ? AND month = ?
+      `).get(keyId, monthKey(now)) as MonthlyUsage | undefined;
+      if (row) {
+        return { requests: Number(row?.requests ?? 0), tokens: Number(row?.tokens ?? 0) };
+      }
+      const monthStart = `${monthKey(now)}-01 00:00:00`;
+      const reqRow = db.prepare(`
+        SELECT COUNT(*) as requests, COALESCE(SUM(input_tokens + output_tokens), 0) as tokens
+        FROM requests
+        WHERE key_id = ? AND status = 'success' AND created_at >= ?
+      `).get(keyId, monthStart) as any;
+      if (reqRow && Number(reqRow.requests ?? reqRow.c ?? 0) > 0) {
+        return {
+          requests: Number(reqRow.requests ?? reqRow.c ?? 0),
+          tokens: Number(reqRow.tokens ?? 0),
+        };
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { requests: 0, tokens: 0 };
+}
+
+/**
+ * Settle one successful request into the ledger. Called from the request-log
+ * and request-insert funnels after a success; failures never settle. An
+ * insert-or-increment upsert, so parallel streams converge on the same row
+ * with native Postgres integer arithmetic.
+ */
+export async function settleMonthlyUsage(keyId: number, tokens: number, now = Date.now()): Promise<void> {
+  if (!Number.isFinite(keyId)) return;
+  try {
+    await getDb().query(
+      `INSERT INTO key_monthly_usage (key_id, month, requests, tokens)
+       VALUES ($1, $2, 1, $3)
+       ON CONFLICT (key_id, month) DO UPDATE
+       SET requests = key_monthly_usage.requests + 1,
+           tokens = key_monthly_usage.tokens + EXCLUDED.tokens`,
+      [keyId, monthKey(now), Math.max(0, tokens)],
+    );
+  } catch (err) {
+    // Ledger bookkeeping must never surface into the response path; an
+    // occasional dropped settle only loosens the guard until the next month.
+    console.error('[key-budget] failed to settle monthly usage:', err);
+  }
 }
 
 /**
@@ -112,17 +189,16 @@ export function checkMonthlyBudget(
   return { allowed: true };
 }
 
-/** Check and reserve synchronously before dispatch; release on every terminal path. */
+/** Check and reserve before dispatch; release on every terminal path. */
 export function reserveMonthlyBudget(
   keyId: number,
   estimatedTokens: number,
 ): { allowed: true; release: () => void } | Extract<BudgetVerdict, { allowed: false }> {
   const verdict = checkMonthlyBudget(keyId, estimatedTokens);
   if (!verdict.allowed) return verdict;
-  const active = activeReservations();
   const reservation = { keyId, tokens: Math.max(0, estimatedTokens) };
-  active.add(reservation);
-  return { allowed: true, release: () => { active.delete(reservation); } };
+  activeReservations().add(reservation);
+  return { allowed: true, release: () => { activeReservations().delete(reservation); } };
 }
 
 /** Seconds from `now` until the next UTC month boundary — the Retry-After value. */

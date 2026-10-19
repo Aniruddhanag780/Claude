@@ -395,7 +395,7 @@ export async function runEmbeddings(model: string | undefined, inputs: string[],
   // limited end to end earns a Retry-After, and then the soonest one.
   const hints = new RetryHintTracker();
   for (const row of chain) {
-    const { credential, budgetBlocked } = reserveProviderCredential(row, estimateTokens(inputs));
+    const { credential, budgetBlocked } = await reserveProviderCredential(row, estimateTokens(inputs));
     if (!credential) {
       if (budgetBlocked) {
         lastError = new EmbeddingsError('Monthly key budget exhausted', 429, 'quota_exceeded');
