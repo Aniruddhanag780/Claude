@@ -365,7 +365,10 @@
     "decisionSetupHelp": "Decision routing asks a free decision model which strategy fits each request. It needs a key for one of these providers. Both have a free tier, no card needed.",
     "decisionAddKey": "Add {provider} key",
     "decisionNoModels": "No decision model is turned on yet. Turn one on under Models → Decision.",
-    "decisionOpenModels": "Open decision models"
+    "decisionOpenModels": "Open decision models",
+    "hedgeAfterMs": "Hedge racing after",
+    "hedgeAfterMsOff": "off",
+    "hedgeAfterMsHint": "When set, if the first candidate hasn't sent its first byte within this window (ms), the next candidate is started in parallel — the faster response wins and the other is canceled (counted as 'canceled', not a failure). Hedged requests can consume provider quota twice: both calls are billed on token-billing platforms. Empty = off. ROUTER_HEDGE_AFTER_MS pins this value; HEDGE_AFTER_MS_<PLATFORM>=0 opts one platform out."
   },
   "penaltyInspector": {
     "title": "សំពាធរ៉ោទ័រ",
@@ -714,8 +717,7 @@
     "capEditHint": "ដែនកំណត់កំណត់ឡើងវិញនៅថ្ងៃទី 1 ម៉ោង 00:00 UTC ទុកទទេប្រសិនបើគ្មានដែនកំណត់។",
     "monthlyUsageLine": "ខែនេះ {requests} ស្នើសុំ {tokens} តូខិន",
     "quotaBalanceHint": "នៅសល់ {remaining} ក្នុងចំណោម {limit} {metric}",
-    "quotaBalanceLeft": "នៅសល់ {remaining}"
-,
+    "quotaBalanceLeft": "នៅសល់ {remaining}",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",

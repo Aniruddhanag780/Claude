@@ -22,7 +22,7 @@ import { convertDocumentBlock, documentRejectionMessage } from '../lib/anthropic
 import { isClientAbortError, newClientAbortError, newHedgeAbortError, isUpstreamClassificationOutput } from '../lib/error-classify.js';
 import { logRequest } from '../lib/request-log.js';
 import { extractApiToken, timingSafeStringEqual, getStickyModel, setStickyModel } from './proxy.js';
-import { runFallbackLoop, newFallbackState, fallbackRoutingTokens, recordUpstreamSuccess, type ExhaustionBody, setFallbackHeaders, setExhaustionHeaders, type AttemptRecord, type FallbackState } from '../lib/fallback-loop.js';
+import { runFallbackLoop, newFallbackState, fallbackRoutingTokens, recordUpstreamSuccess, type ExhaustionBody, setFallbackHeaders, setExhaustionHeaders, HedgeLostError, withHedgeSignal, type AttemptRecord, type FallbackState } from '../lib/fallback-loop.js';
 import { routedViaValue } from '../lib/header-value.js';
 import { applyTokenBudget, tokenBudgetMessage } from '../lib/guardrails.js';
 import { resolveAnthropicModel, claudeFamilyDiscoveryEntries } from '../services/anthropic-map.js';
@@ -696,26 +696,45 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
     },
     dispatch: async (route, attempt, dispatchCtx) => {
       const contextBudget = routeOutputBudget(route, estimatedInputTokens);
-      const routeOptions = { ...dispatchOptions, contextBudget };
+      const routeOptions = { ...dispatchOptions, contextBudget, signal: withHedgeSignal([clientAbort.signal, hedgeAbort.signal], dispatchCtx.signal) };
       if (stream) {
         try {
           await streamCompletion(res, route, messages, routeOptions, {
             start, attempt, attemptLog, clientGone: () => clientGone, requestedModel, estimatedInputTokens, tools, pinnedModelId,
             sessionId, pinned: resolved.pinned, stickyScope, strategyKey, disarmHedge: dispatchCtx.disarmHedge, state,
+            hedge: { acquireCommit: dispatchCtx.acquireCommit, onCommit: dispatchCtx.onCommit },
           });
           return 'done';
         } catch (err: any) {
           // The stream already committed (message_start sent) and surfaced its
           // own error event; stop without failover or a second response.
           if (err instanceof StreamAlreadyStarted) return 'committed';
+          // #1347 (PR 3): we lost the hedge race — commit claim lost
+          // (HedgeLostError), or the loop aborted us while still silent
+          // (post-commit failures surface as StreamAlreadyStarted above).
+          if (err instanceof HedgeLostError || dispatchCtx.signal?.aborted) {
+            logRequest(route.platform, route.modelId, route.keyId, 'canceled', 0, 0, Date.now() - start, 'hedge race lost: sibling attempt carried the response');
+            return 'hedge_lost';
+          }
           throw err;
         }
       }
 
-      const result = await route.provider.chatCompletion(route.apiKey, messages, route.modelId, routeOptions);
+      let result: any;
+      try {
+        result = await route.provider.chatCompletion(route.apiKey, messages, route.modelId, routeOptions);
+      } catch (err: any) {
+        // #1347 (PR 3): the loop aborted this attempt — the sibling candidate
+        // is carrying the response. Visibility row only, no failure stats.
+        if (dispatchCtx.signal?.aborted) {
+          logRequest(route.platform, route.modelId, route.keyId, 'canceled', 0, 0, Date.now() - start, 'hedge race lost: sibling attempt carried the response');
+          return 'hedge_lost';
+        }
+        throw err;
+      }
       const respMsg = result.choices?.[0]?.message;
       const respText = contentToString(respMsg?.content ?? '');
-      let respToolCalls = respMsg?.tool_calls ?? [];
+      let respToolCalls: any[] = respMsg?.tool_calls ?? [];
 
       // Empty completion → fail over via the shared loop, exactly like the
       // OpenAI route; finish_reason 'length' (whole output budget spent on
@@ -795,6 +814,12 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
         usage: { input_tokens: promptTokens, output_tokens: completionTokens },
       };
 
+      // #1347 (PR 3): hedge commit gate (non-streaming).
+      if (dispatchCtx.acquireCommit && !dispatchCtx.acquireCommit()) {
+        logRequest(route.platform, route.modelId, route.keyId, 'canceled', 0, 0, Date.now() - start, 'hedge race lost: sibling attempt committed first');
+        return 'hedge_lost';
+      }
+      dispatchCtx.onCommit?.();
       res.setHeader('X-Routed-Via', routedViaValue(route.platform, route.modelId));
       setFallbackHeaders(res, attempt, attemptLog);
       logRequest(route.platform, route.modelId, route.keyId, 'success', promptTokens, completionTokens, Date.now() - start, null, null, pinnedModelId, null, 'http');
@@ -825,6 +850,8 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
 class StreamAlreadyStarted extends Error {}
 
 interface StreamCtx {
+  // #1347 (PR 3): hedge race handles (absent in serial dispatch).
+  hedge?: { acquireCommit?: () => boolean; onCommit?: () => void };
   start: number;
   attempt: number;
   attemptLog: AttemptRecord[];
@@ -880,6 +907,14 @@ async function streamCompletion(
 
   const ensureMessageStart = () => {
     if (messageStarted) return;
+    // #1347 (PR 3): hedge commit gate — the first byte is the claim; a loser
+    // logs a 'canceled' row and throws so the catch below turns it into
+    // 'hedge_lost' without failure bookkeeping.
+    if (ctx.hedge?.acquireCommit && !ctx.hedge.acquireCommit()) {
+      logRequest(route.platform, route.modelId, route.keyId, 'canceled', 0, 0, Date.now() - ctx.start, 'hedge race lost: sibling attempt committed first');
+      throw new HedgeLostError();
+    }
+    ctx.hedge?.onCommit?.();
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -1107,6 +1142,7 @@ async function streamCompletion(
     // stops the ladder without benching or an error log row (the socket is
     // gone; nothing to render).
     if (isClientAbortError(err)) throw err;
+    if (err instanceof HedgeLostError) throw err;
     if (messageStarted) {
       // Real payload already reached the client — finish the SSE response
       // honestly instead of leaving Claude Code hanging, and stop the retry loop.

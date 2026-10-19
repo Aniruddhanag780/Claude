@@ -30,7 +30,7 @@ import {
   traceRouteEvent,
   logRequest,
 } from './proxy.js';
-import { runFallbackLoop, newFallbackState, fallbackRoutingTokens, recordUpstreamSuccess, setFallbackHeaders, exhaustionErrorPayload, setExhaustionHeaders, type AttemptRecord } from '../lib/fallback-loop.js';
+import { runFallbackLoop, newFallbackState, fallbackRoutingTokens, recordUpstreamSuccess, setFallbackHeaders, exhaustionErrorPayload, setExhaustionHeaders, HedgeLostError, withHedgeSignal, type AttemptRecord } from '../lib/fallback-loop.js';
 import { routedViaValue, safeHeaderValue } from '../lib/header-value.js';
 import { applyTokenBudget, tokenBudgetMessage } from '../lib/guardrails.js';
 import { samplingParamSchemaFields, pickSamplingParams, type ResponseFormat } from '../lib/sampling-params.js';
@@ -1187,7 +1187,14 @@ export async function handleResponses(req: Request, res: Response): Promise<void
     },
     dispatch: async (route, attempt, ctx) => {
       const contextBudget = routeOutputBudget(route, estimatedInputTokens);
-      const routeOpts = contextBudget != null ? { ...dispatchOpts, contextBudget } : dispatchOpts;
+      // #1347 (PR 3): re-compose the fetch signal per attempt so the loop's
+      // hedge signal (present only on a hedged attempt 0) can abort this
+      // attempt when it loses the race.
+      const routeOpts = {
+        ...dispatchOpts,
+        ...(contextBudget != null ? { contextBudget } : {}),
+        signal: withHedgeSignal([clientAbort.signal, hedgeAbort.signal], ctx.signal),
+      };
       traceRouteEvent('Responses', {
         event: attempt === 0 ? 'start' : 'next',
         requestId: requestGroupId,
@@ -1236,6 +1243,10 @@ export async function handleResponses(req: Request, res: Response): Promise<void
         // on the same connection with no bytes on the wire. Idempotent.
         const commit = () => {
           if (streamStarted) return;
+          // #1347 (PR 3): hedge commit gate — the first byte is the claim; a
+          // loser throws and the catch below turns it into 'hedge_lost'.
+          if (ctx.acquireCommit && !ctx.acquireCommit()) throw new HedgeLostError();
+          ctx.onCommit?.();
           if (ttfbMs === null) ttfbMs = Date.now() - start;
           res.setHeader('Content-Type', 'text/event-stream');
           res.setHeader('Cache-Control', 'no-cache');
@@ -1493,6 +1504,12 @@ export async function handleResponses(req: Request, res: Response): Promise<void
           // client-abort branch stops the ladder without benching or an
           // error log row (the socket is gone; nothing to render).
           if (isClientAbortError(streamErr)) throw streamErr;
+          // #1347 (PR 3): we lost the hedge race — commit claim lost, or the
+          // loop aborted us while still silent. Visibility row only.
+          if (streamErr instanceof HedgeLostError || (ctx.signal?.aborted && !streamStarted)) {
+            logRequest(route.platform, route.modelId, route.keyId, 'canceled', 0, 0, Date.now() - start, 'hedge race lost: sibling attempt carried the response');
+            return 'hedge_lost';
+          }
           // A committed stream can't fail over (bytes already sent) — surface a
           // response.failed event honestly and stop. A pre-commit failure throws
           // through to the shared loop for cooldown + failover.
@@ -1516,17 +1533,28 @@ export async function handleResponses(req: Request, res: Response): Promise<void
         }
       }
 
-      const result = await route.provider.chatCompletion(
-        route.apiKey,
-        messages,
-        route.modelId,
-        routeOpts,
-        quotaContextForRoute(route, 'responses'),
-      );
+      let result: any;
+      try {
+        result = await route.provider.chatCompletion(
+          route.apiKey,
+          messages,
+          route.modelId,
+          routeOpts,
+          quotaContextForRoute(route, 'responses'),
+        );
+      } catch (err: any) {
+        // #1347 (PR 3): the loop aborted this attempt — the sibling candidate
+        // is carrying the response. Visibility row only, no failure stats.
+        if (ctx.signal?.aborted) {
+          logRequest(route.platform, route.modelId, route.keyId, 'canceled', 0, 0, Date.now() - start, 'hedge race lost: sibling attempt carried the response');
+          return 'hedge_lost';
+        }
+        throw err;
+      }
 
       const msg = result.choices[0]?.message;
       let text = contentToString(msg?.content ?? '');
-      let toolCalls = (msg?.tool_calls ?? []).map((tc) => ({
+      let toolCalls = ((msg?.tool_calls ?? []) as any[]).map((tc) => ({
         ...tc,
         function: { ...tc.function, arguments: repairToolArguments(tc.function.arguments, toolSchemas.get(tc.function.name)) },
       }));
@@ -1600,6 +1628,12 @@ export async function handleResponses(req: Request, res: Response): Promise<void
       recordUpstreamSuccess(route, result.usage?.total_tokens ?? (promptTokens + completionTokens), state);
       setStickyModel(messages, route.modelDbId, sessionIdHeader, stickyStrategyKey);
 
+      // #1347 (PR 3): hedge commit gate (non-streaming).
+      if (ctx.acquireCommit && !ctx.acquireCommit()) {
+        logRequest(route.platform, route.modelId, route.keyId, 'canceled', 0, 0, Date.now() - start, 'hedge race lost: sibling attempt committed first');
+        return 'hedge_lost';
+      }
+      ctx.onCommit?.();
       res.setHeader('X-Routed-Via', routedViaValue(route.platform, route.modelId));
       setFallbackHeaders(res, attempt, attemptLog);
       res.json(buildResponseObject({

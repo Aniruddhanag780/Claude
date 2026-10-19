@@ -51,6 +51,7 @@ import { PeakHoursControls } from '@/components/peak-hours-controls'
 import { ReliabilityFloorControl } from '@/components/reliability-floor-control'
 import { ProviderMomentControl } from '@/components/provider-moment-control'
 import { DecisionRoutingPopover, DecisionSetupGuide } from '@/components/decision-routing-popover'
+import { HedgeAfterMsControl } from '@/components/hedge-after-ms-control'
 import { ChainManager } from '@/components/chain-manager'
 
 // `tKey` is the i18n suffix under `strategies.*` (label) and `strategies.*Blurb`.
@@ -526,6 +527,10 @@ export default function FallbackPage() {
                   timeouts and transport drops steer the key without counting
                   against the model's reliability. Off by default. */}
               <ProviderMomentControl />
+
+              {/* Hedged racing (#1347 PR 3): off by default — a hedged request
+                  can bill the provider twice, so the tooltip says so plainly. */}
+              <HedgeAfterMsControl />
             </div>
           )}
 

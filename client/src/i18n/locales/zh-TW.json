@@ -365,7 +365,10 @@
     "decisionSetupHelp": "Decision routing asks a free decision model which strategy fits each request. It needs a key for one of these providers. Both have a free tier, no card needed.",
     "decisionAddKey": "Add {provider} key",
     "decisionNoModels": "No decision model is turned on yet. Turn one on under Models → Decision.",
-    "decisionOpenModels": "Open decision models"
+    "decisionOpenModels": "Open decision models",
+    "hedgeAfterMs": "競速 hedge 延遲",
+    "hedgeAfterMsOff": "關",
+    "hedgeAfterMsHint": "設定後（毫秒），首選候選在該窗口內未發出首位元組時，並行啟動下一個候選——先完成的響應獲勝，另一個被取消（記為 canceled，不算失敗）。被 hedge 的請求可能雙倍消耗上游額度：按 token 計費的渠道兩次都會計費。留空 = 關閉。ROUTER_HEDGE_AFTER_MS 固定該值；HEDGE_AFTER_MS_<平台>=0 可排除單一平台。"
   },
   "penaltyInspector": {
     "title": "路由壓力",
@@ -714,8 +717,7 @@
     "capEditHint": "配額在每月 1 日 00:00 UTC 重設。留空表示無限制。",
     "monthlyUsageLine": "本月 {requests} 次請求，{tokens} tokens",
     "quotaBalanceHint": "剩餘 {remaining} / {limit} {metric}",
-    "quotaBalanceLeft": "剩餘 {remaining}"
-,
+    "quotaBalanceLeft": "剩餘 {remaining}",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
