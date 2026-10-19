@@ -208,4 +208,31 @@ describe('decision routing over HTTP (#1354)', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('x-freellm-routing-strategy')).toBe('balanced; fallback=error');
   });
+
+  it('clears the since-boot picks and the pick cache on demand', async () => {
+    await request('PUT', '/api/fallback/routing', { strategy: 'decision', exploreEnabled: false });
+    decisionChoice = 'smartest';
+    const first = await request('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'prove fermat' }] }, auth());
+    expect(first.status).toBe(200);
+    expect(decisionCalls).toBe(1);
+
+    // Same text again: the pick cache answers, no second decision call.
+    await request('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'prove fermat' }] }, auth());
+    expect(decisionCalls).toBe(1);
+    let get = await request('GET', '/api/fallback/routing');
+    expect(get.body.decision.counts.smartest).toBe(2);
+
+    const reset = await request('POST', '/api/fallback/routing/decision/reset');
+    expect(reset.status).toBe(200);
+    expect(reset.body).toMatchObject({ counts: { smartest: 0, fastest: 0, balanced: 0, reliable: 0 } });
+
+    // Counters are at zero and the cached pick is gone: the next request asks
+    // the decision model again instead of replaying the cached answer.
+    get = await request('GET', '/api/fallback/routing');
+    expect(get.body.decision.counts.smartest).toBe(0);
+    await request('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'prove fermat' }] }, auth());
+    expect(decisionCalls).toBe(2);
+    get = await request('GET', '/api/fallback/routing');
+    expect(get.body.decision.counts.smartest).toBe(1);
+  });
 });

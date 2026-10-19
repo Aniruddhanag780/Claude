@@ -119,6 +119,40 @@ it('saves the chosen model and minimum confidence only on Apply', async () => {
   expect(onSave).toHaveBeenCalledWith({ decisionModel: '@cf/cloudflare/clef-flash', decisionMinProbability: 0.7 })
 })
 
+// The reset escape hatch: after retuning the decision model or its threshold,
+// "Clear" forgets the since-boot picks and the per-turn pick cache in one tap.
+it('offers Clear next to the pick counts and fires onReset', async () => {
+  const onReset = vi.fn()
+  const onSave = vi.fn()
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={client}>
+        <I18nProvider initialLocale="en">
+          <MemoryRouter initialEntries={['/fallback']}>
+            <Routes>
+              <Route path="/fallback" element={<DecisionRoutingPopover status={status()} saving={false} onSave={onSave} onReset={onReset} />} />
+              <Route path="*" element={<WhereAmI />} />
+            </Routes>
+          </MemoryRouter>
+        </I18nProvider>
+      </QueryClientProvider>,
+    )
+  })
+  const trigger = [...container.querySelectorAll('button')].find(b => b.textContent?.includes('Adjust')) as HTMLButtonElement
+  await act(async () => { trigger.click() })
+  await flush()
+  const clear = [...document.body.querySelectorAll('button')].find(b => b.textContent === 'Clear') as HTMLButtonElement
+  expect(clear).toBeTruthy()
+  await act(async () => { clear.click() })
+  expect(onReset).toHaveBeenCalledTimes(1)
+})
+
+it('hides Clear when no reset handler is wired', async () => {
+  await open(status())
+  expect(body()).toContain('Picks since restart')
+  expect([...document.body.querySelectorAll('button')].some(b => b.textContent === 'Clear')).toBe(false)
+})
+
 describe('Decision setup guide (pill without a usable key)', () => {
   const notReady = status({ ready: false, counts: { smartest: 0, fastest: 0, balanced: 0, reliable: 0 }, fallbacks: {} })
 

@@ -24,10 +24,14 @@ const PICKS: { key: keyof DecisionRoutingStatus['counts']; tKey: string }[] = [
 // preset for each request, and how sure it must be before its pick is used.
 // Below that, or when it is slow or unavailable, the request routes as
 // Balanced. Nothing is saved until Apply is pressed.
-export function DecisionRoutingPopover({ status, onSave, saving }: {
+export function DecisionRoutingPopover({ status, onSave, onReset, saving, resetting }: {
   status: DecisionRoutingStatus
   onSave: (settings: { decisionModel: string; decisionMinProbability: number }) => void
+  /** Forget the since-boot picks and the per-turn pick cache. Optional so the
+   *  component keeps working where no reset affordance is wired. */
+  onReset?: () => void
   saving: boolean
+  resetting?: boolean
 }) {
   const { t } = useI18n()
   const [model, setModel] = useState(status.model)
@@ -104,7 +108,24 @@ export function DecisionRoutingPopover({ status, onSave, saving }: {
 
           {total > 0 && (
             <div className="text-xs">
-              <p className="mb-1 text-muted-foreground">{t('strategies.decisionPicks', { total })}</p>
+              <div className="mb-1 flex items-baseline justify-between gap-2">
+                <p className="text-muted-foreground">{t('strategies.decisionPicks', { total })}</p>
+                {onReset && (
+                  // Restart does not clear these, so after retuning the model or
+                  // the threshold the old run skews the picture (and the pick
+                  // cache can hold a stale pick for 30 min). Reset starts both
+                  // fresh.
+                  <button
+                    type="button"
+                    onClick={onReset}
+                    disabled={resetting}
+                    title={t('strategies.decisionClearPicksHelp')}
+                    className="text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors disabled:opacity-50"
+                  >
+                    {t('strategies.decisionClearPicks')}
+                  </button>
+                )}
+              </div>
               <div className="flex flex-wrap gap-x-3 gap-y-1">
                 {PICKS.map(p => (
                   <span key={p.key}>{t(`strategies.${p.tKey}`)} <span className="tabular-nums text-muted-foreground">{status.counts[p.key] ?? 0}</span></span>

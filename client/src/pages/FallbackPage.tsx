@@ -189,6 +189,13 @@ export default function FallbackPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] }),
   })
 
+  // Decision routing: forget the since-boot picks and the per-turn pick cache
+  // so a retuned decision model or threshold is judged on fresh traffic.
+  const resetDecisionMutation = useMutation({
+    mutationFn: () => apiFetch('/api/fallback/routing/decision/reset', { method: 'POST' }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] }),
+  })
+
   const strategy: RoutingStrategy = routing?.strategy ?? 'balanced'
   const keySelection: KeySelectionStrategy = routing?.keySelectionStrategy ?? 'auto'
   const isManual = strategy === 'priority'
@@ -421,6 +428,8 @@ export default function FallbackPage() {
                   status={routing.decision}
                   saving={strategyMutation.isPending}
                   onSave={settings => strategyMutation.mutate({ strategy: 'decision', ...settings })}
+                  onReset={() => resetDecisionMutation.mutate()}
+                  resetting={resetDecisionMutation.isPending}
                 />
               )}
             </div>

@@ -360,6 +360,8 @@
     "decisionMinConfidence": "Minimum confidence",
     "decisionMinConfidenceHelp": "Below this, the request routes as Balanced.",
     "decisionPicks": "Picks since restart ({total})",
+    "decisionClearPicks": "Clear",
+    "decisionClearPicksHelp": "Also forgets the per-turn pick cache, so retuned settings show their effect immediately.",
     "decisionFallbacks": "{count} routed as Balanced (unsure, slow or unavailable)",
     "decisionSetupTitle": "Add a free key to use Decision",
     "decisionSetupHelp": "Decision routing asks a free decision model which strategy fits each request. It needs a key for one of these providers. Both have a free tier, no card needed.",

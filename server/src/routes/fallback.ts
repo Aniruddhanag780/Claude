@@ -18,7 +18,7 @@ import { qualifiedModelMemberId } from '../lib/endpoint-scope.js';
 import { overriddenFieldNames } from '../services/model-state.js';
 import { parseModelScope, scopeAllows } from '../lib/model-scope.js';
 import { getQuotaOutlook } from '../services/quota-outlook.js';
-import { getDecisionRoutingStatus, setDecisionRoutingSettings } from '../services/routing-decision.js';
+import { getDecisionRoutingStatus, resetDecisionRoutingCache, setDecisionRoutingSettings } from '../services/routing-decision.js';
 
 export const fallbackRouter = Router();
 
@@ -44,6 +44,17 @@ fallbackRouter.get('/routing', (_req: Request, res: Response) => {
     // usable, and since-boot picks. Present whatever the active strategy is.
     decision: getDecisionRoutingStatus(),
   });
+});
+
+// POST /routing/decision/reset → forget the decision routing's per-turn pick
+// cache and its since-boot counters (#1354). Same escape-hatch shape as
+// DELETE /penalty-inspector: after retuning the decision model or its minimum
+// confidence, the operator can start the experiment from a clean slate instead
+// of reading stale since-restart numbers (or waiting out the 30-min pick-cache
+// TTL) for the new settings to show their effect.
+fallbackRouter.post('/routing/decision/reset', (_req: Request, res: Response) => {
+  resetDecisionRoutingCache();
+  res.json(getDecisionRoutingStatus());
 });
 
 fallbackRouter.get('/penalty-inspector', (_req: Request, res: Response) => {
