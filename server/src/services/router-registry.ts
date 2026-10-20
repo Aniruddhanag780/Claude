@@ -233,6 +233,21 @@ export function isRegistryInitialized(): boolean {
 }
 
 /**
+ * Apply a runtime change to one model row in the live registry.
+ *
+ * The registry is a SNAPSHOT: a value written straight to the database (a
+ * context window learned from a provider "maximum context length" 400) would
+ * otherwise stay stale in the snapshot until the next full reload, so the
+ * pre-dispatch size gate would keep dispatching a prompt the model just said
+ * it cannot hold (#1479). Upstream read the model row from the database on
+ * every lookup and therefore saw the learned window immediately.
+ */
+export function updateRegistryModelContextWindow(modelId: number, contextWindow: number | null): void {
+  const model = getActiveRegistry().getModelById(modelId);
+  if (model) model.contextWindow = contextWindow;
+}
+
+/**
  * Loads durable configuration from Neon PostgreSQL and builds the in-memory routing registry.
  */
 export async function reloadRoutingRegistry(): Promise<RouterRegistry> {

@@ -3,6 +3,7 @@
 import { getDb, getSetting, setSetting } from '../db/index.js';
 import { isLoopbackOrPrivateUrl } from '../lib/url-guard.js';
 import { parseModelScope, scopeAllows } from '../lib/model-scope.js';
+import { updateRegistryModelContextWindow } from './router-registry.js';
 
 interface Window {
   timestamps: number[];
@@ -1572,5 +1573,11 @@ export function learnContextWindowFromError(modelDbId: number, err: { message?: 
       'UPDATE models SET context_window = ? WHERE id = ? AND (context_window IS NULL OR context_window > ?)',
     ).run(window, modelDbId, window),
   );
-  return result && result.changes > 0 ? window : null;
+  if (!result || result.changes <= 0) return null;
+  // The routing registry is a snapshot, so the learned window has to be pushed
+  // into it as well — otherwise the next request still sizes the model with
+  // the old (too large) window and dispatches a prompt the provider just
+  // rejected.
+  updateRegistryModelContextWindow(modelDbId, window);
+  return window;
 }
