@@ -694,6 +694,26 @@ describe('Analytics API', () => {
       expect(orphan.endpoint).toBe('custom');
     });
 
+    it('returns [] when the window has no errors', async () => {
+      const { status, body } = await request(app, '/api/analytics/errors?range=7d');
+      expect(status).toBe(200);
+      expect(body).toEqual([]);
+    });
+
+    it('keeps a row on the cutoff day (TEXT timestamp boundary)', async () => {
+      // Window is 24h ending at the frozen 2026-05-29T12:00Z, so the cutoff is
+      // '2026-05-28 12:00:00'. A row one hour later is inside the window; a row
+      // one hour earlier is outside. Both are judged against the stored
+      // 'YYYY-MM-DD HH:MM:SS' stamp, not an ISO string (' ' sorts before 'T',
+      // so an ISO cutoff silently dropped the whole cutoff day).
+      insertRaw({ status: 'error', error: 'inside window', createdAt: '2026-05-28 13:00:00' });
+      insertRaw({ status: 'error', error: 'outside window', createdAt: '2026-05-28 11:00:00' });
+
+      const { status, body } = await request(app, '/api/analytics/errors?range=24h');
+      expect(status).toBe(200);
+      expect(body.map((r: any) => r.error)).toEqual(['inside window']);
+    });
+
     it('splits one model id across the relays that served it', async () => {
       // The same model name behind two relays is two different services with
       // two different latencies; one merged 'custom' row describes neither.

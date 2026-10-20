@@ -6,6 +6,7 @@ import { analyticsAggregator } from '../services/analytics-aggregator.js';
 import { FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M } from '../db/model-pricing.js';
 import { searchAnalytics, getSearchAnalytics, type SearchAnalyticsRange } from '../services/search.js';
 import { normalizeBaseUrl } from '../lib/endpoint-scope.js';
+import { providerDisplayName, providerIdFor } from '../lib/provider-identity.js';
 
 export const analyticsRouter = Router();
 
@@ -729,32 +730,42 @@ analyticsRouter.get('/by-client', (_req: Request, res: Response) => {
   res.json([]);
 });
 
-// Recent errors. Reads recent error requests from the database.
+// Recent errors. Reads recent error requests from the database. Joined to the
+// serving key so each error names the endpoint it came from — every custom
+// relay otherwise reads as a bare "custom" (#889).
 analyticsRouter.get('/errors', async (req: Request, res: Response) => {
   try {
     const range = (req.query.range as string) ?? '7d';
-    const cutoff = getCutoffDate(range);
+    // `requests.created_at` is the SQLite-era TEXT stamp ('YYYY-MM-DD HH:MM:SS',
+    // space separator). Comparing it to an ISO '...T...' cutoff silently drops
+    // every row on the cutoff day, because ' ' sorts before 'T'.
+    const since = getSinceTimestamp(range);
     const pool = getPostgresPool();
 
     const dbRes = await pool.query(
-      `SELECT r.id, r.platform, r.model_id, r.error, r.latency_ms, r.created_at
+      `SELECT r.id, r.platform, k.base_url, r.model_id, r.error,
+              r.latency_ms, r.created_at
        FROM requests r
+       LEFT JOIN api_keys k ON k.id = r.key_id
        WHERE r.status = 'error' AND r.created_at >= $1
        ORDER BY r.created_at DESC
        LIMIT 50`,
-      [cutoff.toISOString()]
+      [since]
     );
 
-    res.json(dbRes.rows.map(r => ({
-      id: r.id,
-      platform: r.platform,
-      providerId: r.platform,
-      endpoint: r.platform,
-      modelId: r.model_id,
-      error: r.error,
-      latencyMs: r.latency_ms,
-      createdAt: r.created_at,
-    })));
+    res.json(dbRes.rows.map(r => {
+      const baseUrl: string | null = r.base_url ? normalizeBaseUrl(r.base_url) : null;
+      return {
+        id: r.id,
+        platform: r.platform,
+        providerId: providerIdFor(r.platform, baseUrl),
+        endpoint: providerDisplayName(r.platform, baseUrl),
+        modelId: r.model_id,
+        error: r.error,
+        latencyMs: r.latency_ms,
+        createdAt: r.created_at,
+      };
+    }));
   } catch (err: any) {
     console.error('[analytics] Error fetching errors:', err);
     res.status(500).json({ error: 'Failed to fetch errors' });
