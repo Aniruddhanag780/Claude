@@ -8,6 +8,9 @@ server/data/
 *.db-wal
 *.db-shm
 *.bak
+# Leftover local SQL dumps from the pre-reset fork (real data + encrypted
+# credentials) sitting outside the server/data/ tree. Never commit them.
+server/backups/
 # Auto-generated dev encryption key (written next to the SQLite DB when
 # ENCRYPTION_KEY is unset outside production). Never commit it.
 .encryption-key
