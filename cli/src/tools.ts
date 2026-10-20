@@ -976,6 +976,69 @@ function reasonix(ctx: GenerateContext): Generation {
   };
 }
 
+// ZCode (zcode.z.ai, Z.ai's desktop coding agent + `zcode-app-cli`) keeps its
+// provider registry in ~/.zcode/v2/config.json (ZCODE_PERSONAL_PROVIDER_CONFIG
+// _FILE relocates it; %USERPROFILE%\.zcode on Windows). A custom provider is a
+// `provider.<id>` entry with `kind: "openai-compatible"` — its `options`
+// recognizes apiKey/baseURL/apiKeyRequired/headers, and `models` seeds the
+// picker with per-model context/output limits. ZCode has NO environment-
+// variable lookup for custom providers, so the key has to live in the file;
+// the writer gives it 0600 because it does. The merge keeps any other
+// providers the user already has. ZCode keeps the registry in memory and
+// rewrites the file on exit, hence the quit-before-setup note.
+function zcodeHome(homeDir: string): string {
+  if (process.env.ZCODE_HOME?.trim()) return process.env.ZCODE_HOME.trim();
+  return path.join(homeDir, '.zcode');
+}
+
+function zcode(ctx: GenerateContext): Generation {
+  const model = primaryModel(ctx.models, ctx.requestedModelId);
+  const home = zcodeHome(ctx.homeDir);
+  // Like every other generator, a named profile is a second provider entry so
+  // both routes coexist in ZCode's model picker.
+  const provider = ctx.profile === 'default'
+    ? 'freellmapi'
+    : `freellmapi-${ctx.profile.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}`;
+  const roster = catalogModels(ctx.models);
+  const models = Object.fromEntries(
+    [model, ...roster.filter(entry => entry.id !== model.id)].map(entry => [entry.id, {
+      limit: { context: contextWindow(entry), output: outputLimit(entry) },
+    }]),
+  );
+  return {
+    files: [{
+      path: path.join(home, 'v2', 'config.json'),
+      format: 'json',
+      sensitive: true,
+      value: {
+        provider: {
+          [provider]: {
+            name: ctx.profile === 'default' ? 'FreeLLMAPI' : `FreeLLMAPI (${ctx.profile})`,
+            kind: 'openai-compatible',
+            options: {
+              apiKey: ctx.apiKey,
+              baseURL: v1Url(ctx.url),
+              apiKeyRequired: true,
+              // ZCode only names itself to hosts it knows, so stamp the
+              // identity ourselves — `options.headers` is one of the fields
+              // its provider schema recognizes, and it rides every request.
+              headers: { 'User-Agent': 'zcode' },
+            },
+            source: 'custom',
+            models,
+          },
+        },
+      },
+    }],
+    notes: [
+      'Install ZCode from https://zcode.z.ai (the CLI ships as zcode-app-cli).',
+      'Quit the ZCode desktop app BEFORE running this — it holds the registry in memory and rewrites config.json on exit.',
+      `Open ZCode's model picker (or run /model in the CLI) and pick ${provider}/${model.id}; other providers in the file are kept.`,
+      'The API key lives in ~/.zcode/v2/config.json (written 0600) — ZCode has no env lookup for custom providers.',
+    ],
+  };
+}
+
 function cursor(_ctx: GenerateContext): Generation {
   return {
     files: [],
@@ -1053,6 +1116,7 @@ const metadata = [
   ['hermes', 'Hermes Agent', 'agent', 'file', 'OpenAI Chat', '/v1', 'setup-hermes', 'https://hermes-agent.nousresearch.com/docs/', hermes],
   ['pi', 'Pi', 'code', 'file', 'OpenAI Chat', '/v1', 'setup-pi', 'https://pi.dev/docs/latest/models', pi],
   ['reasonix', 'Reasonix', 'code', 'file', 'OpenAI Chat', '/v1', 'setup-reasonix', 'https://github.com/esengine/DeepSeek-Reasonix/blob/studio/docs/CLI.md#configure-providers', reasonix],
+  ['zcode', 'ZCode', 'code', 'file', 'OpenAI Chat', '/v1', 'setup-zcode', 'https://zcode.z.ai/en/docs/configuration', zcode],
   ['cursor', 'Cursor', 'code', 'guide', 'OpenAI Chat', '/v1', 'setup-cursor', 'https://docs.cursor.com', cursor],
   ['generic', 'Generic OpenAI client', 'agent', 'guide', 'OpenAI Chat', '/v1', 'setup-generic', 'https://github.com/tashfeenahmed/freellmapi', generic],
 ] as const;

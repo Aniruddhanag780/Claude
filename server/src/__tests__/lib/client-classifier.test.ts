@@ -96,6 +96,18 @@ describe('client agent classification', () => {
     }))).not.toBe('reasonix');
   });
 
+  it('recognizes ZCode by the provider header setup-zcode writes', () => {
+    expect(classifyClientAgent(request('/v1/chat/completions', {
+      'user-agent': 'zcode',
+    }))).toBe('zcode');
+    expect(classifyClientAgent(request('/v1/chat/completions', {
+      'user-agent': 'zcode-cli/3.14.5',
+    }))).toBe('zcode');
+    expect(classifyClientAgent(request('/v1/chat/completions', {
+      'user-agent': 'my-api-client/1.0',
+    }))).not.toBe('zcode');
+  });
+
   it('separates MiMo Code from the OpenCode it derives from', () => {
     expect(classifyClientAgent(request('/v1/chat/completions', {
       'user-agent': 'mimo/0.4.0',

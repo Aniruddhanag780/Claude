@@ -59,6 +59,7 @@ context windows.
 | **Hermes Agent** | `setup-hermes` | `http://localhost:3001/v1` | OpenAI Chat (`provider: custom`) |
 | **Pi** | `setup-pi` | `http://localhost:3001/v1` | OpenAI Chat (`api: openai-completions`) |
 | **Reasonix** | `setup-reasonix` | `http://localhost:3001/v1` | OpenAI Chat (`kind = "openai"`) |
+| **ZCode** | `setup-zcode` | `http://localhost:3001/v1` | OpenAI Chat (`kind: "openai-compatible"`) |
 | **QwenPaw** | Manual setup | `http://localhost:3001/v1` | OpenAI Chat (`chat.completions`) |
 | **Cursor** | `setup-cursor` prints the guide | public `https://…/v1` | OpenAI Chat |
 | **Anything else** | `setup-generic` prints a ready block | `http://localhost:3001/v1` | OpenAI Chat |
@@ -66,7 +67,7 @@ context windows.
 The root-vs-`/v1` distinction matters: Claude Code expects the server root
 because it appends the Anthropic Messages path. OpenAI-compatible clients in
 this table—including Cline, Aider, Goose, Codex, Continue, OpenCode, Qwen,
-Roo, Kilo, Crush, MiMo Code, AtomCode, OpenClaw, Hermes Agent, Pi, Reasonix, QwenPaw, and DeepSeek Harness—expect their configured
+Roo, Kilo, Crush, MiMo Code, AtomCode, OpenClaw, Hermes Agent, Pi, Reasonix, ZCode, QwenPaw, and DeepSeek Harness—expect their configured
 base URL to include `/v1`.
 
 ### DeepSeek Harness (`dsh`)
@@ -266,6 +267,28 @@ readout at $0. Reasonix Studio only lists the providers in
 `[desktop].provider_access` when that list is set, so add `"freellmapi"` there
 (or under Settings → Model → Access). Reasonix sends `Reasonix/<version>` as
 its user agent, which is what the Agents page's "seen recently" badge keys on.
+
+### ZCode (`zcode`)
+
+[ZCode](https://zcode.z.ai) is Z.ai's desktop coding agent (with a matching
+CLI) built for its GLM models, and any custom OpenAI-compatible provider can
+join its registry. `setup-zcode` merges one `freellmapi` entry into
+`~/.zcode/v2/config.json` — `kind: "openai-compatible"`, the gateway's `/v1`
+as `baseURL`, and the live catalog seeded under `models` with per-model
+context/output limits. ZCode has no environment-variable lookup for custom
+providers, so the key lives in that file; the writer protects it with `0600`
+and backs up the file first. Your other providers are kept, and a rerun
+replaces only the `freellmapi` entry.
+
+```bash
+npx freellmapi setup-zcode --url http://localhost:3001 --api-key <unified-key>
+```
+
+Quit the ZCode app before running it — it keeps the registry in memory and
+rewrites `config.json` on exit. Pick `freellmapi/<model>` in ZCode's model
+picker (or `/model` in the CLI). `--profile <name>` adds a second
+`freellmapi-<name>` entry instead. The provider sends `User-Agent: zcode`,
+which is what the Agents page's "seen recently" badge keys on.
 
 ### QwenPaw
 

@@ -597,6 +597,39 @@ describe('tool generators', () => {
     expect(config.content).toContain('display_name = "FreeLLMAPI (Work Box)"');
   });
 
+  it('writes ZCode as an openai-compatible provider in ~/.zcode/v2/config.json', () => {
+    // ZCode has no env lookup for custom providers — the key has to live in
+    // the file, which the writer then protects with 0600 (sensitive: true).
+    const [config] = tools.find(tool => tool.id === 'zcode')!.generate(context).files;
+    expect(asPosix(config.path)).toBe('/home/tester/.zcode/v2/config.json');
+    expect(config.format).toBe('json');
+    expect(config.sensitive).toBe(true);
+    const value = config.value as {
+      provider: Record<string, {
+        name: string; kind: string; source: string;
+        options: { apiKey: string; baseURL: string; apiKeyRequired: boolean; headers: Record<string, string> };
+        models: Record<string, { limit: { context: number; output: number } }>;
+      }>;
+    };
+    const provider = value.provider.freellmapi;
+    expect(provider.kind).toBe('openai-compatible');
+    expect(provider.source).toBe('custom');
+    expect(provider.name).toBe('FreeLLMAPI');
+    expect(provider.options.baseURL).toBe('http://localhost:3000/v1');
+    expect(provider.options.apiKey).toBe('freellmapi-test-key');
+    expect(provider.options.apiKeyRequired).toBe(true);
+    expect(provider.options.headers['User-Agent']).toBe('zcode');
+    expect(Object.keys(provider.models)).toEqual(['fast-coder', 'reasoning-model']);
+    expect(provider.models['fast-coder'].limit.context).toBe(131072);
+  });
+
+  it('gives a named ZCode profile its own provider entry', () => {
+    const [config] = tools.find(tool => tool.id === 'zcode')!.generate({ ...context, profile: 'Work Box' }).files;
+    const provider = (config.value as { provider: Record<string, { name: string }> }).provider;
+    expect(Object.keys(provider)).toEqual(['freellmapi-work-box']);
+    expect(provider['freellmapi-work-box'].name).toBe('FreeLLMAPI (Work Box)');
+  });
+
   it('writes AtomCode as default_provider plus a typed [providers.freellmapi] table', () => {
     // AtomCode ignores a bare `[provider]` table: it looks up the table named
     // by the root `default_provider` key, and only a `type = "openai"` table

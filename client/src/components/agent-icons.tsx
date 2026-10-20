@@ -309,6 +309,17 @@ const brands: Record<string, Brand> = {
       </g>
     ),
   },
+  // ZCode (Z.ai): a bold Z in a rounded square — Z.ai ships no simple flat
+  // mark, so this is our own letterform in the site's Z-code blue.
+  zcode: {
+    tint: '[--mk:#4E6FFF] dark:[--mk:#8DA2FF]',
+    art: (
+      <g stroke="var(--mk, currentColor)" fill="none" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="4.5" y="4.5" width="15" height="15" rx="4" strokeWidth="1.6" opacity="0.55" />
+        <path d="M8.5 9.5h7l-7 5h7" strokeWidth="1.9" />
+      </g>
+    ),
+  },
   // Any other OpenAI-compatible client: our own terminal glyph, not a brand
   // mark, so it keeps the page foreground colour on both tiles.
   generic: {

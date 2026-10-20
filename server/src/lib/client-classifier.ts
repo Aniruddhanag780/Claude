@@ -19,6 +19,7 @@ export const CLIENT_AGENTS = [
   'hermes-agent',
   'pi',
   'reasonix',
+  'zcode',
   'cursor',
   'gemini-cli',
   'zed',
@@ -80,6 +81,9 @@ export function classifyClientAgent(req: Request): ClientAgent {
   if (/\bpi-coding-agent\b|^pi\/\d/.test(ua)) return 'pi';
   // Reasonix sends `Reasonix/<version>` to every endpoint on its own.
   if (/^reasonix\//.test(ua)) return 'reasonix';
+  // ZCode (Z.ai's agent) ships as `zcode` / `zcode-app-cli` and names itself
+  // only to hosts it knows; the generator's provider header sends `zcode`.
+  if (/\bzcode\b/.test(ua)) return 'zcode';
   if (/opencode/.test(ua)) return 'opencode';
   if (/\bcline\b/.test(ua)) return 'cline';
   // The Roo Code extension and CLI send `RooCode/<version>`.
