@@ -976,65 +976,88 @@ function reasonix(ctx: GenerateContext): Generation {
   };
 }
 
-// ZCode (zcode.z.ai, Z.ai's desktop coding agent + `zcode-app-cli`) keeps its
-// provider registry in ~/.zcode/v2/config.json (ZCODE_PERSONAL_PROVIDER_CONFIG
-// _FILE relocates it; %USERPROFILE%\.zcode on Windows). A custom provider is a
-// `provider.<id>` entry with `kind: "openai-compatible"` — its `options`
-// recognizes apiKey/baseURL/apiKeyRequired/headers, and `models` seeds the
-// picker with per-model context/output limits. ZCode has NO environment-
-// variable lookup for custom providers, so the key has to live in the file;
-// the writer gives it 0600 because it does. The merge keeps any other
-// providers the user already has. ZCode keeps the registry in memory and
-// rewrites the file on exit, hence the quit-before-setup note.
-function zcodeHome(homeDir: string): string {
-  if (process.env.ZCODE_HOME?.trim()) return process.env.ZCODE_HOME.trim();
-  return path.join(homeDir, '.zcode');
+// ZCode (zcode.z.ai, Z.ai's coding agent). The Desktop app and the CLI share
+// one provider registry, ~/.zcode/v2/provider_config.json (underscore), which
+// ZCODE_PERSONAL_PROVIDER_CONFIG_FILE can relocate. A custom provider is an
+// entry in config.providerConfigRules.providerRules with an `api-key` access
+// block and an `openai-chat-completions` endpoint; each model gets a "smart"
+// rule in modelConfigRules.providerModelRules that pins only its context and
+// output limits. Those are arrays, so the merge replaces only the entries this
+// provider owns and keeps every other provider and rule. ZCode has no
+// environment-variable lookup for a custom provider's key, so the key lives in
+// the file, which the writer keeps at 0600. Live checked against the ZCode
+// runtime 0.16.9 (zcode-app-cli 3.15.3): ~/.zcode/v2/config.json and
+// ~/.zcode/cli/config.json are legacy files it reads once, for migration.
+function zcodeProviderFile(homeDir: string): string {
+  const override = process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE?.trim();
+  if (override && path.isAbsolute(override)) return override;
+  return path.join(homeDir, '.zcode', 'v2', 'provider_config.json');
 }
 
 function zcode(ctx: GenerateContext): Generation {
   const model = primaryModel(ctx.models, ctx.requestedModelId);
-  const home = zcodeHome(ctx.homeDir);
   // Like every other generator, a named profile is a second provider entry so
   // both routes coexist in ZCode's model picker.
   const provider = ctx.profile === 'default'
     ? 'freellmapi'
     : `freellmapi-${ctx.profile.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}`;
-  const roster = catalogModels(ctx.models);
-  const models = Object.fromEntries(
-    [model, ...roster.filter(entry => entry.id !== model.id)].map(entry => [entry.id, {
-      limit: { context: contextWindow(entry), output: outputLimit(entry) },
-    }]),
-  );
+  const ids = [model, ...catalogModels(ctx.models).filter(entry => entry.id !== model.id)];
   return {
     files: [{
-      path: path.join(home, 'v2', 'config.json'),
+      path: zcodeProviderFile(ctx.homeDir),
       format: 'json',
       sensitive: true,
+      arrays: {
+        'config.providerConfigRules.providerRules': { ownedBy: { providerId: provider } },
+        'config.modelConfigRules.providerModelRules': { ownedBy: { providerId: provider } },
+        'config.modelConfigRules.manualProviderModelRules': { ownedBy: { providerId: provider } },
+        'config.providerOrder': { union: true },
+      },
       value: {
-        provider: {
-          [provider]: {
-            name: ctx.profile === 'default' ? 'FreeLLMAPI' : `FreeLLMAPI (${ctx.profile})`,
-            kind: 'openai-compatible',
-            options: {
-              apiKey: ctx.apiKey,
-              baseURL: v1Url(ctx.url),
-              apiKeyRequired: true,
-              // ZCode only names itself to hosts it knows, so stamp the
-              // identity ourselves — `options.headers` is one of the fields
-              // its provider schema recognizes, and it rides every request.
-              headers: { 'User-Agent': 'zcode' },
-            },
-            source: 'custom',
-            models,
+        schemaVersion: 1,
+        config: {
+          providerConfigRules: {
+            providerRules: [{
+              providerId: provider,
+              templateId: null,
+              providerName: ctx.profile === 'default' ? 'FreeLLMAPI' : `FreeLLMAPI (${ctx.profile})`,
+              enabled: true,
+              config: {
+                group: 'standard-personal',
+                access: { type: 'api-key', apiKey: ctx.apiKey },
+                api: { type: 'openai-chat-completions', baseUrl: v1Url(ctx.url) },
+                personalModelIds: ids.map(entry => entry.id),
+                modelOrder: ids.map(entry => entry.id),
+                visibility: 'visible',
+              },
+            }],
           },
+          modelConfigRules: {
+            providerModelRules: ids.map(entry => ({
+              providerId: provider,
+              modelId: entry.id,
+              config: {
+                enabled: true,
+                properties: { contextWindow: contextWindow(entry) },
+                optionSpecs: {
+                  maxOutputTokens: { max: outputLimit(entry), map: '{"max_tokens": maxOutputTokens}' },
+                },
+              },
+            })),
+            // Present but empty: ZCode expects both rule arrays, and the merge
+            // drops any manual rule this provider had so a model never sits in both.
+            manualProviderModelRules: [],
+          },
+          providerOrder: [provider],
+          defaultModelSelection: { providerId: provider, modelId: model.id },
         },
       },
     }],
     notes: [
-      'Install ZCode from https://zcode.z.ai (the CLI ships as zcode-app-cli).',
-      'Quit the ZCode desktop app BEFORE running this — it holds the registry in memory and rewrites config.json on exit.',
-      `Open ZCode's model picker (or run /model in the CLI) and pick ${provider}/${model.id}; other providers in the file are kept.`,
-      'The API key lives in ~/.zcode/v2/config.json (written 0600) — ZCode has no env lookup for custom providers.',
+      'Install ZCode from https://zcode.z.ai (or the community terminal client: npm i -g zcode-app-cli).',
+      'Quit ZCode Desktop before running this so it does not save its in-memory registry over the file.',
+      `${provider}/${model.id} is now the default model; pick another under ${provider} in the model picker (or /model in the CLI). Other providers are kept.`,
+      'The API key lives in the provider file (written 0600): ZCode has no env lookup for custom providers.',
     ],
   };
 }

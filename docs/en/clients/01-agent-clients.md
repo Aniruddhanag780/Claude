@@ -59,7 +59,7 @@ context windows.
 | **Hermes Agent** | `setup-hermes` | `http://localhost:3001/v1` | OpenAI Chat (`provider: custom`) |
 | **Pi** | `setup-pi` | `http://localhost:3001/v1` | OpenAI Chat (`api: openai-completions`) |
 | **Reasonix** | `setup-reasonix` | `http://localhost:3001/v1` | OpenAI Chat (`kind = "openai"`) |
-| **ZCode** | `setup-zcode` | `http://localhost:3001/v1` | OpenAI Chat (`kind: "openai-compatible"`) |
+| **ZCode** | `setup-zcode` | `http://localhost:3001/v1` | OpenAI Chat (`openai-chat-completions`) |
 | **QwenPaw** | Manual setup | `http://localhost:3001/v1` | OpenAI Chat (`chat.completions`) |
 | **Cursor** | `setup-cursor` prints the guide | public `https://…/v1` | OpenAI Chat |
 | **Anything else** | `setup-generic` prints a ready block | `http://localhost:3001/v1` | OpenAI Chat |
@@ -270,25 +270,30 @@ its user agent, which is what the Agents page's "seen recently" badge keys on.
 
 ### ZCode (`zcode`)
 
-[ZCode](https://zcode.z.ai) is Z.ai's desktop coding agent (with a matching
-CLI) built for its GLM models, and any custom OpenAI-compatible provider can
-join its registry. `setup-zcode` merges one `freellmapi` entry into
-`~/.zcode/v2/config.json` — `kind: "openai-compatible"`, the gateway's `/v1`
-as `baseURL`, and the live catalog seeded under `models` with per-model
-context/output limits. ZCode has no environment-variable lookup for custom
-providers, so the key lives in that file; the writer protects it with `0600`
-and backs up the file first. Your other providers are kept, and a rerun
-replaces only the `freellmapi` entry.
+[ZCode](https://zcode.z.ai) is Z.ai's coding agent, built for its GLM models.
+Its Desktop app and CLI share one provider registry,
+`~/.zcode/v2/provider_config.json` (`ZCODE_PERSONAL_PROVIDER_CONFIG_FILE`
+moves it). `setup-zcode` adds a `freellmapi` provider there: an `api-key`
+access block, an `openai-chat-completions` endpoint at the gateway's `/v1`,
+and one model rule per catalog model with its context and output limits. It
+also makes `freellmapi/auto` the default model. Your other providers, their
+model rules and your provider order are kept, and a rerun replaces only the
+`freellmapi` entries. ZCode has no environment-variable lookup for custom
+providers, so the key lives in that file; the writer backs the file up first
+and keeps it at `0600`.
 
 ```bash
 npx freellmapi setup-zcode --url http://localhost:3001 --api-key <unified-key>
 ```
 
-Quit the ZCode app before running it — it keeps the registry in memory and
-rewrites `config.json` on exit. Pick `freellmapi/<model>` in ZCode's model
-picker (or `/model` in the CLI). `--profile <name>` adds a second
-`freellmapi-<name>` entry instead. The provider sends `User-Agent: zcode`,
-which is what the Agents page's "seen recently" badge keys on.
+Quit ZCode Desktop before running it so the app does not save its in-memory
+registry over the file. Pick another `freellmapi/<model>` in the model picker
+(or `/model` in the CLI). `--profile <name>` adds a second
+`freellmapi-<name>` provider instead. ZCode tags every request with its own
+`x-zcode-app-version` and `x-title: Z Code@…` headers, which is what the
+Agents page's "seen recently" badge keys on. The older `~/.zcode/v2/config.json`
+and `~/.zcode/cli/config.json` files are only read once, for migration, so
+editing them has no effect.
 
 ### QwenPaw
 
