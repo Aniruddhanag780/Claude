@@ -8,8 +8,7 @@ import { getProvider, hasProvider, getAllProviders } from '../providers/index.js
 import { getDb } from '../db/index.js';
 import { isSearchPlatform } from '../lib/search-platforms.js';
 import type { Platform, KeyStatus } from '@freellmapi/shared/types.js';
-import { endpointScopeForBaseUrl, normalizeBaseUrl } from '../lib/endpoint-scope.js';
-import { ensureModelInProfiles } from '../services/profile-models.js';
+import { normalizeBaseUrl } from '../lib/endpoint-scope.js';
 import {
   customEndpointKeyIds,
   resolveCustomEndpointKey,
@@ -17,7 +16,7 @@ import {
   setCustomEndpointGroup,
   normalizeGroupLabel,
 } from '../services/custom-endpoint.js';
-import { registerCustomModels, registerCustomChatModels } from '../services/custom-model-register.js';
+import { registerCustomModels } from '../services/custom-model-register.js';
 import { registerCustomMediaModel } from '../services/custom-media-register.js';
 import { probeEmbeddingDimensions, registerCustomEmbeddingModel } from '../services/embeddings.js';
 import { clearCooldownsForKey } from '../services/ratelimit.js';

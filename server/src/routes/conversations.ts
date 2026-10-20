@@ -58,14 +58,14 @@ const createSchema = z.object({
   messages: messagesSchema.optional(),
   model: modelSchema.optional(),
   systemPrompt: systemPromptSchema.optional(),
-});
+}).strict();
 
 const updateSchema = z.object({
   title: z.string().trim().max(MAX_TITLE_LEN).optional(),
   messages: messagesSchema.optional(),
   model: modelSchema.optional(),
   systemPrompt: systemPromptSchema.optional(),
-});
+}).strict();
 
 interface ConversationRow {
   id: number;
