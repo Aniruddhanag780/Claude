@@ -23,7 +23,7 @@ const DEFAULT_MIN_SPACING_MS = 1000;
 
 /** Base cadence of the scheduled pass (jittered per run, see
  *  nextHealthCheckDelayMs), tunable via HEALTH_CHECK_INTERVAL_MS (#1593):
- *  fleets on rate-limit-strict providers (SERP Search's 30 calls / 5 hours)
+ *  fleets on providers that dislike frequent key checks
  *  want a slower pass; a fresh install being shaken out wants a faster one.
  *  Read once at module load — the scheduler re-arms from the same constant. */
 function getCheckIntervalMs(): number {

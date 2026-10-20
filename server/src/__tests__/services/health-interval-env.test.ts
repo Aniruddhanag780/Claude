@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 // #1593: the health pass cadence was a hardcoded 5 minutes, which operators on
-// rate-limit-strict providers (SERP Search: 30 calls / 5 hours, #1599) cannot
-// slow down. HEALTH_CHECK_INTERVAL_MS now configures it, with a 60s floor so a
+// providers that dislike frequent key checks cannot slow down.
+// HEALTH_CHECK_INTERVAL_MS now configures it, with a 60s floor so a
 // typo can never turn the pass into provider-visible flood. The constants are
 // read at module load, so every case re-imports the module with a fresh cache.
 
@@ -23,7 +23,7 @@ describe('HEALTH_CHECK_INTERVAL_MS env (#1593)', () => {
     expect(m.HEALTH_CHECK_INTERVAL_MS).toBe(DEFAULT_MS);
   });
 
-  it('honours a slower cadence (SERP Search fleets)', async () => {
+  it('honours a slower cadence', async () => {
     vi.stubEnv('HEALTH_CHECK_INTERVAL_MS', '1800000'); // 30 min
     const m = await loadHealth();
     expect(m.HEALTH_CHECK_INTERVAL_MS).toBe(1_800_000);
