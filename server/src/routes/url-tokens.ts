@@ -8,9 +8,9 @@ import { validateUrlToken } from '../services/url-tokens.js';
 
 export const urlTokenRouter = Router({ mergeParams: true });
 
-urlTokenRouter.use(async (req: Request, res: Response, next: NextFunction) => {
+urlTokenRouter.use((req: Request, res: Response, next: NextFunction) => {
   const token = String(req.params.token ?? '');
-  if (!(await validateUrlToken(token))) {
+  if (!validateUrlToken(token)) {
     res.status(401).json({
       error: {
         message: 'Invalid or revoked URL token',

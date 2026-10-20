@@ -80,9 +80,9 @@ describe('tool-argument schema verdict — remaining surfaces', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(async () => {
+  beforeAll(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    await initDb(':memory:');
+    initDb(':memory:');
     app = createApp();
     key = getUnifiedApiKey();
 

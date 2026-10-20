@@ -4,7 +4,7 @@ import { encrypt } from '../../lib/crypto.js';
 import { pruneRequestAnalytics } from '../../services/request-retention.js';
 import { routePinnedModel, routeRequest } from '../../services/router.js';
 import { routingExhaustionBody, setExhaustionHeaders } from '../../lib/fallback-loop.js';
-import * as ledgerMigration from '../../db/migrations/008_legacy_key_usage.js';
+import * as ledgerMigration from '../../db/migrations/20260914_000001_key_monthly_usage.js';
 import {
   reserveMonthlyBudget,
   getMonthlyBudgetCaps,
@@ -152,12 +152,12 @@ describe('key-budget: monthly caps (#1158)', () => {
     }
   });
 
-  it('backfills the ledger once and does not double count when up is rerun', async () => {
+  it('backfills the ledger once and does not double count when up is rerun', () => {
     insertKey();
-    await ledgerMigration.down(getDb());
+    ledgerMigration.down(getDb());
     recordSuccess(inThisMonth());
-    await ledgerMigration.up(getDb());
-    await ledgerMigration.up(getDb());
+    ledgerMigration.up(getDb());
+    ledgerMigration.up(getDb());
     expect(getMonthlyUsage(keyId)).toEqual({ requests: 1, tokens: 150 });
     recordSuccess(inThisMonth());
     expect(getMonthlyUsage(keyId)).toEqual({ requests: 2, tokens: 300 });

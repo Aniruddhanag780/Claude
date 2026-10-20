@@ -7,9 +7,9 @@ import { routeRequest, hasOtherUsableKey, setRoutingStrategy } from '../../servi
 // ever serve the models it lists, and must not count as a usable sibling for
 // models outside it. NULL scope is today's behavior, verbatim.
 describe('Router model scope (#657)', () => {
-  beforeAll(async () => {
+  beforeAll(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    await initDb(':memory:');
+    initDb(':memory:');
   });
 
   beforeEach(() => {

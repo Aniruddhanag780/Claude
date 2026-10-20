@@ -1,4 +1,3 @@
-import { reloadRoutingRegistry } from '../services/router-registry.js';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
@@ -19,7 +18,7 @@ import { getActiveProfileId, ensureModelInProfiles } from '../services/profile-m
 import { endpointScopeForBaseUrl, endpointScopeOfKey, qualifiedModelMemberId } from '../lib/endpoint-scope.js';
 import { clearCustomModelTombstone, recordCustomModelTombstone } from '../services/custom-model-tombstone.js';
 import { customModelSeed } from '../services/custom-model-seed.js';
-import { routePinnedModel } from '../services/router.js';
+import { routePinnedModel, failureAttributionFor } from '../services/router.js';
 import { logRequest } from '../lib/request-log.js';
 import { withKeyProxy } from '../lib/proxy.js';
 import { sanitizeProviderErrorMessage } from '../lib/error-redaction.js';
@@ -194,7 +193,6 @@ modelsRouter.post('/', (req: Request, res: Response) => {
   });
 
   const createdId = insertModel();
-  reloadRoutingRegistry();
 
   res.status(201).json({
     success: true,
@@ -244,7 +242,6 @@ modelsRouter.delete('/custom/:id', (req: Request, res: Response) => {
     pruneUnavailableSavedFusionConfig();
   });
   remove();
-  reloadRoutingRegistry();
   res.json({ success: true });
 });
 
@@ -329,7 +326,6 @@ modelsRouter.patch('/:id', (req: Request, res: Response) => {
     }
   });
   applyUpdate();
-  reloadRoutingRegistry();
 
   res.json({ success: true, id });
 });
@@ -363,7 +359,6 @@ modelsRouter.delete('/:id', (req: Request, res: Response) => {
     pruneUnavailableSavedFusionConfig();
   });
   remove();
-  reloadRoutingRegistry();
 
   res.json({ success: true, tombstoned: isCatalogManagedModel(row) });
 });
@@ -423,7 +418,7 @@ modelsRouter.post('/:id/test', async (req: Request, res: Response) => {
     const latencyMs = Date.now() - startTime;
     const error = sanitizeProviderErrorMessage(err instanceof Error ? err.message : String(err));
     logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0,
-      latencyMs, error, null, route.modelId, null, 'model-test');
+      latencyMs, error, null, route.modelId, null, 'model-test', failureAttributionFor(err));
     res.json({ success: false, modelId: route.modelId, latencyMs, error });
   } finally {
     route.release?.();

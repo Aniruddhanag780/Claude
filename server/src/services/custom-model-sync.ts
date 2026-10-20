@@ -99,8 +99,7 @@ export async function runCustomModelSync(db: Db): Promise<CustomModelSyncResult>
         // #926: the operator deleted this model (or the key that owned it) and
         // expects it to stay gone. The sync's "add only" contract must not turn
         // a deliberate deletion into the next pass's "new model".
-        const tomb = isCustomModelTombstoned(db, scope, model.id);
-        if (tomb) {
+        if (isCustomModelTombstoned(db, scope, model.id)) {
           result.tombstoned += 1;
           continue;
         }

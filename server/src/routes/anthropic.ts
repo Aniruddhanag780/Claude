@@ -9,7 +9,7 @@ import type {
   ChatToolChoice,
   ChatContentBlock,
 } from '@freellmapi/shared/types.js';
-import { routeRequest, resolveModelGroupCandidates, resolveRoutingChain, resolveStickyPreference, routingReserveTokens, type RouteResult, type ResolvedChain, type ChainRow } from '../services/router.js';
+import { routeRequest, resolveModelGroupCandidates, resolveRoutingChain, resolveStickyPreference, routingReserveTokens, failureAttributionFor, type RouteResult, type ResolvedChain, type ChainRow } from '../services/router.js';
 import { getSetting, getUnifiedApiKey } from '../db/index.js';
 import { contentToString, estimateInputTokens } from '../lib/content.js';
 import { routeOutputBudget } from '../lib/output-cap.js';
@@ -32,6 +32,7 @@ import { buildModelListing } from '../services/model-listing.js';
 import { compressRequest, formatCompressionHeader } from '../services/compression/pipeline.js';
 import { normalizeMessageImages } from '../lib/image-normalize.js';
 import { maybeServeAnthropicWebSearch, serverToolUseToText, webSearchResultToText } from '../lib/anthropic-web-search.js';
+import { applyDecisionRouting, routingStrategyHeader } from '../services/routing-decision.js';
 
 // Anthropic-compatible Messages API (`POST /v1/messages`). This is a thin
 // translation layer over the SAME router/fallback/analytics machinery the
@@ -592,7 +593,11 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
   //
   // Only the pinned paths change. A Claude family alias mapped to 'auto' (the
   // default for opus/sonnet/haiku/default) resolves to no model at all and
-  // keeps auto-routing over the full chain exactly as before.
+  // keeps auto-routing over the full chain exactly as before. A tier selector
+  // (`tier:pro|mid|normal`) resolves to the tier's whole enabled pool and
+  // routes over it as a chain, so the tier acts as a capability band the
+  // router scores inside — failover stays within the band instead of falling
+  // off to an unrelated model.
   let groupChain: ChainRow[] | undefined;
   // Sticky scope for a group-pinned request: bucket by the pinned catalog id so
   // the session prefers its last successful provider of THIS model without
@@ -610,6 +615,16 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
         groupChain = chain;
         stickyScope = resolved.modelId;
       }
+    }
+  } else if (resolved.tierDbIds && resolved.tierDbIds.length > 0) {
+    const chain = resolveModelGroupCandidates(resolved.tierDbIds);
+    if (chain.length > 0) {
+      groupChain = chain;
+      // Scoped per tier, not per model: a session on tier:sonnet keeps its
+      // provider affinity when the operator re-points the family at another
+      // tier selector only if the scope follows the tier. Use the family's
+      // first tier id — stable per tier selector, distinct from any model id.
+      stickyScope = `tier:${resolved.tierDbIds[0]}`;
     }
   }
 
@@ -655,6 +670,13 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
     }
   });
   const dispatchOptions = { ...completionOptions, signal: AbortSignal.any([clientAbort.signal, hedgeAbort.signal]) };
+
+  // Decision routing (#1354): with the 'decision' strategy on, a decision
+  // model picks which preset (Smartest / Fastest / Balanced / Most reliable)
+  // this turn routes with. Skipped when the client pinned a model or the
+  // conversation is sticky to one. Any doubt routes as Balanced.
+  const routingPick = await applyDecisionRouting(messages, { pinned: pinnedModelId != null || preferredModel != null, signal: clientAbort.signal });
+  if (routingPick && !res.headersSent) res.setHeader('X-FreeLLM-Routing-Strategy', routingStrategyHeader(routingPick));
 
   await runFallbackLoop({
     maxRetries: MAX_RETRIES,
@@ -780,7 +802,7 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
       return 'done';
     },
     logFailure: (route, err) => {
-      logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, sanitizeProviderErrorMessage(err.message), null, pinnedModelId, null, 'http');
+      logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, sanitizeProviderErrorMessage(err.message), null, pinnedModelId, null, 'http', failureAttributionFor(err));
     },
     onFatal: (route, err, attempt) => {
       setFallbackHeaders(res, attempt, attemptLog);
@@ -922,7 +944,7 @@ async function streamCompletion(
         if (!messageStarted) throw new Error(`in-band provider error from ${route.displayName}: ${msg}`);
         writeSse(res, 'error', { type: 'error', error: { type: 'api_error', message: `Provider error (${route.displayName}): ${sanitizeProviderErrorMessage(String(msg))}` } });
         res.end();
-        logRequest(route.platform, route.modelId, route.keyId, 'error', ctx.estimatedInputTokens, outputChars, Date.now() - ctx.start, `in-band error frame: ${sanitizeProviderErrorMessage(String(msg))}`, null, ctx.pinnedModelId, null, 'http');
+        logRequest(route.platform, route.modelId, route.keyId, 'error', ctx.estimatedInputTokens, outputChars, Date.now() - ctx.start, `in-band error frame: ${sanitizeProviderErrorMessage(String(msg))}`, null, ctx.pinnedModelId, null, 'http', failureAttributionFor({ message: String(msg) }));
         throw new StreamAlreadyStarted();
       }
 
@@ -1090,7 +1112,7 @@ async function streamCompletion(
       // honestly instead of leaving Claude Code hanging, and stop the retry loop.
       writeSse(res, 'error', { type: 'error', error: { type: 'api_error', message: `Provider error (${route.displayName}): stream interrupted` } });
       try { res.end(); } catch { /* socket gone */ }
-      logRequest(route.platform, route.modelId, route.keyId, 'error', ctx.estimatedInputTokens, outputChars, Date.now() - ctx.start, sanitizeProviderErrorMessage(err.message), null, ctx.pinnedModelId, null, 'http');
+      logRequest(route.platform, route.modelId, route.keyId, 'error', ctx.estimatedInputTokens, outputChars, Date.now() - ctx.start, sanitizeProviderErrorMessage(err.message), null, ctx.pinnedModelId, null, 'http', failureAttributionFor(err));
       throw new StreamAlreadyStarted();
     }
     // Headers never sent — bubble to the outer loop for failover.

@@ -1,7 +1,7 @@
 import { getDb, getSetting, setSetting } from '../db/index.js';
-import { getActiveRegistry, isRegistryInitialized } from './router-registry.js';
-import type { ModelRecord } from './router-registry.js';
 import { getProvider, hasProvider, resolveProvider } from '../providers/index.js';
+import { decrypt } from '../lib/crypto.js';
+import { decryptProxyUrl } from '../lib/key-proxy.js';
 import {
   canMakeRequest,
   canUseTokens,
@@ -26,161 +26,25 @@ import {
   observedSpeedRank, TIMEOUT_LATENCY_CAP_MS,
   type HeadroomThresholds,
 } from './scoring.js';
-import { TIMEOUT_ERROR_MARKERS } from '../lib/error-classify.js';
+import { TIMEOUT_ERROR_MARKERS, isProviderMomentFailure } from '../lib/error-classify.js';
 import { checkMonthlyBudget, reserveMonthlyBudget } from './key-budget.js';
 import { applyModelWeightOverride, getModelWeightOverrides } from './model-weight-overrides.js';
 import { modelsWithOverriddenField, getCatalogModelTombstone } from './model-state.js';
 import { parseBudget } from '../lib/budget.js';
 import { platformDropsResponseFormat } from '../lib/sampling-params.js';
+import { passesContextWindowFloor } from '../lib/min-context-window.js';
 import { isUnifyEnabled, getModelGroups, resolveRequestedIdForDispatch } from './model-groups.js';
 import { getActiveProfileId } from './profile-models.js';
+import { getClientContext } from '../lib/client-context.js';
 import { customEndpointKeyIds } from './custom-endpoint.js';
 import { isDegraded } from './degradation.js';
 import { modelStatsKey, endpointScopeForBaseUrl } from '../lib/endpoint-scope.js';
 import { isToolBenched } from '../lib/tool-capability.js';
 import { parseModelScope, scopeAllows } from '../lib/model-scope.js';
 import { getKeyQuotaHeadroom, inferQuotaPoolKey } from './provider-quota.js';
-import { decrypt } from '../lib/crypto.js';
-import { decryptProxyUrl } from '../lib/key-proxy.js';
 import type { BaseProvider } from '../providers/base.js';
 import type { Platform } from '@freellmapi/shared/types.js';
 import type { Db } from '../db/types.js';
-
-// ── PostgreSQL-backed synchronous data access ──────────────────────────────
-// The router used to read the SQLite `api_keys`/`models` schema via
-// getDb().prepare(). Against the PostgreSQL pool that shim is a no-op (`.all()`
-// → [], `.get()` → undefined), so routing silently saw zero keys and zero models.
-// The in-memory RouterRegistry — loaded from `providers`/`credentials`/`models`
-// on boot and re-loaded on every key/model mutation — is the synchronous data
-// source now. Legacy columns the new schema dropped get neutral defaults:
-// null rpm/rpd/tpm/tpd = no rate windows, '' size_label + rank 0 = no
-// intelligence opinion (all equal → score 1), '' budget = no headroom opinion,
-// null key_id = any of the platform's keys, '' endpoint_scope = catalog row.
-function registryChainRow(m: ModelRecord): ChainRow {
-  return {
-    model_db_id: m.id,
-    priority: m.priority ?? 0,
-    enabled: m.enabled ? 1 : 0,
-    platform: m.providerKey,
-    model_id: m.modelId,
-    display_name: m.displayName,
-    intelligence_rank: m.intelligenceRank ?? 0,
-    size_label: m.sizeLabel ?? '',
-    monthly_token_budget: '',
-    rpm_limit: null,
-    rpd_limit: null,
-    tpm_limit: null,
-    tpd_limit: null,
-    supports_vision: m.capabilities.vision ? 1 : 0,
-    supports_tools: m.capabilities.tools ? 1 : 0,
-    context_window: m.contextWindow,
-    key_id: null,
-    endpoint_scope: '',
-  };
-}
-
-/** Every enabled model as a ChainRow, highest model priority first. */
-function registryChainRows(): ChainRow[] {
-  return getActiveRegistry().getAllModels()
-    .filter(m => m.enabled)
-    .sort((a, b) => b.priority - a.priority || a.id - b.id)
-    .map(registryChainRow);
-}
-
-/** A single enabled model as a ChainRow, or undefined. */
-function registryModelChainRow(modelDbId: number): ChainRow | undefined {
-  const m = getActiveRegistry().getModelById(modelDbId);
-  if (m) return m.enabled ? registryChainRow(m) : undefined;
-  try {
-    const db = getDb();
-    const row = db.prepare(`
-      SELECT m.id as model_db_id, COALESCE(fc.priority, 0) as priority,
-             m.enabled as enabled,
-             m.platform, m.model_id, m.display_name, m.intelligence_rank,
-             m.size_label, m.monthly_token_budget,
-             m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-             m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
-      FROM models m
-      LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
-      WHERE m.id = ?
-    `).get(modelDbId) as ChainRow | undefined;
-    if (row && (row.enabled as any) !== 0 && (row.enabled as any) !== false) return row;
-  } catch {}
-  return undefined;
-}
-
-/**
- * Every credential that can currently serve `platform`, mirroring the legacy
- * "enabled = 1 AND status IN ('healthy', 'unknown')" key filter. Disabled keys
- * and active cooldowns (circuitState DISABLED / cooldown_until in the future)
- * are excluded up front, exactly as a persisted `status` column once was; the
- * per-key gates inside selectKeyForModel still re-check cooldown as defense.
- * A DEGRADED key stays routable so its failures stay visible through per-key
- * stats and last_health_error (#640).
- */
-const decryptCache = new Map<number, { ct: string; plain: string }>();
-function cachedDecrypt(keyId: number, ct: string, iv: string, authTag: string): string {
-  const hit = decryptCache.get(keyId);
-  if (hit && hit.ct === ct) return hit.plain;
-  const plain = decrypt(ct, iv, authTag);
-  decryptCache.set(keyId, { ct, plain });
-  return plain;
-}
-
-function registryKeysForPlatform(platform: string): RegistryKey[] {
-  try {
-    const db = getDb();
-    const rows = db.prepare(`
-      SELECT id, platform, label as name, encrypted_key, iv, auth_tag, model_scope_json, base_url, proxy_encrypted, proxy_iv, proxy_auth_tag
-      FROM api_keys
-      WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')
-    `).all(platform) as any[];
-    if (rows && rows.length > 0) {
-      const out: RegistryKey[] = [];
-      for (const r of rows) {
-        let decryptedKey = '';
-        try {
-          decryptedKey = cachedDecrypt(r.id, r.encrypted_key, r.iv, r.auth_tag);
-        } catch {
-          // Keep decryptedKey empty; selectKeyForModel will mark status='error' in api_keys
-        }
-        const proxyUrl = decryptProxyUrl(r);
-        out.push({
-          id: r.id,
-          platform: r.platform,
-          name: r.name,
-          decryptedKey,
-          model_scope_json: r.model_scope_json,
-          baseUrl: r.base_url,
-          proxyUrl,
-          encrypted_key: r.encrypted_key,
-          iv: r.iv,
-          auth_tag: r.auth_tag,
-        } as any);
-      }
-      return out;
-    }
-  } catch {}
-
-  const reg = getActiveRegistry();
-  const now = Date.now();
-  const out: RegistryKey[] = [];
-  for (const c of reg.getAllCredentials()) {
-    if (c.providerKey !== platform) continue;
-    if (!c.enabled) continue;
-    if (c.runtime.circuitState === 'DISABLED') continue;
-    if (c.runtime.cooldownUntil > now) continue;
-    out.push({
-      id: c.id,
-      platform,
-      name: c.name,
-      decryptedKey: c.decryptedKey,
-      model_scope_json: c.modelScope ? JSON.stringify(c.modelScope) : null,
-      baseUrl: reg.getProviderById(c.providerId)?.baseUrl ?? null,
-    });
-  }
-  return out;
-}
 
 class RouteError extends Error {
   status: number;
@@ -266,18 +130,23 @@ export function summarizeExhaustion(
   return `All models exhausted: ${total} route${total === 1 ? '' : 's'} checked (${parts.join(', ')}). ${EXHAUSTION_ADVICE}${etaSuffix}${keylessSuffix}`;
 }
 
-// Credential as the router consumes it: already decrypted by the registry
-// loader, so the hot path never re-opens the AES-GCM ciphertext.
-interface RegistryKey {
+interface KeyRow {
   id: number;
   platform: string;
-  name: string;
-  decryptedKey: string;
+  label: string | null;
+  encrypted_key: string;
+  iv: string;
+  auth_tag: string;
+  status: string;
+  enabled: number;
+  base_url: string | null;
   // Optional JSON array of model_id strings this key may serve; NULL = every
   // model of its platform (#657).
   model_scope_json: string | null;
-  baseUrl: string | null;
-  proxyUrl?: string;
+  // Encrypted per-key proxy override (#590); all NULL = no override.
+  proxy_encrypted: string | null;
+  proxy_iv: string | null;
+  proxy_auth_tag: string | null;
 }
 
 // Chain row joined with the model fields the bandit needs to score it.
@@ -567,6 +436,45 @@ export function setMinReliabilityFloor(floor?: number | null): void {
   setSetting(MIN_RELIABILITY_FLOOR_KEY, String(floor));
 }
 
+// ── Provider-moment failure attribution (opt-in, #1347) ────────────────────
+// When on, a failed attempt whose cause is a provider moment (429 / 5xx /
+// timeout / transport) is tagged `failure_attribution = 'provider_moment'`
+// instead of being scored as model evidence: it still steers the key (the
+// cooldown ladder is untouched), but it drops out of the reliability stats
+// and the model-level failure penalties. Off by default, so existing
+// installs keep the exact current scoring. The env var wins over the
+// dashboard setting so a self-host can pin the behaviour without the UI.
+export const PROVIDER_MOMENT_ATTRIBUTION_KEY = 'routing_provider_moment_attribution';
+
+export function isProviderMomentAttributionEnabled(): boolean {
+  const env = process.env.ROUTER_PROVIDER_MOMENT_ATTRIBUTION;
+  if (env !== undefined && env.trim() !== '') {
+    const v = env.trim().toLowerCase();
+    if (v === '1' || v === 'true' || v === 'on') return true;
+    if (v === '0' || v === 'false' || v === 'off') return false;
+  }
+  return getSetting(PROVIDER_MOMENT_ATTRIBUTION_KEY) === '1';
+}
+
+export function setProviderMomentAttribution(enabled: boolean): void {
+  if (enabled) {
+    setSetting(PROVIDER_MOMENT_ATTRIBUTION_KEY, '1');
+  } else {
+    getDb().prepare('DELETE FROM settings WHERE key = ?').run(PROVIDER_MOMENT_ATTRIBUTION_KEY);
+  }
+  // The stats cache bakes the attribution filter into its SQL, so a toggle
+  // must not wait for the cache TTL to change routing.
+  refreshStatsCache(getDb(), true);
+}
+
+// The failure_attribution value for one attempt error, or null when the
+// feature is off or the error is not a provider-moment failure. Route call
+// sites pass this straight through to logRequest.
+export function failureAttributionFor(err: any): string | null {
+  if (!isProviderMomentAttributionEnabled()) return null;
+  return isProviderMomentFailure(err) ? 'provider_moment' : null;
+}
+
 // ── Task-type weight share (persisted) ─────────────────────────────────────
 // #1127 follow-up: the bandit bias applied for a declared/derived task type
 // moves `share` of one axis onto the other (code: speed → intelligence; chat:
@@ -602,7 +510,7 @@ export const EXPLORE_CHANCE = 0.1;
 /** A model counts as "has data" once its decay-weighted success+failure
  *  pseudo-count reaches this many samples. */
 export const EXPLORE_MIN_SAMPLES = 5;
-const VALID_STRATEGIES: RoutingStrategy[] = ['priority', 'balanced', 'smartest', 'fastest', 'reliable', 'custom'];
+const VALID_STRATEGIES: RoutingStrategy[] = ['priority', 'balanced', 'smartest', 'fastest', 'reliable', 'custom', 'decision'];
 
 export function getRoutingStrategy(): RoutingStrategy {
   const raw = getSetting(STRATEGY_KEY);
@@ -844,7 +752,19 @@ export function setCommunityPriors(priors: CommunityPriorMap): number {
 function weightsWithPeak(strategy: RoutingStrategy): { weights: RoutingWeights | null; adjusted: boolean } {
   if (strategy === 'priority') return { weights: null, adjusted: false };
   if (strategy === 'custom') return { weights: getCustomWeights(), adjusted: false };
+  // 'decision' outside a picked request (display, fusion, background) scores
+  // as Balanced, the same preset an unsure or unavailable decision falls to.
+  if (strategy === 'decision') return weightsWithPeak('balanced');
   return peakAdjustedWeights(BANDIT_PRESETS[strategy], strategy, getPeakHoursConfig());
+}
+
+/** The strategy THIS request routes with. Under 'decision' (#1354) that is the
+ *  preset the decision model picked for the request, else Balanced; every
+ *  other strategy is used as set. */
+export function effectiveRoutingStrategy(): RoutingStrategy {
+  const strategy = getRoutingStrategy();
+  if (strategy !== 'decision') return strategy;
+  return getClientContext().routingStrategy ?? 'balanced';
 }
 
 function weightsFor(strategy: RoutingStrategy): RoutingWeights | null {
@@ -937,6 +857,13 @@ export function refreshStatsCache(db: Db, force = false): void {
   // count × ≤7 day buckets — so the finer grain keeps the same one-query,
   // 60s-cached shape. Aggregated two ways below: rolled up per model (ordering)
   // and per key (in-model key selection, #580).
+  // #1347 (PR 1): with provider-moment attribution on, tagged rows are the
+  // provider's bad minute, not the model — keep them out of every aggregate
+  // here (reliability denominator, timeouts, speed) exactly like 'canceled'
+  // rows are kept out today.
+  const pmExcluded = isProviderMomentAttributionEnabled()
+    ? " AND (failure_attribution IS NULL OR failure_attribution <> 'provider_moment')"
+    : '';
   const buckets = db.prepare(`
     SELECT platform, model_id, key_id,
       CAST((julianday('now') - julianday(created_at)) AS INTEGER) AS age_days,
@@ -949,7 +876,7 @@ export function refreshStatsCache(db: Db, force = false): void {
       SUM(CASE WHEN ${IS_TIMEOUT_SQL} THEN 1 ELSE 0 END) AS timeouts,
       SUM(CASE WHEN ${IS_TIMEOUT_SQL} THEN MIN(MAX(latency_ms, 0), ${TIMEOUT_LATENCY_CAP_MS}) ELSE 0 END) AS timeout_lat
     FROM requests
-    WHERE created_at >= ? AND status <> 'canceled'
+    WHERE created_at >= ? AND status <> 'canceled'${pmExcluded}
     GROUP BY platform, model_id, key_id, age_days
   `).all(since) as Array<{
     platform: string; model_id: string; key_id: number | null; age_days: number; total: number; successes: number;
@@ -1144,23 +1071,6 @@ interface ScoredEntry {
 // must scale to match or the headroom guardrail damps a multi-key model to the
 // floor after just one account's worth of tokens.
 function usableKeyCountsByPlatform(db: Db): Map<string, number> {
-  if (process.env.NODE_ENV !== 'test') {
-    try {
-      const registryCreds = getActiveRegistry()?.getAllCredentials() ?? [];
-      if (registryCreds.length > 0) {
-        const now = Date.now();
-        const counts = new Map<string, number>();
-        for (const c of registryCreds) {
-          if (!c.enabled) continue;
-          if (c.runtime.circuitState === 'DISABLED') continue;
-          if (c.runtime.cooldownUntil > now) continue;
-          counts.set(c.providerKey, (counts.get(c.providerKey) ?? 0) + 1);
-        }
-        return counts;
-      }
-    } catch {}
-  }
-
   // Per-request GROUP BY on api_keys; only changes on key writes. Real-time
   // correctness is backed by selectKeyForModel's live per-key checks — a stale
   // count can at worst walk one extra candidate, never route to a dead key.
@@ -1421,52 +1331,9 @@ function getActiveChain(db: Db): ChainRow[] {
       && Date.now() - chainCache.at < CHAIN_CACHE_TTL_MS) {
     return chainCache.rows.slice();
   }
-  let rows: ChainRow[] = [];
-  try {
-    if (profileId != null) {
-      rows = db.prepare(`
-        SELECT pm.model_db_id, pm.priority, pm.enabled,
-               m.platform, m.model_id, m.display_name, m.intelligence_rank,
-               m.size_label, m.monthly_token_budget,
-               m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-               m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
-        FROM profile_models pm
-        JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
-        WHERE pm.profile_id = ?
-        ORDER BY pm.priority ASC
-      `).all(profileId) as ChainRow[];
-    } else {
-      rows = db.prepare(`
-        SELECT fc.model_db_id, fc.priority, fc.enabled,
-               m.platform, m.model_id, m.display_name, m.intelligence_rank,
-               m.size_label, m.monthly_token_budget,
-               m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-               m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
-        FROM fallback_config fc
-        JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
-        ORDER BY fc.priority ASC
-      `).all() as ChainRow[];
-    }
-  } catch {
-    rows = [];
-  }
-
-  if ((!rows || rows.length === 0) && profileId == null) {
-    try {
-      const regRows = registryChainRows();
-      if (regRows && regRows.length > 0) return regRows;
-    } catch {}
-  }
-
-  chainCache = { db, profileId, rows, at: Date.now() };
-  return rows.slice();
-}
-
-function getChainByProfileName(db: Db, name: string): ChainRow[] | null {
-  try {
-    const profile = db.prepare("SELECT id FROM profiles WHERE LOWER(name) = ?").get(name.toLowerCase()) as { id: number } | undefined;
-    if (!profile) return null;
-    return db.prepare(`
+  let rows: ChainRow[];
+  if (profileId != null) {
+    rows = db.prepare(`
       SELECT pm.model_db_id, pm.priority, pm.enabled,
              m.platform, m.model_id, m.display_name, m.intelligence_rank,
              m.size_label, m.monthly_token_budget,
@@ -1476,39 +1343,60 @@ function getChainByProfileName(db: Db, name: string): ChainRow[] | null {
       JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
       WHERE pm.profile_id = ?
       ORDER BY pm.priority ASC
-    `).all(profile.id) as ChainRow[];
-  } catch {
-    return null;
-  }
-}
-
-function getChainByGlobalSort(db: Db, globalAxis: string): ChainRow[] {
-  let allEnabled: ChainRow[] = [];
-  try {
-    const profileId = getActiveProfileId(db);
-    const chainEnabled = profileId != null
-      ? 'COALESCE(pm.enabled, fc.enabled, 1) = 1'
-      : 'COALESCE(fc.enabled, 1) = 1';
-    allEnabled = db.prepare(`
-      SELECT m.id as model_db_id, 0 as priority, 1 as enabled,
+    `).all(profileId) as ChainRow[];
+  } else {
+    rows = db.prepare(`
+      SELECT fc.model_db_id, fc.priority, fc.enabled,
              m.platform, m.model_id, m.display_name, m.intelligence_rank,
              m.size_label, m.monthly_token_budget,
              m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
              m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
-      FROM models m
-      LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
-      ${profileId != null ? 'LEFT JOIN profile_models pm ON pm.profile_id = ? AND pm.model_db_id = m.id' : ''}
-      WHERE m.enabled = 1 AND ${chainEnabled}
-    `).all(...(profileId != null ? [profileId] : [])) as ChainRow[];
-  } catch {
-    allEnabled = [];
+      FROM fallback_config fc
+      JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
+      ORDER BY fc.priority ASC
+    `).all() as ChainRow[];
   }
+  chainCache = { db, profileId, rows, at: Date.now() };
+  return rows.slice();
+}
 
-  if (!allEnabled || allEnabled.length === 0) {
-    try {
-      allEnabled = registryChainRows();
-    } catch {}
-  }
+function getChainByProfileName(db: Db, name: string): ChainRow[] | null {
+  const profile = db.prepare("SELECT id FROM profiles WHERE LOWER(name) = ?").get(name.toLowerCase()) as { id: number } | undefined;
+  if (!profile) return null;
+
+  return db.prepare(`
+    SELECT pm.model_db_id, pm.priority, pm.enabled,
+           m.platform, m.model_id, m.display_name, m.intelligence_rank,
+           m.size_label, m.monthly_token_budget,
+           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+           m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+    FROM profile_models pm
+    JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
+    WHERE pm.profile_id = ?
+    ORDER BY pm.priority ASC
+  `).all(profile.id) as ChainRow[];
+}
+
+function getChainByGlobalSort(db: Db, globalAxis: string): ChainRow[] {
+  // A global sort ignores the chain's ORDER, not its enable flags: a model the
+  // operator switched off — in the catalog or just for auto routing — stays off
+  // here too (#634). Models with no chain row yet (fresh catalog rows) default
+  // to in, so the sort still spans the whole catalog.
+  const profileId = getActiveProfileId(db);
+  const chainEnabled = profileId != null
+    ? 'COALESCE(pm.enabled, fc.enabled, 1) = 1'
+    : 'COALESCE(fc.enabled, 1) = 1';
+  const allEnabled = db.prepare(`
+    SELECT m.id as model_db_id, 0 as priority, 1 as enabled,
+           m.platform, m.model_id, m.display_name, m.intelligence_rank,
+           m.size_label, m.monthly_token_budget,
+           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+           m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+    FROM models m
+    LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
+    ${profileId != null ? 'LEFT JOIN profile_models pm ON pm.profile_id = ? AND pm.model_db_id = m.id' : ''}
+    WHERE m.enabled = 1 AND ${chainEnabled}
+  `).all(...(profileId != null ? [profileId] : [])) as ChainRow[];
 
   const strategyMap: Record<string, RoutingStrategy> = {
     'smart': 'smartest',
@@ -1518,7 +1406,7 @@ function getChainByGlobalSort(db: Db, globalAxis: string): ChainRow[] {
     'balanced': 'balanced'
   };
   const strat = strategyMap[globalAxis] || 'balanced';
-
+  
   return orderChain(allEnabled, strat);
 }
 
@@ -1605,7 +1493,7 @@ const KEY_SCORE_WEIGHTS = { reliability: 0.75, speed: 0.25 };
  * speed is deterministic. Returns null when NO key has recorded data, telling
  * the caller to keep the legacy round-robin rotation (no signal → no ranking).
  */
-function orderKeysByScore<T extends { id: number }>(entry: ChainRow, keys: T[]): T[] | null {
+function orderKeysByScore(entry: ChainRow, keys: KeyRow[]): KeyRow[] | null {
   if (keys.length < 2 || !keyStatsCache) return null;
   const prefix = `${modelStatsKey(entry.platform, entry.model_id, entry.endpoint_scope)}:`;
   if (!keys.some(k => keyStatsCache!.has(prefix + k.id))) return null;
@@ -1657,7 +1545,7 @@ function quotaWeightingApplies(entry: ChainRow): boolean {
  * Every gate, the custom-endpoint filter and the skip tally stay in the one
  * walk that follows.
  */
-function orderKeysByRemainingQuota<T extends { id: number }>(entry: ChainRow, ordered: T[]): T[] {
+function orderKeysByRemainingQuota(entry: ChainRow, ordered: KeyRow[]): KeyRow[] {
   const headroom = getKeyQuotaHeadroom(entry.platform as Platform);
   if (headroom.size === 0) return ordered;
   // Hoisted out of the comparator: sort calls it O(n log n) times, and the
@@ -1682,6 +1570,14 @@ function orderKeysByRemainingQuota<T extends { id: number }>(entry: ChainRow, or
 // encrypted_key, so stale entries can never be served and there is no hook to
 // wire. ponytail: unbounded Map; a keys page refresh prunes nothing, but one
 // entry is ~64 bytes and key counts are human-scale.
+const decryptCache = new Map<number, { ct: string; plain: string }>();
+function cachedDecrypt(keyId: number, ct: string, iv: string, authTag: string): string {
+  const hit = decryptCache.get(keyId);
+  if (hit && hit.ct === ct) return hit.plain;
+  const plain = decrypt(ct, iv, authTag);
+  decryptCache.set(keyId, { ct, plain });
+  return plain;
+}
 
 function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: Set<string>, diag?: string[]): RouteResult | null {
   const db = getDb();
@@ -1693,7 +1589,9 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
   }
   const provider = getProvider(entry.platform as Platform)!;
 
-  const allKeys = registryKeysForPlatform(entry.platform);
+  const allKeys = db.prepare(
+    "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
+  ).all(entry.platform) as KeyRow[];
   if (allKeys.length === 0) {
     diag?.push(`${label}: no enabled+healthy key for platform`);
     return null;
@@ -1778,31 +1676,25 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
     // fallback exhaustion path rather than blocking here.
     if (!checkMonthlyBudget(key.id, estimatedTokens).allowed) { note('monthly-budget-cap'); continue; }
 
-    let decryptedKey = key.decryptedKey;
-    if (!decryptedKey && (key as any).encrypted_key && (key as any).iv && (key as any).auth_tag) {
-      try {
-        decryptedKey = cachedDecrypt(key.id, (key as any).encrypted_key, (key as any).iv, (key as any).auth_tag);
-      } catch {
-        db.prepare("UPDATE api_keys SET status = 'error', last_checked_at = datetime('now') WHERE id = ?")
-          .run(key.id);
-        note('decrypt-error');
-        continue;
-      }
+    let decryptedKey: string;
+    try {
+      decryptedKey = cachedDecrypt(key.id, key.encrypted_key, key.iv, key.auth_tag);
+    } catch {
+      db.prepare("UPDATE api_keys SET status = 'error', last_checked_at = datetime('now') WHERE id = ?")
+        .run(key.id);
+      note('decrypt-error');
+      continue;
     }
-    if (!decryptedKey) { note('decrypt-error'); continue; }
 
     const resolvedProvider = entry.platform === 'custom'
-      ? resolveProvider('custom', key.baseUrl)
+      ? resolveProvider('custom', key.base_url)
       : provider;
     if (!resolvedProvider) { note('no-resolved-provider'); continue; }
 
     roundRobinIndex.set(rrKey, idx);
     // Taken only once the key has cleared every gate and is definitely being
     // returned, so a rejected candidate never consumes concurrency budget.
-    // Per-key proxy overrides (#590) live on upstream's `api_keys` columns; the
-    // fork's registry reads `credentials`, which has no proxy columns, so the
-    // registry path always means "no override" and the global proxy applies.
-    const proxyUrl = key.proxyUrl ?? '';
+    const proxyUrl = decryptProxyUrl(key);
     const budget = reserveMonthlyBudget(key.id, estimatedTokens);
     if (!budget.allowed) { note('monthly-budget-cap'); continue; }
     const leaseId = acquireLease(entry.platform, entry.model_id, key.id, estimatedTokens);
@@ -1812,7 +1704,8 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
       modelDbId: entry.model_db_id,
       apiKey: decryptedKey,
       keyId: key.id,
-      keyLabel: key.name || null,
+      keyLabel: key.label || null,
+      // Decrypted once here, at the point the row is already in hand (#590).
       proxyUrl,
       platform: entry.platform,
       displayName: entry.display_name,
@@ -1848,45 +1741,44 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
  * model, not just one of its keys.
  */
 export function hasOtherUsableKey(modelDbId: number, excludingKeyId: number, skipKeys?: Set<string>): boolean {
-  let platform = '';
-  let modelId = '';
-  let limits = { rpm: null, rpd: null, tpm: null, tpd: null };
-  let customKeyId: number | null = null;
+  const db = getDb();
+  const m = db.prepare(`
+    SELECT platform, model_id, rpm_limit, rpd_limit, tpm_limit, tpd_limit, key_id
+      FROM models WHERE id = ?
+  `).get(modelDbId) as {
+    platform: string; model_id: string;
+    rpm_limit: number | null; rpd_limit: number | null;
+    tpm_limit: number | null; tpd_limit: number | null; key_id: number | null;
+  } | undefined;
+  if (!m) return false;
 
-  try {
-    const db = getDb();
-    const row = db.prepare(`
-      SELECT platform, model_id, rpm_limit, rpd_limit, tpm_limit, tpd_limit, key_id
-        FROM models WHERE id = ?
-    `).get(modelDbId) as any;
-    if (row) {
-      platform = row.platform;
-      modelId = row.model_id;
-      limits = { rpm: row.rpm_limit, rpd: row.rpd_limit, tpm: row.tpm_limit, tpd: row.tpd_limit };
-      customKeyId = row.key_id;
-    }
-  } catch {}
+  const limits = { rpm: m.rpm_limit, rpd: m.rpd_limit, tpm: m.tpm_limit, tpd: m.tpd_limit };
+  const keys = db.prepare(
+    "SELECT id, model_scope_json FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
+  ).all(m.platform) as { id: number; model_scope_json: string | null }[];
 
-  if (!platform) {
-    const regM = getActiveRegistry().getModelById(modelDbId);
-    if (!regM) return false;
-    platform = regM.providerKey;
-    modelId = regM.modelId;
-  }
-
-  const keys = registryKeysForPlatform(platform);
+  // Keys of the model's own custom endpoint (#212, #619); a key belonging to a
+  // DIFFERENT endpoint cannot serve it, so it doesn't count as an alternative.
+  const endpointKeyIds = m.platform === 'custom' && m.key_id != null
+    ? customEndpointKeyIds(db, m.key_id)
+    : null;
 
   for (const k of keys) {
     if (k.id === excludingKeyId) continue;
-    if (customKeyId != null && k.id !== customKeyId) continue;
-    if (!scopeAllows(parseModelScope(k.model_scope_json), modelId)) continue;
-    if (skipKeys?.has(`${platform}:${modelId}:${k.id}`)) continue;
-    if (isOnCooldown(platform, modelId, k.id)) continue;
-    if (!canUseProvider(platform, k.id)) continue;
-    if (!canUseProviderMinute(platform, k.id)) continue;
-    if (!canMakeRequest(platform, modelId, k.id, limits)) continue;
-    if (!canUseTokens(platform, modelId, k.id, 1, limits)) continue;
-    if (!canUseProviderTokens(platform, k.id, modelId, 1)) continue;
+    if (endpointKeyIds && !endpointKeyIds.has(k.id)) continue;
+    // A sibling scoped away from this model can never serve it (#657) — counting
+    // it would wrongly suppress the model-level penalty this gate exists for.
+    if (!scopeAllows(parseModelScope(k.model_scope_json), m.model_id)) continue;
+    if (skipKeys?.has(`${m.platform}:${m.model_id}:${k.id}`)) continue;
+    if (isOnCooldown(m.platform, m.model_id, k.id)) continue;
+    if (!canUseProvider(m.platform, k.id)) continue;
+    if (!canUseProviderMinute(m.platform, k.id)) continue;
+    if (!canMakeRequest(m.platform, m.model_id, k.id, limits)) continue;
+    // A per-minute token spike on the failed key doesn't mean a fresh key lacks
+    // headroom; a nominal 1-token probe only rules out a key already at its
+    // TPM/TPD ceiling.
+    if (!canUseTokens(m.platform, m.model_id, k.id, 1, limits)) continue;
+    if (!canUseProviderTokens(m.platform, k.id, m.model_id, 1)) continue;
     return true;
   }
   return false;
@@ -1914,42 +1806,37 @@ export function hasUsableKeyForModel(modelDbId: number): boolean {
  */
 export function routableKeyIdsForModel(modelDbId: number): number[] {
   const db = getDb();
-  let platform: string | undefined;
-  let modelId: string | undefined;
-  let keyId: number | null | undefined;
+  const m = db.prepare('SELECT platform, model_id, key_id FROM models WHERE id = ?')
+    .get(modelDbId) as { platform: string; model_id: string; key_id: number | null } | undefined;
+  if (!m) return [];
 
-  const m = getActiveRegistry().getModelById(modelDbId);
-  if (m) {
-    platform = m.providerKey;
-    modelId = m.modelId;
-    keyId = null;
-  } else {
-    try {
-      const row = db.prepare('SELECT platform, model_id, key_id FROM models WHERE id = ?')
-        .get(modelDbId) as { platform: string; model_id: string; key_id: number | null } | undefined;
-      if (!row) return [];
-      platform = row.platform;
-      modelId = row.model_id;
-      keyId = row.key_id;
-    } catch {
-      return [];
-    }
-  }
+  const keys = db.prepare(
+    "SELECT id, model_scope_json FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
+  ).all(m.platform) as { id: number; model_scope_json: string | null }[];
 
-  const endpointKeyIds = platform === 'custom' && keyId != null
-    ? customEndpointKeyIds(db, keyId)
+  const endpointKeyIds = m.platform === 'custom' && m.key_id != null
+    ? customEndpointKeyIds(db, m.key_id)
     : null;
 
-  return registryKeysForPlatform(platform)
-    .filter(k => (!endpointKeyIds || endpointKeyIds.has(k.id)) && scopeAllows(parseModelScope(k.model_scope_json), modelId!))
+  return keys
+    .filter(k => !endpointKeyIds || endpointKeyIds.has(k.id))
+    .filter(k => scopeAllows(parseModelScope(k.model_scope_json), m.model_id))
     .map(k => k.id);
 }
 
 /**
  * Fetch a single enabled model's chain row by its db id.
  */
-function getModelChainRow(_db: Db, modelDbId: number): ChainRow | undefined {
-  return registryModelChainRow(modelDbId);
+function getModelChainRow(db: Db, modelDbId: number): ChainRow | undefined {
+  return db.prepare(`
+    SELECT m.id as model_db_id, 0 as priority, 1 as enabled,
+           m.platform, m.model_id, m.display_name, m.intelligence_rank,
+           m.size_label, m.monthly_token_budget,
+           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+           m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+    FROM models m
+    WHERE m.id = ? AND m.enabled = 1
+  `).get(modelDbId) as ChainRow | undefined;
 }
 
 /**
@@ -1971,30 +1858,28 @@ function getModelChainRow(_db: Db, modelDbId: number): ChainRow | undefined {
  */
 export const CONTEXT_WINDOW_SAFETY_FACTOR = 1.25;
 
-// Platforms whose pre-dispatch trim guard already caps the dispatched input
-// below the live context ceiling (lib/content.ts truncateMessagesForGithub):
-// the guard — not the routing estimate — is what guarantees the fit there, so
-// applying the factor too would only make that guard unreachable. The margin
-// checks below treat these platforms as strict comparisons.
-const TRIM_GUARDED_PLATFORMS = new Set(['github']);
-
 /** True when `estimatedTokens` fits the RAW advertised window (null window =
  * unknown, never filtered — same convention as the auto-router). This is the
- * comparison /v1/models publishes and the soft-preference fallback tier. */
+ * comparison /v1/models publishes and the soft-preference fallback tier.
+ * The operator's min-context-window floor applies here too: the fallback tier
+ * must not reintroduce a model the floor excluded from the main chain. */
 export function fitsContextWindowStrict(contextWindow: number | null | undefined, estimatedTokens: number): boolean {
+  if (!passesContextWindowFloor(contextWindow)) return false;
   return contextWindow == null || estimatedTokens <= contextWindow;
 }
 
 /** True when `estimatedTokens` plausibly fits `contextWindow` WITH the safety
  * margin. The chars/4 heuristic portion is scaled by the factor; an explicit
  * output reserve derived from the client's max_tokens (`routingReserveTokens`)
- * is already an exact count and is added UNSCALED (#956 review). Trim-guarded
- * platforms compare strictly — their guard guarantees the fit. */
-export function fitsContextWindow(platform: string, contextWindow: number | null | undefined, estimatedTokens: number, exactOutputReserve = 0): boolean {
+ * is already an exact count and is added UNSCALED (#956 review). Also enforces
+ * the operator's min-context-window floor (lib/min-context-window.ts): a model
+ * below the configured preset is excluded from every chain, while an unknown
+ * window (null) always passes. */
+export function fitsContextWindow(_platform: string, contextWindow: number | null | undefined, estimatedTokens: number, exactOutputReserve = 0): boolean {
+  if (!passesContextWindowFloor(contextWindow)) return false;
   if (contextWindow == null) return true;
   // Raw advertised comparison first — the margin can only shrink eligibility.
   if (estimatedTokens > contextWindow) return false;
-  if (TRIM_GUARDED_PLATFORMS.has(platform)) return true;
   const reserve = Math.max(0, exactOutputReserve);
   const heuristic = Math.max(0, estimatedTokens - reserve);
   return heuristic * CONTEXT_WINDOW_SAFETY_FACTOR + reserve <= contextWindow;
@@ -2062,12 +1947,38 @@ export function resolveModelGroupCandidates(
   demotedDbIds?: ReadonlySet<number>,
 ): ChainRow[] {
   const db = getDb();
-  const strategy = getRoutingStrategy();
+  const strategy = effectiveRoutingStrategy();
   if (strategy !== 'priority') refreshStatsCache(db);
+
+  const activeProfileId = getActiveProfileId(db);
+  const selectMember = activeProfileId == null
+    ? db.prepare(`
+      SELECT m.id as model_db_id, COALESCE(fc.priority, 0) as priority,
+             1 as enabled,
+             m.platform, m.model_id, m.display_name, m.intelligence_rank,
+             m.size_label, m.monthly_token_budget,
+             m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+             m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+      FROM models m
+      LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
+      WHERE m.id = ? AND m.enabled = 1
+    `)
+    : db.prepare(`
+      SELECT m.id as model_db_id, COALESCE(pm.priority, fc.priority, 0) as priority,
+             1 as enabled,
+             m.platform, m.model_id, m.display_name, m.intelligence_rank,
+             m.size_label, m.monthly_token_budget,
+             m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+             m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+      FROM models m
+      LEFT JOIN profile_models pm ON pm.profile_id = ? AND pm.model_db_id = m.id
+      LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
+      WHERE m.id = ? AND m.enabled = 1
+    `);
 
   const rows: ChainRow[] = [];
   for (const id of memberDbIds) {
-    const row = registryModelChainRow(id);
+    const row = (activeProfileId == null ? selectMember.get(id) : selectMember.get(activeProfileId, id)) as ChainRow | undefined;
     if (!row) continue;
     row.match_tier = demotedDbIds?.has(id) ? 1 : 0;
     rows.push(row);
@@ -2095,7 +2006,13 @@ export interface FusionCandidate {
  */
 export function getOrderedFusionChain(estimatedTokens: number, exactOutputReserve = 0): FusionCandidate[] {
   const db = getDb();
-  const strategy = getRoutingStrategy();
+  // effectiveRoutingStrategy, not getRoutingStrategy (#1354): under the
+  // 'decision' strategy the fusion panel must draw from the same per-request
+  // ordering the auto-router just used for the chat half of the request. The
+  // raw setting value scores every decision-strategy request as plain Balanced,
+  // so a request the decision model routed 'smartest' got its chat answer from
+  // the big model and its panel slots auto-picked from the Balanced order.
+  const strategy = effectiveRoutingStrategy();
   if (strategy !== 'priority') refreshStatsCache(db);
   const chain = getActiveChain(db).filter(e => e.enabled);
 
@@ -2115,29 +2032,16 @@ export function getOrderedFusionChain(estimatedTokens: number, exactOutputReserv
   // That leaves one panel slot dead on arrival and reports the failure as the
   // misleading "no available key for model". Passing a placeholder token count
   // here made both size gates no-ops.
-// Scope parsed once per key row (#657); the servable filter below re-checks
-  // membership per model. Mirrors registryKeysForPlatform's usable filter
-  // (enabled, not DISABLED, cooldown expired) over every platform at once.
-  const now = Date.now();
+  const usableKeys = db.prepare(
+    "SELECT id, platform, model_scope_json FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown')"
+  ).all() as { id: number; platform: string; model_scope_json: string | null }[];
+  // Scope parsed once per key row (#657); the servable filter below re-checks
+  // membership per model.
   const keysByPlatform = new Map<string, { id: number; scope: Set<string> | null }[]>();
-  if (process.env.NODE_ENV !== 'test' && isRegistryInitialized() && getActiveRegistry().getAllCredentials().length > 0) {
-    for (const c of getActiveRegistry().getAllCredentials()) {
-      if (!c.enabled) continue;
-      if (c.runtime.circuitState === 'DISABLED') continue;
-      if (c.runtime.cooldownUntil > now) continue;
-      const entry = { id: c.id, scope: parseModelScope(c.modelScope ? JSON.stringify(c.modelScope) : null) };
-      const arr = keysByPlatform.get(c.providerKey);
-      if (arr) arr.push(entry); else keysByPlatform.set(c.providerKey, [entry]);
-    }
-  } else {
-    const usableKeys = db.prepare(
-      "SELECT id, platform, model_scope_json FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown')"
-    ).all() as { id: number; platform: string; model_scope_json: string | null }[];
-    for (const k of usableKeys) {
-      const entry = { id: k.id, scope: parseModelScope(k.model_scope_json) };
-      const arr = keysByPlatform.get(k.platform);
-      if (arr) arr.push(entry); else keysByPlatform.set(k.platform, [entry]);
-    }
+  for (const k of usableKeys) {
+    const entry = { id: k.id, scope: parseModelScope(k.model_scope_json) };
+    const arr = keysByPlatform.get(k.platform);
+    if (arr) arr.push(entry); else keysByPlatform.set(k.platform, [entry]);
   }
   // Soft preference (#956 review): prefer models whose window holds the estimate
   // WITH the safety margin; /v1/models still advertises the raw window, so if
@@ -2206,6 +2110,11 @@ export function resolveFusionCandidate(modelId: string): FusionCandidate | null 
     size_label: string; supports_vision: number; supports_tools: number;
   }[];
   if (rows.length > 0) {
+    // A logical model can have several enabled provider rows. Prefer one with
+    // an enabled, healthy/unknown key before falling back to the deterministic
+    // ranking. Without this check a duplicate alias can pin fusion to a
+    // keyless provider (for example a free relay) while a configured provider
+    // for the same model is available.
     const row = rows.find(candidate => routableKeyIdsForModel(candidate.model_db_id).length > 0) ?? rows[0];
     return {
       modelDbId: row.model_db_id,
@@ -2215,24 +2124,6 @@ export function resolveFusionCandidate(modelId: string): FusionCandidate | null 
       sizeLabel: row.size_label,
       supportsVision: row.supports_vision,
       supportsTools: row.supports_tools,
-    };
-  }
-
-  const lower = modelId.toLowerCase();
-  const allMatching = getActiveRegistry().getAllModels()
-    .filter(m => m.enabled && (m.modelId || '').toLowerCase() === lower)
-    .sort((a, b) => a.id - b.id);
-
-  if (allMatching.length > 0) {
-    const row = allMatching.find(candidate => routableKeyIdsForModel(candidate.id).length > 0) ?? allMatching[0];
-    return {
-      modelDbId: row.id,
-      platform: row.providerKey,
-      modelId: row.modelId,
-      displayName: row.displayName,
-      sizeLabel: '',
-      supportsVision: row.capabilities.vision ? 1 : 0,
-      supportsTools: row.capabilities.tools ? 1 : 0,
     };
   }
 
@@ -2267,7 +2158,7 @@ export function resolveFusionCandidate(modelId: string): FusionCandidate | null 
 export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requireVision = false, requireTools = false, skipModels?: Set<number>, prefetchedChain?: ChainRow[], requireStructured = false, skipPlatforms?: Set<string>, exactOutputReserve = 0, task?: 'code' | 'chat'): RouteResult {
   const db = getDb();
 
-  const strategy = getRoutingStrategy();
+  const strategy = effectiveRoutingStrategy();
   if (strategy !== 'priority') refreshStatsCache(db);
 
   const chain = (prefetchedChain ?? getActiveChain(db)).filter(e => e.enabled);
@@ -2335,23 +2226,15 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // The requested model is not in the current routing chain (e.g. it's a
       // custom model or not added to the active profile). We must fulfill the
       // explicit request by injecting it at the front.
-      let pinnedRow: ChainRow | undefined;
-      try {
-        pinnedRow = db.prepare(`
-          SELECT m.id as model_db_id, 0 as priority, 1 as enabled,
-                 m.platform, m.model_id, m.display_name, m.intelligence_rank,
-                 m.size_label, m.monthly_token_budget,
-                 m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-                 m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
-          FROM models m
-          WHERE m.id = ? AND m.enabled = 1
-        `).get(preferredModelDbId) as ChainRow | undefined;
-      } catch {
-        pinnedRow = undefined;
-      }
-      if (!pinnedRow) {
-        pinnedRow = registryModelChainRow(preferredModelDbId);
-      }
+      const pinnedRow = db.prepare(`
+        SELECT m.id as model_db_id, 0 as priority, 1 as enabled,
+               m.platform, m.model_id, m.display_name, m.intelligence_rank,
+               m.size_label, m.monthly_token_budget,
+               m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+               m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+        FROM models m
+        WHERE m.id = ? AND m.enabled = 1
+      `).get(preferredModelDbId) as ChainRow | undefined;
 
       // A model retired upstream (#634: 410 end-of-life) must not be re-added
       // by a client pin — the row stays `models.enabled = 1` by design, but the
@@ -2475,9 +2358,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // false (#956 review): e.g. `context 131072 < estimated 106000 x1.25 = 132500`.
       const reserve = Math.max(0, exactOutputReserve);
       const requiredWithMargin = Math.ceil(Math.max(0, estimatedTokens - reserve) * CONTEXT_WINDOW_SAFETY_FACTOR + reserve);
-      diag.push(TRIM_GUARDED_PLATFORMS.has(entry.platform)
-        ? `${label}: context ${entry.context_window} < estimated ${estimatedTokens}`
-        : `${label}: context ${entry.context_window} < estimated ${estimatedTokens} x${CONTEXT_WINDOW_SAFETY_FACTOR} = ${requiredWithMargin}`);
+      diag.push(`${label}: context ${entry.context_window} < estimated ${estimatedTokens} x${CONTEXT_WINDOW_SAFETY_FACTOR} = ${requiredWithMargin}`);
       continue;
     }
 
@@ -2536,43 +2417,22 @@ export function getRoutingScores(): { strategy: RoutingStrategy; keySelectionStr
   // blank reliability/speed — which read as "each new chain starts from
   // scratch" even though the underlying per-model stats are global. Rows the
   // chain names keep its enabled flag; the rest score as disabled. Display
-  let chain: ChainRow[] = [];
-  try {
-    const profileId = getActiveProfileId(db);
-    if (profileId != null) {
-      chain = db.prepare(`
-        SELECT m.id AS model_db_id, COALESCE(pm.priority, 0) AS priority, COALESCE(pm.enabled, 0) AS enabled,
-               m.platform, m.model_id, m.display_name, m.intelligence_rank,
-               m.size_label, m.monthly_token_budget,
-               m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-               m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
-        FROM models m
-        LEFT JOIN profile_models pm ON pm.model_db_id = m.id AND pm.profile_id = ?
-        WHERE m.enabled = 1
-        ORDER BY pm.priority ASC
-      `).all(profileId) as ChainRow[];
-    } else {
-      chain = db.prepare(`
-        SELECT m.id AS model_db_id, COALESCE(fc.priority, 0) AS priority, COALESCE(fc.enabled, 0) AS enabled,
-               m.platform, m.model_id, m.display_name, m.intelligence_rank,
-               m.size_label, m.monthly_token_budget,
-               m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-               m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
-        FROM models m
-        LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
-        WHERE m.enabled = 1
-        ORDER BY fc.priority ASC
-      `).all() as ChainRow[];
-    }
-  } catch {
-    chain = [];
-  }
-
-  if (!chain || chain.length === 0) {
-    try {
-      chain = registryChainRows();
-    } catch {}
-  }
+  // only: routeRequest still walks getActiveChain.
+  const profileId = getActiveProfileId(db);
+  const chain = db.prepare(`
+    SELECT m.id AS model_db_id, COALESCE(c.priority, 0) AS priority, COALESCE(c.enabled, 0) AS enabled,
+           m.platform, m.model_id, m.display_name, m.intelligence_rank,
+           m.size_label, m.monthly_token_budget,
+           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+           m.supports_tools, m.context_window, m.key_id, m.endpoint_scope
+    FROM models m
+    LEFT JOIN ${profileId != null
+      ? '(SELECT model_db_id, priority, enabled FROM profile_models WHERE profile_id = ?) c'
+      : '(SELECT model_db_id, priority, enabled FROM fallback_config) c'}
+      ON c.model_db_id = m.id
+    WHERE m.enabled = 1
+    ORDER BY c.priority ASC
+  `).all(...(profileId != null ? [profileId] : [])) as ChainRow[];
 
   // For display we score under 'balanced' weights when in priority mode, so the
   // table still shows a meaningful ranking even with the bandit turned off.
@@ -2652,7 +2512,7 @@ export function resolveStickyPreference(stickyModelDbId: number | undefined, cha
 // the generic exhaustion message when none is configured (#118, #125).
 export function hasEnabledVisionModel(): boolean {
   const db = getDb();
-  return getActiveChain(db).some(entry => Boolean(entry.enabled) && Boolean(entry.supports_vision));
+  return getActiveChain(db).some(entry => entry.enabled === 1 && entry.supports_vision === 1);
 }
 
 // Whether at least one tool-capable model is enabled in the fallback chain.
@@ -2660,5 +2520,5 @@ export function hasEnabledVisionModel(): boolean {
 // requests beats routing them to a model that mangles the tool call.
 export function hasEnabledToolsModel(): boolean {
   const db = getDb();
-  return getActiveChain(db).some(entry => Boolean(entry.enabled) && Boolean(entry.supports_tools));
+  return getActiveChain(db).some(entry => entry.enabled === 1 && entry.supports_tools === 1);
 }

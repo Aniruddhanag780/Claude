@@ -15,7 +15,6 @@
  */
 import { z } from 'zod';
 import { getDb, getSetting, setSetting } from '../db/index.js';
-import { getActiveRegistry } from './router-registry.js';
 import {
   ENDPOINT_ID_SEPARATOR,
   endpointRefMatches,
@@ -383,44 +382,22 @@ let groupsCache: { fingerprint: string; groups: ModelGroup[] } | null = null;
  * and resolution is complete), applying the persisted overrides.
  */
 export function getModelGroups(): ModelGroup[] {
-  let rows: GroupableRow[] = [];
-  try {
-    const db = getDb();
-    rows = db.prepare(`
-      SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.intelligence_rank,
-             m.endpoint_scope,
-             (SELECT k.group_label FROM api_keys k
-               WHERE m.platform = 'custom' AND m.endpoint_scope != ''
-                 AND k.platform = 'custom' AND rtrim(k.base_url, '/') = m.endpoint_scope
-                 AND k.group_label IS NOT NULL
-               ORDER BY k.id LIMIT 1) AS endpoint_group
-      FROM models m
-      ORDER BY m.id
-    `).all() as GroupableRow[];
-  } catch {
-    rows = [];
-  }
-
-  if (!rows || rows.length === 0) {
-    try {
-      const allModels = getActiveRegistry()?.getAllModels() || [];
-      if (allModels.length > 0) {
-        rows = allModels.map(m => ({
-          model_db_id: m.id,
-          platform: m.providerKey,
-          model_id: m.modelId,
-          display_name: m.displayName || m.modelId,
-          intelligence_rank: m.intelligenceRank ?? m.priority,
-          endpoint_scope: '',
-        }));
-      }
-    } catch {}
-  }
-
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.intelligence_rank,
+           m.endpoint_scope,
+           (SELECT k.group_label FROM api_keys k
+             WHERE m.platform = 'custom' AND m.endpoint_scope != ''
+               AND k.platform = 'custom' AND rtrim(k.base_url, '/') = m.endpoint_scope
+               AND k.group_label IS NOT NULL
+             ORDER BY k.id LIMIT 1) AS endpoint_group
+    FROM models m
+    ORDER BY m.id
+  `).all() as GroupableRow[];
   const overrides = getUnifyOverrides();
   let fingerprint = JSON.stringify(overrides);
   for (const r of rows) {
-    fingerprint += `\0${r.model_db_id} ${r.platform} ${r.model_id} ${r.display_name} ${r.intelligence_rank} ${r.endpoint_scope ?? ''} ${r.endpoint_group ?? ''}`;
+    fingerprint += ` ${r.model_db_id}${r.platform}${r.model_id}${r.display_name}${r.intelligence_rank}${r.endpoint_scope ?? ''}${r.endpoint_group ?? ''}`;
   }
   if (groupsCache?.fingerprint === fingerprint) return groupsCache.groups;
   const groups = groupRows(rows, overrides);

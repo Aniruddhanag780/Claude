@@ -3,7 +3,6 @@
 import { getDb, getSetting, setSetting } from '../db/index.js';
 import { isLoopbackOrPrivateUrl } from '../lib/url-guard.js';
 import { parseModelScope, scopeAllows } from '../lib/model-scope.js';
-import { updateRegistryModelContextWindow } from './router-registry.js';
 
 interface Window {
   timestamps: number[];
@@ -588,6 +587,9 @@ const DEFAULT_PROVIDER_DAILY_TOKEN_CAPS: Record<string, number> = {
 // entirely — so it keeps dispatching and eats real 429s.
 const DEFAULT_PROVIDER_MINUTE_REQUEST_CAPS: Record<string, number> = {
   nvidia: 40,
+  // APINex Free: 5 requests/minute per key shared across every model
+  // (apinex.bond/api/public/rate-limits `rpmFree`), not 5 per model.
+  apinex: 5,
 };
 
 export function getProviderDailyRequestCap(platform: string): number | null {
@@ -1253,19 +1255,10 @@ export function setCooldown(
 export function isOnCooldown(platform: string, modelId: string, keyId: number): boolean {
   const key = `${platform}:${modelId}:${keyId}:cooldown`;
   const now = Date.now();
-
-  const expiry = cooldowns.get(key);
-  if (expiry !== undefined) {
-    if (now > expiry) {
-      cooldowns.delete(key);
-      return false;
-    }
-    return true;
-  }
-
   const persistedExpiry = persistedCooldownExpiry(platform, modelId, keyId);
   if (persistedExpiry !== undefined && persistedExpiry !== null) {
     if (now > persistedExpiry) {
+      cooldowns.delete(key);
       clearPersistedCooldown(platform, modelId, keyId);
       return false;
     }
@@ -1273,7 +1266,13 @@ export function isOnCooldown(platform: string, modelId: string, keyId: number): 
     return true;
   }
 
-  return false;
+  const expiry = cooldowns.get(key);
+  if (!expiry) return false;
+  if (now > expiry) {
+    cooldowns.delete(key);
+    return false;
+  }
+  return true;
 }
 
 export interface ActiveCooldown {
@@ -1573,11 +1572,5 @@ export function learnContextWindowFromError(modelDbId: number, err: { message?: 
       'UPDATE models SET context_window = ? WHERE id = ? AND (context_window IS NULL OR context_window > ?)',
     ).run(window, modelDbId, window),
   );
-  if (!result || result.changes <= 0) return null;
-  // The routing registry is a snapshot, so the learned window has to be pushed
-  // into it as well — otherwise the next request still sizes the model with
-  // the old (too large) window and dispatches a prompt the provider just
-  // rejected.
-  updateRegistryModelContextWindow(modelDbId, window);
-  return window;
+  return result && result.changes > 0 ? window : null;
 }

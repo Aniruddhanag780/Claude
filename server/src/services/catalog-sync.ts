@@ -2,16 +2,15 @@ import crypto from 'crypto';
 import type { Db } from '../db/types.js';
 import { getDb, getSetting, setSetting } from '../db/index.js';
 import { hasProvider } from '../providers/index.js';
-import { reloadRoutingRegistry } from './router-registry.js';
 import { MEDIA_PLATFORMS, TRANSCRIPTION_PLATFORMS, VIDEO_PLATFORMS } from './media.js';
 import { SEARCH_ENGINE_PLATFORMS, SEARCH_MODALITY } from './search.js';
+import { DECISION_MODALITY, DECISION_PLATFORMS } from './decision.js';
 import { EMBEDDING_PLATFORMS } from './embeddings.js';
 import type { Platform } from '@freellmapi/shared/types.js';
 import type { Scheduler } from '../lib/scheduler.js';
 import {
   applyAllModelOverrides,
   refreshModelOverrideBaselines,
-  routableContextWindow,
   applyModelOverrides,
   deleteTombstonedCatalogModels,
   isCatalogModelTombstoned,
@@ -69,6 +68,43 @@ const SETTING_LAST_ERROR = 'catalog_last_error';
 
 export function catalogBaseUrl(): string {
   return (process.env.CATALOG_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
+}
+
+type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+let fallbackFetch: FetchLike | null = null;
+
+/**
+ * Register a second network stack for calls to the catalog service. The
+ * desktop app passes Electron's net.fetch (Chromium: the OS certificate
+ * verifier and system proxy, same as a browser). On some Windows PCs Node's
+ * fetch could not complete the TLS handshake to api.freellmapi.co, so license
+ * activation always showed "HTTP 502" while the same URL opened fine in a
+ * browser. Server and Docker installs never set this.
+ */
+export function setCatalogFallbackFetch(fn: FetchLike | null): void {
+  fallbackFetch = fn;
+}
+
+function describeFetchError(err: unknown): string {
+  const e = err as { message?: string; cause?: { code?: string; message?: string } } | undefined;
+  const cause = e?.cause?.code ?? e?.cause?.message;
+  return cause ? `${e?.message ?? 'fetch failed'} (${cause})` : String(e?.message ?? err);
+}
+
+/**
+ * fetch() for catalog-service calls. Tries Node's fetch first; when that
+ * fails at the network level (not a timeout) and a fallback is registered,
+ * retries once through it.
+ */
+export async function catalogFetch(input: string | URL, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch (err) {
+    if (!fallbackFetch || init?.signal?.aborted) throw err;
+    console.warn(`[catalog-sync] ${describeFetchError(err)}; retrying through the desktop network stack`);
+    return fallbackFetch(input, init);
+  }
 }
 
 function catalogPublicKey(): crypto.KeyObject {
@@ -180,6 +216,22 @@ interface CatalogSearchEngine {
   premiumSince?: string;
 }
 
+interface CatalogDecisionModel {
+  platform: string;
+  /** Provider model id, stored as media_models.model_id
+   *  (e.g. '@cf/cloudflare/clef-flash', 'inception/mercury-decide:free'). */
+  modelId: string;
+  displayName: string;
+  /** Order within the decision chain for model 'auto', lower first. */
+  priority: number;
+  enabled: boolean;
+  /** Short display note, mirrored into media_models.quota_label. */
+  quotaLabel?: string;
+  contextWindow?: number;
+  /** When the model entered the live (Premium) tier. */
+  premiumSince?: string;
+}
+
 interface Catalog {
   version: string;
   generatedAt: string;
@@ -201,6 +253,10 @@ interface Catalog {
    *  modality='search'. A separate optional key for the same reason as
    *  videoModels: binaries that predate search ignore it. */
   searchEngines?: CatalogSearchEngine[];
+  /** Decision model registry, landing in media_models with
+   *  modality='decision'. Its own optional key, like searchEngines, so
+   *  binaries that predate decision models ignore it. */
+  decisionModels?: CatalogDecisionModel[];
   /** Platforms the catalog service manages even when this tier ships no rows
    *  for them (#1348): a provider still inside its Premium window, or one the
    *  audit deliberately keeps at zero rows. Names only, never model rows, so
@@ -220,81 +276,142 @@ export interface SyncResult {
   counts?: { updated: number; inserted: number; removed: number; skippedUnknownPlatform: number; quirks: number };
 }
 
-/** Minimal structural check — enough to fail loudly on a wrong/garbled body. */
-function isCatalog(value: unknown): value is Catalog {
+/**
+ * Why a payload is not a Catalog (#1566): the bare boolean behind isCatalog
+ * made every rejected publish read as the same one-line warning — "catalog
+ * payload has unexpected shape" — which told an operator nothing about WHICH
+ * section broke and made field reports impossible to triage. This runs the
+ * same checks as isCatalog but collects a path-labeled reason per failed
+ * check (e.g. `embeddings[3].dimensions is not a number`), capped so a
+ * garbage body cannot turn the warning into a megabyte of log.
+ */
+export function catalogShapeProblems(value: unknown): string[] {
+  const problems: string[] = [];
+  const CAP = 8;
+  const fail = (msg: string) => {
+    if (problems.length < CAP) problems.push(msg);
+  };
   const c = value as Catalog;
-  return (
-    !!c &&
-    typeof c.version === 'string' &&
-    (c.tier === 'live' || c.tier === 'monthly') &&
-    Array.isArray(c.models) &&
-    Array.isArray(c.quirks) &&
-    (c.embeddings === undefined ||
-      (Array.isArray(c.embeddings) &&
-        c.embeddings.every(
-          (m) =>
-            typeof m?.family === 'string' &&
-            typeof m?.platform === 'string' &&
-            typeof m?.modelId === 'string' &&
-            typeof m?.displayName === 'string' &&
-            typeof m?.dimensions === 'number' &&
-            typeof m?.priority === 'number' &&
-            typeof m?.enabled === 'boolean',
-        ))) &&
-    (c.transcriptionModels === undefined ||
-      (Array.isArray(c.transcriptionModels) &&
-        c.transcriptionModels.every(
-          (m) =>
-            typeof m?.platform === 'string' &&
-            typeof m?.modelId === 'string' &&
-            typeof m?.displayName === 'string' &&
-            typeof m?.priority === 'number' &&
-            typeof m?.enabled === 'boolean' &&
-            (m.subtitleFormats === undefined ||
-              (Array.isArray(m.subtitleFormats) && m.subtitleFormats.every((f) => typeof f === 'string'))) &&
-            (m.maxBytes === undefined || m.maxBytes === null || typeof m.maxBytes === 'number') &&
-            (m.requestStyle === undefined || m.requestStyle === null || typeof m.requestStyle === 'string'),
-        ))) &&
-    (c.videoModels === undefined ||
-      (Array.isArray(c.videoModels) &&
-        c.videoModels.every(
-          (m) =>
-            typeof m?.platform === 'string' &&
-            typeof m?.modelId === 'string' &&
-            typeof m?.displayName === 'string' &&
-            typeof m?.priority === 'number' &&
-            typeof m?.enabled === 'boolean' &&
-            (m.quotaLabel === undefined || typeof m.quotaLabel === 'string') &&
-            (m.providerModelId === undefined || typeof m.providerModelId === 'string'),
-        ))) &&
-    c.models.every(
-      (m) =>
-        typeof m?.platform === 'string' &&
-        typeof m?.modelId === 'string' &&
-        typeof m?.displayName === 'string' &&
-        typeof m?.enabled === 'boolean' &&
-        (m.requestStyle === undefined || m.requestStyle === null || typeof m.requestStyle === 'string') &&
-        !!m?.limits &&
-        typeof m.limits === 'object',
-    ) &&
-    (c.searchEngines === undefined ||
-      (Array.isArray(c.searchEngines) &&
-        c.searchEngines.every(
-          (e) =>
-            typeof e?.platform === 'string' &&
-            typeof e?.engineId === 'string' &&
-            typeof e?.displayName === 'string' &&
-            typeof e?.priority === 'number' &&
-            typeof e?.enabled === 'boolean' &&
-            (e.quotaLabel === undefined || typeof e.quotaLabel === 'string') &&
-            (e.creditsPerQuery === undefined || e.creditsPerQuery === null || typeof e.creditsPerQuery === 'number') &&
-            (e.features === undefined || (typeof e.features === 'object' && e.features !== null)) &&
-            (e.premiumSince === undefined || typeof e.premiumSince === 'string'),
-        ))) &&
-    (c.managedPlatforms === undefined ||
-      (Array.isArray(c.managedPlatforms) && c.managedPlatforms.every((p) => typeof p === 'string'))) &&
-    c.quirks.every((q) => typeof q?.slug === 'string' && Array.isArray(q?.targets))
-  );
+  if (!c || typeof c !== 'object') return ['payload is not an object'];
+  if (typeof c.version !== 'string') fail('version is not a string');
+  if (c.tier !== 'live' && c.tier !== 'monthly') fail(`tier is ${JSON.stringify(c.tier)} (expected "live" or "monthly")`);
+  if (!Array.isArray(c.models)) fail('models is not an array');
+  if (!Array.isArray(c.quirks)) fail('quirks is not an array');
+
+  const str = (v: unknown) => typeof v === 'string';
+  const num = (v: unknown) => typeof v === 'number';
+  const bool = (v: unknown) => typeof v === 'boolean';
+  // Optional fields split into two null-semantics families, mirroring the
+  // original &&-chain exactly: `opt*` accepts only an absent field
+  // (null FAILS — e.g. `quotaLabel: null` is a shape error), while `nul*`
+  // tolerates an explicit null too (e.g. `maxBytes: null`).
+  const optStr = (v: unknown) => v === undefined || str(v);
+  const optNum = (v: unknown) => v === undefined || num(v);
+  const nulStr = (v: unknown) => v === undefined || v === null || str(v);
+  const nulNum = (v: unknown) => v === undefined || v === null || num(v);
+
+  const each = (name: string, check: (m: any) => string | null) => {
+    const arr = (c as any)[name];
+    if (arr === undefined) return;
+    if (!Array.isArray(arr)) {
+      fail(`${name} is present but not an array`);
+      return;
+    }
+    for (let i = 0; i < arr.length; i++) {
+      const why = check(arr[i]);
+      if (why) {
+        fail(`${name}[${i}] ${why}`);
+        // One bad entry condemns the payload; report a few more, then stop.
+        if (problems.length >= CAP) return;
+      }
+    }
+  };
+
+  each('embeddings', (m) => {
+    if (!str(m?.family)) return 'family is not a string';
+    if (!str(m?.platform)) return 'platform is not a string';
+    if (!str(m?.modelId)) return 'modelId is not a string';
+    if (!str(m?.displayName)) return 'displayName is not a string';
+    if (!num(m?.dimensions)) return 'dimensions is not a number';
+    if (!num(m?.priority)) return 'priority is not a number';
+    if (!bool(m?.enabled)) return 'enabled is not a boolean';
+    return null;
+  });
+  each('transcriptionModels', (m) => {
+    if (!str(m?.platform)) return 'platform is not a string';
+    if (!str(m?.modelId)) return 'modelId is not a string';
+    if (!str(m?.displayName)) return 'displayName is not a string';
+    if (!num(m?.priority)) return 'priority is not a number';
+    if (!bool(m?.enabled)) return 'enabled is not a boolean';
+    if (m?.subtitleFormats !== undefined && !(Array.isArray(m.subtitleFormats) && m.subtitleFormats.every((f: unknown) => typeof f === 'string'))) return 'subtitleFormats is not a string array';
+    if (!nulNum(m?.maxBytes)) return 'maxBytes is not a number';
+    if (!nulStr(m?.requestStyle)) return 'requestStyle is not a string';
+    return null;
+  });
+  each('videoModels', (m) => {
+    if (!str(m?.platform)) return 'platform is not a string';
+    if (!str(m?.modelId)) return 'modelId is not a string';
+    if (!str(m?.displayName)) return 'displayName is not a string';
+    if (!num(m?.priority)) return 'priority is not a number';
+    if (!bool(m?.enabled)) return 'enabled is not a boolean';
+    if (!optStr(m?.quotaLabel)) return 'quotaLabel is not a string';
+    if (!optStr(m?.providerModelId)) return 'providerModelId is not a string';
+    return null;
+  });
+  // `models` and `quirks` are required: only walk them when the array check
+  // above passed, mirroring the original &&-chain's short-circuit.
+  if (Array.isArray(c.models)) {
+    each('models', (m) => {
+      if (!str(m?.platform)) return 'platform is not a string';
+      if (!str(m?.modelId)) return 'modelId is not a string';
+      if (!str(m?.displayName)) return 'displayName is not a string';
+      if (!bool(m?.enabled)) return 'enabled is not a boolean';
+      if (!nulStr(m?.requestStyle)) return 'requestStyle is not a string';
+      if (!m?.limits || typeof m.limits !== 'object') return 'limits is missing';
+      return null;
+    });
+  }
+  each('searchEngines', (m) => {
+    if (!str(m?.platform)) return 'platform is not a string';
+    if (!str(m?.engineId)) return 'engineId is not a string';
+    if (!str(m?.displayName)) return 'displayName is not a string';
+    if (!num(m?.priority)) return 'priority is not a number';
+    if (!bool(m?.enabled)) return 'enabled is not a boolean';
+    if (!optStr(m?.quotaLabel)) return 'quotaLabel is not a string';
+    if (!nulNum(m?.creditsPerQuery)) return 'creditsPerQuery is not a number';
+    if (m?.features !== undefined && !(typeof m.features === 'object' && m.features !== null)) return 'features is not an object';
+    if (!optStr(m?.premiumSince)) return 'premiumSince is not a string';
+    return null;
+  });
+  each('decisionModels', (m) => {
+    if (!str(m?.platform)) return 'platform is not a string';
+    if (!str(m?.modelId)) return 'modelId is not a string';
+    if (!str(m?.displayName)) return 'displayName is not a string';
+    if (!num(m?.priority)) return 'priority is not a number';
+    if (!bool(m?.enabled)) return 'enabled is not a boolean';
+    if (!optStr(m?.quotaLabel)) return 'quotaLabel is not a string';
+    if (!optNum(m?.contextWindow)) return 'contextWindow is not a number';
+    if (!optStr(m?.premiumSince)) return 'premiumSince is not a string';
+    return null;
+  });
+  if (c.managedPlatforms !== undefined) {
+    if (!Array.isArray(c.managedPlatforms)) fail('managedPlatforms is not an array');
+    else if (!c.managedPlatforms.every((p) => typeof p === 'string')) fail('managedPlatforms contains a non-string entry');
+  }
+  if (Array.isArray(c.quirks)) {
+    each('quirks', (q) => {
+      if (!str(q?.slug)) return 'slug is not a string';
+      if (!Array.isArray(q?.targets)) return 'targets is not an array';
+      return null;
+    });
+  }
+  return problems;
+}
+
+/** Minimal structural check — enough to fail loudly on a wrong/garbled body.
+ *  catalogShapeProblems is the diagnostic twin; keep them in lockstep. */
+function isCatalog(value: unknown): value is Catalog {
+  return catalogShapeProblems(value).length === 0;
 }
 
 /**
@@ -332,6 +449,7 @@ function catalogPlatforms(catalog: Catalog): Set<string> {
   for (const m of catalog.transcriptionModels ?? []) platforms.add(m.platform);
   for (const m of catalog.videoModels ?? []) platforms.add(m.platform);
   for (const e of catalog.searchEngines ?? []) platforms.add(e.platform);
+  for (const m of catalog.decisionModels ?? []) platforms.add(m.platform);
   for (const p of catalog.managedPlatforms ?? []) platforms.add(p);
   return platforms;
 }
@@ -366,9 +484,7 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
   // own commit + fsync executed on the event loop. On slow storage that made
   // the 12-hourly sync freeze every in-flight request — including the 3-query
   // profile-activate POST — for minutes.
-  const counts = db.transaction(() => applyCatalogInner(db, catalog))();
-  void reloadRoutingRegistry().catch(() => {});
-  return counts;
+  return db.transaction(() => applyCatalogInner(db, catalog))();
 }
 
 /**
@@ -461,6 +577,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     const inTranscriptionCatalog = new Set<string>();
     const inVideoCatalog = new Set<string>();
     const inSearchCatalog = new Set<string>();
+    const inDecisionCatalog = new Set<string>();
 
     for (const m of catalog.models) {
       // Media modalities are gated on MEDIA_PLATFORMS (decoupled from the chat
@@ -538,7 +655,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
         tpm: m.limits.tpm,
         tpd: m.limits.tpd,
         monthlyTokenBudget: m.monthlyTokenBudget,
-        contextWindow: routableContextWindow(m.platform, m.modelId, m.contextWindow),
+        contextWindow: m.contextWindow,
         supportsVision: m.supportsVision ? 1 : 0,
         supportsTools: m.supportsTools ? 1 : 0,
       };
@@ -626,6 +743,38 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
           counts.updated++;
         } else {
           insertMedia.run({ ...fields, platform: e.platform, modelId: e.engineId, enabled: e.enabled ? 1 : 0 });
+          counts.inserted++;
+        }
+      }
+    }
+
+    // Decision models: their own optional full snapshot, like search engines.
+    // They ride on the platform's existing keys and never enter chat routing.
+    if (catalog.decisionModels) {
+      for (const m of catalog.decisionModels) {
+        if (!DECISION_PLATFORMS.has(m.platform)) {
+          counts.skippedUnknownPlatform++;
+          continue;
+        }
+        if (isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
+        inDecisionCatalog.add(`${m.platform}:${m.modelId}`);
+        const meta: Record<string, unknown> = {};
+        if (typeof m.contextWindow === 'number') meta.contextWindow = m.contextWindow;
+        if (typeof m.premiumSince === 'string') meta.premiumSince = m.premiumSince;
+        const fields = {
+          displayName: m.displayName,
+          modality: DECISION_MODALITY,
+          priority: m.priority,
+          quotaLabel: m.quotaLabel ?? '',
+          metaJson: JSON.stringify(meta),
+        };
+        const row = selectMedia.get(m.platform, m.modelId) as { id: number; enabled: number } | undefined;
+        if (row) {
+          const enabled = m.enabled ? row.enabled : 0;
+          updateMedia.run({ ...fields, id: row.id, enabled });
+          counts.updated++;
+        } else {
+          insertMedia.run({ ...fields, platform: m.platform, modelId: m.modelId, enabled: m.enabled ? 1 : 0 });
           counts.inserted++;
         }
       }
@@ -761,6 +910,21 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
       counts.removed++;
     }
 
+    // #1516: sweep rows pinned to keys that no longer exist. The DELETE-key
+    // cascade in routes/keys.ts removes these at delete time; this is the
+    // backstop for orphans from older builds or manual DB edits. Shared rows
+    // (key_id NULL) are never touched — only key-bound rows whose key is gone.
+    const orphanChat = db
+      .prepare('SELECT id FROM models WHERE key_id IS NOT NULL AND key_id NOT IN (SELECT id FROM api_keys)')
+      .all() as { id: number }[];
+    for (const o of orphanChat) {
+      deleteFb.run(o.id);
+      deleteModel.run(o.id);
+      counts.removed++;
+    }
+    counts.removed += (db.prepare('DELETE FROM embedding_models WHERE key_id IS NOT NULL AND key_id NOT IN (SELECT id FROM api_keys)').run().changes as number);
+    counts.removed += (db.prepare('DELETE FROM media_models WHERE key_id IS NOT NULL AND key_id NOT IN (SELECT id FROM api_keys)').run().changes as number);
+
     // Remove media models the catalog no longer lists (own table, no
     // fallback_config). Deliberately an ALLOWLIST of the two modalities that
     // `models[]` maintains, not "everything except transcription": video and
@@ -805,6 +969,21 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
       for (const c of searchCandidates) {
         if (!SEARCH_ENGINE_PLATFORMS.has(c.platform)) continue;
         if (!inSearchCatalog.has(`${c.platform}:${c.model_id}`)) {
+          deleteMedia.run(c.id);
+          counts.removed++;
+        }
+      }
+    }
+
+    // Prune decision models only when the catalog carries the decisionModels
+    // snapshot (same rule as search engines).
+    if (catalog.decisionModels) {
+      const decisionCandidates = db
+        .prepare('SELECT id, platform, model_id FROM media_models WHERE modality = ?')
+        .all(DECISION_MODALITY) as { id: number; platform: string; model_id: string }[];
+      for (const c of decisionCandidates) {
+        if (!DECISION_PLATFORMS.has(c.platform)) continue;
+        if (!inDecisionCatalog.has(`${c.platform}:${c.model_id}`)) {
           deleteMedia.run(c.id);
           counts.removed++;
         }
@@ -887,7 +1066,7 @@ export async function syncCatalog(force = false): Promise<SyncResult> {
     const url = new URL(`${catalogBaseUrl()}/v1/latest`);
     if (applied && !force) url.searchParams.set('since', applied);
 
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const res = await catalogFetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 
     if (res.status === 304) {
       setSetting(SETTING_LAST_SYNC_MS, String(Date.now()));
@@ -903,8 +1082,14 @@ export async function syncCatalog(force = false): Promise<SyncResult> {
     if (!verified) throw new Error('catalog signature verification FAILED — discarding response');
 
     const parsed: unknown = JSON.parse(bytes.toString('utf8'));
-    if (!isCatalog(parsed)) throw new Error('catalog payload has unexpected shape');
-    const catalog = parsed;
+    const shapeProblems = catalogShapeProblems(parsed);
+    if (shapeProblems.length > 0) {
+      // #1566: name the failing path(s) so the operator's log line (and the
+      // dashboard's "Last sync problem") says WHAT is malformed, not just
+      // that something is.
+      throw new Error(`catalog payload has unexpected shape: ${shapeProblems.join('; ')}`);
+    }
+    const catalog = parsed as Catalog;
 
     if (catalog.version < MIN_CATALOG_VERSION) {
       // Older than the bundled baseline (e.g. monthly snapshot lagging a fresh
@@ -963,14 +1148,15 @@ export interface LicenseActivation {
  */
 export async function validateLicenseKey(key: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<LicenseActivation | null> {
   try {
-    const res = await fetch(`${catalogBaseUrl()}/v1/license/activate`, {
+    const res = await catalogFetch(`${catalogBaseUrl()}/v1/license/activate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     return (await res.json()) as LicenseActivation;
-  } catch {
+  } catch (err) {
+    console.warn(`[catalog-sync] license activation unreachable: ${describeFetchError(err)}`);
     return null;
   }
 }
@@ -980,7 +1166,7 @@ export async function refreshLicenseStatus(): Promise<LicenseStatus | null> {
   const key = getSetting(SETTING_LICENSE_KEY);
   if (!key) return null;
   try {
-    const res = await fetch(`${catalogBaseUrl()}/v1/license/check`, {
+    const res = await catalogFetch(`${catalogBaseUrl()}/v1/license/check`, {
       headers: { Authorization: `Bearer ${key}` },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });

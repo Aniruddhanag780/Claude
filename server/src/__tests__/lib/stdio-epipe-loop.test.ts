@@ -4,23 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
-
-// better-sqlite3 is an optional, deliberate runtime dependency of the SQLite
-// migration script — it is not part of the test graph. Load it lazily so this
-// file still loads in environments that do not install it.
-function loadBetterSqlite3(): any {
-  try {
-    return require('better-sqlite3').default ?? require('better-sqlite3');
-  } catch {
-    console.warn(
-      '[stdio-epipe-loop] better-sqlite3 is not installed; skipping server_logs row count.',
-    );
-    return null;
-  }
-}
+import Database from 'better-sqlite3';
 
 // Regression: a server started with stdout/stderr piped to a process that then
 // goes away (a shell tool that returned, a closed terminal) must not turn every
@@ -47,8 +31,6 @@ afterEach(async () => {
 });
 
 function countRows(dbPath: string): number {
-  const Database = loadBetterSqlite3();
-  if (!Database) return 0;
   const db = new Database(dbPath, { readonly: true });
   try {
     return (db.prepare('SELECT COUNT(*) AS n FROM server_logs').get() as { n: number }).n;

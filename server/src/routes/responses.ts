@@ -9,7 +9,7 @@ import type {
   ChatToolChoice,
   Platform,
 } from '@freellmapi/shared/types.js';
-import { routeRequest, hasEnabledVisionModel, hasEnabledToolsModel, resolveStickyPreference, routingReserveTokens, resolveModelGroupCandidates, resolveRoutingChain, type RouteResult, type ResolvedChain, type ChainRow } from '../services/router.js';
+import { routeRequest, hasEnabledVisionModel, hasEnabledToolsModel, resolveStickyPreference, routingReserveTokens, resolveModelGroupCandidates, resolveRoutingChain, failureAttributionFor, type RouteResult, type ResolvedChain, type ChainRow } from '../services/router.js';
 import { getDb } from '../db/index.js';
 import { resolveAuth, prependSystemPrompt } from '../lib/system-prompt.js';
 import { isUnifyEnabled, getModelGroups, resolveRequestedIdForDispatch } from '../services/model-groups.js';
@@ -48,6 +48,7 @@ import {
   runFusion,
   type FusionResult,
 } from '../services/fusion.js';
+import { applyDecisionRouting, routingStrategyHeader } from '../services/routing-decision.js';
 
 export const responsesRouter = Router();
 
@@ -1161,6 +1162,13 @@ export async function handleResponses(req: Request, res: Response): Promise<void
     res.write(`data: ${JSON.stringify({ type: event, sequence_number: seq++, ...payload })}\n\n`);
   };
 
+  // Decision routing (#1354): with the 'decision' strategy on, a decision
+  // model picks which preset (Smartest / Fastest / Balanced / Most reliable)
+  // this turn routes with. Skipped when the client pinned a model or the
+  // conversation is sticky to one. Any doubt routes as Balanced.
+  const routingPick = await applyDecisionRouting(messages, { pinned: !isAutoModel(requestedModelLabel) || preferredModel != null, signal: clientAbort.signal });
+  if (routingPick && !res.headersSent) res.setHeader('X-FreeLLM-Routing-Strategy', routingStrategyHeader(routingPick));
+
   await runFallbackLoop({
     maxRetries: MAX_RETRIES,
     state,
@@ -1499,7 +1507,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
               latencyMs: Date.now() - start,
               error: safe,
             });
-            logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, safe, ttfbMs, null, null, 'http');
+            logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, safe, ttfbMs, null, null, 'http', failureAttributionFor(streamErr));
             sse('response.failed', { response: { id: responseId, object: 'response', status: 'failed', error: { message: `Provider error (${route.displayName}): stream interrupted`, type: 'stream_error' } } });
             res.end();
             return 'committed';
@@ -1624,7 +1632,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
         latencyMs: latency,
         error: safeError,
       });
-      logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, latency, safeError, null, null, null, 'http');
+      logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, latency, safeError, null, null, null, 'http', failureAttributionFor(err));
     },
     onFatal: (route, err, attempt) => {
       setFallbackHeaders(res, attempt, attemptLog);

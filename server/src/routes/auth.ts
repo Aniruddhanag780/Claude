@@ -13,22 +13,41 @@ import {
   resetUserPassword,
   accountEmail,
   normalizeEmail,
+  desktopSessionToken,
 } from '../services/auth.js';
 import { setupCodeMatches, clearSetupCode } from '../lib/setup-code.js';
 import { generateResetCode, resetCodeMatches, clearResetCode } from '../lib/reset-code.js';
 
 export const authRouter = Router();
 
+const failedPasswordAttempts = new Map<number, number>();
+
+// Dashboard auth (#35). These routes are mounted BEFORE requireAuth, so
+// /status, /setup and /login are reachable without a session (bootstrap);
+// /logout and /me validate the token themselves.
+
+// Signing up is the one place the address has to look like an address.
 const signupSchema = z.object({
   email: z.string().email('A valid email is required'),
   password: z.string().min(8, 'Password must be at least 8 characters'),
 });
 
+// Logging in is a lookup, not a registration, so the address is matched rather
+// than validated. The desktop app seeds its hidden account as
+// `desktop@localhost` (server-host.ts), which has no TLD and so could never
+// satisfy z.email() — every login attempt on a desktop install failed with
+// "A valid email is required" before the password was even checked, including
+// the reset-then-sign-in-from-a-browser route suggested in #807. Length rules
+// belong to signup too: an account created under an older policy must still be
+// able to get in.
 const loginSchema = z.object({
   email: z.string().min(1, 'Email is required'),
   password: z.string().min(1, 'Password is required'),
 });
 
+// ── Brute-force throttle ──────────────────────────────────────────────────
+// Simple in-memory per-email limiter. A local single-user tool doesn't need a
+// distributed store; this just blunts online password guessing.
 const MAX_ATTEMPTS = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
 // Bound the map so a flood of distinct addresses cannot grow it without limit;
@@ -73,7 +92,6 @@ function recordFailure(email: string): void {
     }
   }
 }
-
 function clearFailures(email: string): void {
   attempts.delete(throttleKey(email));
 }
@@ -114,59 +132,122 @@ function isLoopbackRemote(req: Request): boolean {
   return !firstForwarded || isLoopbackAddress(firstForwarded);
 }
 
-authRouter.get('/status', async (req: Request, res: Response) => {
-  const count = await userCount();
-  const session = await validateSession(bearer(req));
+// ── Desktop sign-in (#1399) ───────────────────────────────────────────────
+// The desktop app's account is a hidden machine user with a random password
+// nobody knows. Its own window gets sessions over IPC, but the same dashboard
+// opened in a normal browser tab (the tray's "Open in browser", a bookmark,
+// http://127.0.0.1:31415) used to land on a Sign In form nobody could pass.
+// On a desktop install, a request from this machine gets the session the
+// window would have got, so the form never shows.
+//
+// Guards, all required:
+//  - FREEAPI_DESKTOP=1: only the desktop embedder sets it; web/Docker installs
+//    keep their login.
+//  - Loopback socket with no remote forwarded hop (isLoopbackRemote), so LAN
+//    access mode and a local reverse proxy never hand out sessions.
+//  - A localhost Host header: a DNS-rebinding page (evil.example resolving to
+//    127.0.0.1) is same-origin to the browser but still sends its own name.
+//  - Not cross-site: another site's page can fire a request at 127.0.0.1, and
+//    Sec-Fetch-Site / Origin say so.
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+function hostnameOf(hostHeader: string | undefined): string | null {
+  if (!hostHeader) return null;
+  try {
+    return new URL(`http://${hostHeader}`).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function isCrossSite(req: Request): boolean {
+  const site = req.headers['sec-fetch-site'];
+  if (typeof site === 'string' && site !== 'same-origin' && site !== 'none') return true;
+  const origin = req.headers.origin;
+  if (typeof origin === 'string' && origin !== 'null') {
+    let originHost: string;
+    try {
+      originHost = new URL(origin).hostname.toLowerCase();
+    } catch {
+      return true;
+    }
+    if (!LOCAL_HOSTNAMES.has(originHost)) return true;
+  }
+  return false;
+}
+
+export function desktopSignInAllowed(req: Request): boolean {
+  if (process.env.FREEAPI_DESKTOP !== '1') return false;
+  if (!isLoopbackRemote(req)) return false;
+  const host = hostnameOf(req.headers.host);
+  if (!host || !LOCAL_HOSTNAMES.has(host)) return false;
+  return !isCrossSite(req);
+}
+
+// Has the dashboard been set up yet, and is this caller authenticated?
+// `desktop` tells the dashboard it can fetch a session instead of showing the
+// sign-in form.
+authRouter.get('/status', (req: Request, res: Response) => {
+  const session = validateSession(bearer(req));
   res.json({
-    needsSetup: count === 0,
+    needsSetup: userCount() === 0,
     authenticated: !!session,
     email: session?.email ?? null,
+    desktop: desktopSignInAllowed(req),
   });
 });
 
-authRouter.post('/setup', async (req: Request, res: Response) => {
-  const count = await userCount();
-  if (count > 0) {
-    res.status(403).json({ error: { message: 'Dashboard is already set up', type: 'forbidden_error' } });
+authRouter.post('/desktop-session', (req: Request, res: Response) => {
+  if (!desktopSignInAllowed(req)) {
+    res.status(403).json({ error: { message: 'Desktop sign-in is only available on this computer.', type: 'desktop_signin_forbidden' } });
+    return;
+  }
+  res.json({ token: desktopSessionToken() });
+});
+
+// First-run account creation. Only allowed while there are zero users, so it
+// can't be used to add accounts once the dashboard is claimed.
+authRouter.post('/setup', (req: Request, res: Response) => {
+  if (userCount() > 0) {
+    clearSetupCode();
+    res.status(409).json({ error: { message: 'Setup already completed. Use login instead.', type: 'setup_complete' } });
+    return;
+  }
+
+  // Local/desktop first-run stays frictionless: a browser on this machine can
+  // claim the dashboard without any code. A remote caller must present the
+  // one-time setup code logged at boot, so an exposed fresh install can't be
+  // claimed by a stranger who finds it first.
+  if (!isLoopbackRemote(req) && !setupCodeMatches((req.body ?? {}).setupCode)) {
+    res.status(403).json({
+      error: {
+        message: 'A setup code is required to create the first account from a remote device. ' +
+          'Check the server logs for the code, or open the dashboard from a browser on the machine running FreeLLMAPI.',
+        type: 'setup_code_required',
+      },
+    });
     return;
   }
 
   const parsed = signupSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: { message: parsed.error.errors[0]?.message ?? 'Invalid input', type: 'invalid_request_error' } });
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
-
-  const { email, password } = parsed.data;
-  const setupCode = typeof req.body.setupCode === 'string' ? req.body.setupCode.trim() : '';
-
-  if (!isLoopbackRemote(req) && !setupCodeMatches(setupCode)) {
-    res.status(403).json({ error: { message: 'Invalid or missing setup code', type: 'forbidden_error' } });
-    return;
-  }
-
-  try {
-    const user = await createUser(email, password);
-    clearSetupCode();
-    const token = await createSession(user.userId);
-    res.status(201).json({ token, email: user.email });
-  } catch (err: any) {
-    if (err?.code === 'email_taken') {
-      res.status(409).json({ error: { message: err.message, type: 'conflict_error' } });
-      return;
-    }
-    res.status(500).json({ error: { message: 'Setup failed', type: 'server_error' } });
-  }
+  const user = createUser(parsed.data.email, parsed.data.password);
+  clearSetupCode(); // one-time: the dashboard is now claimed
+  const token = createSession(user.userId);
+  res.status(201).json({ token, email: user.email });
 });
 
-authRouter.post('/login', async (req: Request, res: Response) => {
+authRouter.post('/login', (req: Request, res: Response) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: { message: parsed.error.errors[0]?.message ?? 'Invalid input', type: 'invalid_request_error' } });
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
-
   const { email, password } = parsed.data;
+
   if (isLockedOut(email)) {
     // RFC 6585: a 429 must say when the client may return. The whole gateway
     // already does this (proxy limiter, exhaustion Retry-After, monthly budget
@@ -176,98 +257,115 @@ authRouter.post('/login', async (req: Request, res: Response) => {
     return;
   }
 
-  const user = await verifyCredentials(email, password);
+  const user = verifyCredentials(email, password);
   if (!user) {
     recordFailure(email);
+    // Same message whether the email exists or not — don't leak which.
     res.status(401).json({ error: { message: 'Invalid email or password', type: 'authentication_error' } });
     return;
   }
 
   clearFailures(email);
-  const token = await createSession(user.userId);
+  const token = createSession(user.userId);
   res.json({ token, email: user.email });
 });
 
-authRouter.post('/logout', async (req: Request, res: Response) => {
-  await deleteSession(bearer(req));
-  res.status(204).end();
+authRouter.post('/logout', (req: Request, res: Response) => {
+  deleteSession(bearer(req));
+  res.json({ success: true });
 });
 
-authRouter.get('/me', async (req: Request, res: Response) => {
-  const session = await validateSession(bearer(req));
+authRouter.get('/me', (req: Request, res: Response) => {
+  const session = validateSession(bearer(req));
   if (!session) {
     res.status(401).json({ error: { message: 'Authentication required', type: 'authentication_error' } });
     return;
   }
-  res.json({ email: session.email, userId: session.userId });
+  res.json({ email: session.email });
 });
 
-authRouter.put('/email', async (req: Request, res: Response) => {
-  const session = await validateSession(bearer(req));
+// Change email (requires active session + current password)
+const changeEmailSchema = z.object({
+  currentPassword: z.string().min(1, 'Current password is required'),
+  newEmail: z.string().email('A valid email is required'),
+});
+
+authRouter.post('/change-email', (req: Request, res: Response) => {
+  const session = validateSession(bearer(req));
   if (!session) {
     res.status(401).json({ error: { message: 'Authentication required', type: 'authentication_error' } });
     return;
   }
-
-  const parsed = z.object({
-    currentPassword: z.string().min(1, 'Current password is required'),
-    newEmail: z.string().email('A valid new email is required'),
-  }).safeParse(req.body);
-
+  const parsed = changeEmailSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: { message: parsed.error.errors[0]?.message ?? 'Invalid input', type: 'invalid_request_error' } });
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
-
   try {
-    const success = await updateEmail(session.userId, parsed.data.currentPassword, parsed.data.newEmail);
-    if (!success) {
-      res.status(401).json({ error: { message: 'Incorrect current password', type: 'authentication_error' } });
+    const ok = updateEmail(session.userId, parsed.data.currentPassword, parsed.data.newEmail);
+    if (!ok) {
+      const attempts = (failedPasswordAttempts.get(session.userId) || 0) + 1;
+      if (attempts >= 3) {
+        deleteSession(bearer(req));
+        failedPasswordAttempts.delete(session.userId);
+        res.status(401).json({ error: { message: 'Too many incorrect attempts. You have been signed out.', type: 'authentication_error' } });
+        return;
+      }
+      failedPasswordAttempts.set(session.userId, attempts);
+      res.status(403).json({ error: { message: 'Current password is incorrect', type: 'invalid_password' } });
       return;
     }
+    failedPasswordAttempts.delete(session.userId);
     res.json({ success: true, email: parsed.data.newEmail.trim().toLowerCase() });
   } catch (err: any) {
-    if (err?.code === 'email_taken') {
-      res.status(409).json({ error: { message: err.message, type: 'conflict_error' } });
-      return;
+    if (err.code === 'email_taken') {
+      res.status(409).json({ error: { message: err.message, type: 'email_taken' } });
+    } else {
+      throw err;
     }
-    res.status(500).json({ error: { message: 'Failed to update email', type: 'server_error' } });
   }
 });
 
-authRouter.put('/password', async (req: Request, res: Response) => {
-  const session = await validateSession(bearer(req));
+// Change password (requires active session + current password)
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1, 'Current password is required'),
+  newPassword: z.string().min(8, 'Password must be at least 8 characters'),
+});
+
+authRouter.post('/change-password', (req: Request, res: Response) => {
+  const session = validateSession(bearer(req));
   if (!session) {
     res.status(401).json({ error: { message: 'Authentication required', type: 'authentication_error' } });
     return;
   }
-
-  const parsed = z.object({
-    currentPassword: z.string().min(1, 'Current password is required'),
-    newPassword: z.string().min(8, 'New password must be at least 8 characters'),
-  }).safeParse(req.body);
-
+  const parsed = changePasswordSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: { message: parsed.error.errors[0]?.message ?? 'Invalid input', type: 'invalid_request_error' } });
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
-
-  const success = await updatePassword(session.userId, parsed.data.currentPassword, parsed.data.newPassword);
-  if (!success) {
-    res.status(401).json({ error: { message: 'Incorrect current password', type: 'authentication_error' } });
+  const ok = updatePassword(session.userId, parsed.data.currentPassword, parsed.data.newPassword);
+  if (!ok) {
+    const attempts = (failedPasswordAttempts.get(session.userId) || 0) + 1;
+    if (attempts >= 3) {
+      deleteSession(bearer(req));
+      failedPasswordAttempts.delete(session.userId);
+      res.status(401).json({ error: { message: 'Too many incorrect attempts. You have been signed out.', type: 'authentication_error' } });
+      return;
+    }
+    failedPasswordAttempts.set(session.userId, attempts);
+    res.status(403).json({ error: { message: 'Current password is incorrect', type: 'invalid_password' } });
     return;
   }
-  // Issue fresh token since old sessions are deleted
-  const newToken = await createSession(session.userId);
-  res.json({ success: true, token: newToken });
+  failedPasswordAttempts.delete(session.userId);
+  res.json({ success: true });
 });
 
 // Forgot password: mint a reset code and log it
 const RESET_CODE_MIN_INTERVAL_MS = 10_000;
 let lastResetCodeAt = 0;
-authRouter.post('/forgot-password', async (_req: Request, res: Response) => {
+authRouter.post('/forgot-password', (_req: Request, res: Response) => {
   // Always respond 200 regardless of account existence to avoid user enumeration.
-  if ((await userCount()) === 0) {
+  if (userCount() === 0) {
     res.json({ success: true });
     return;
   }
@@ -278,7 +376,7 @@ authRouter.post('/forgot-password', async (_req: Request, res: Response) => {
     return;
   }
   lastResetCodeAt = now;
-  generateResetCode(await accountEmail());
+  generateResetCode(accountEmail());
   res.json({ success: true });
 });
 
@@ -288,7 +386,7 @@ const resetPasswordSchema = z.object({
   newPassword: z.string().min(8, 'Password must be at least 8 characters'),
 });
 
-authRouter.post('/reset-password', async (req: Request, res: Response) => {
+authRouter.post('/reset-password', (req: Request, res: Response) => {
   const parsed = resetPasswordSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -298,7 +396,7 @@ authRouter.post('/reset-password', async (req: Request, res: Response) => {
     res.status(403).json({ error: { message: 'Invalid or expired reset code', type: 'authentication_error' } });
     return;
   }
-  const user = await resetUserPassword(parsed.data.newPassword);
+  const user = resetUserPassword(parsed.data.newPassword);
   if (!user) {
     res.status(404).json({ error: { message: 'No account found', type: 'not_found' } });
     return;
@@ -307,6 +405,6 @@ authRouter.post('/reset-password', async (req: Request, res: Response) => {
   // Sign the operator straight in: the code already proved they control the
   // install, and sending them back to a login form that needs an email they
   // may not remember left them locked out after a successful reset (#1477).
-  const token = await createSession(user.userId);
+  const token = createSession(user.userId);
   res.json({ success: true, token, email: user.email });
 });

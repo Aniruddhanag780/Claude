@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import type { Platform } from '@freellmapi/shared/types.js';
-import { getPostgresPool, getUnifiedApiKey } from '../db/index.js';
+import { getDb, getUnifiedApiKey } from '../db/index.js';
 import { isEncryptionKeyInitialized } from '../lib/crypto.js';
 import { extractApiToken, timingSafeStringEqual } from './proxy.js';
 import { getProvider } from '../providers/index.js';
@@ -23,10 +23,12 @@ import { openapiSpec } from '../docs/openapi.js';
 export const statusRouter = Router();
 export const providersRouter = Router();
 
-// Cheap "is the PostgreSQL connection answering" probe.
+// Cheap "is the SQLite connection answering" probe. getDb() throws before initDb
+// has run, and prepare/get throws if the handle is closed — either way the
+// server is not serviceable, which is exactly the /livez and /readyz 503 signal.
 function isDbReachable(): boolean {
   try {
-    getPostgresPool().query('SELECT 1');
+    getDb().prepare('SELECT 1').get();
     return true;
   } catch {
     return false;
@@ -59,24 +61,22 @@ statusRouter.get('/livez', (_req: Request, res: Response) => {
 // now (an enabled key whose status is healthy or not-yet-probed). 503 with a
 // machine-readable reason otherwise, so a meta-gateway can skip this instance
 // instead of eating a failover on every call.
-statusRouter.get('/readyz', async (_req: Request, res: Response) => {
+statusRouter.get('/readyz', (_req: Request, res: Response) => {
   if (!isDbReachable()) {
     res.status(503).json({ status: 'unavailable', reason: 'db_unreachable' });
     return;
   }
 
-  const pool = getPostgresPool();
-  const { rows: aggRows } = await pool.query(`
+  const db = getDb();
+  const agg = db.prepare(`
     SELECT
       COUNT(*) AS enabled_keys,
-      COUNT(DISTINCT CASE WHEN c.last_health_error IS NULL OR c.last_health_error = '' THEN p.provider_key END) AS ready_upstreams
-    FROM credentials c
-    JOIN providers p ON p.id = c.provider_id
-    WHERE c.enabled = true
-  `);
-  const agg = aggRows[0] as { enabled_keys: number; ready_upstreams: number };
+      COUNT(DISTINCT CASE WHEN status IN ('healthy', 'unknown') THEN platform END) AS ready_upstreams
+    FROM api_keys
+    WHERE enabled = 1
+  `).get() as { enabled_keys: number; ready_upstreams: number };
 
-  const readyUpstreams = Number(agg.ready_upstreams ?? 0);
+  const readyUpstreams = agg.ready_upstreams ?? 0;
   if (readyUpstreams > 0) {
     res.json({ status: 'ok', ready_upstreams: readyUpstreams });
     return;
@@ -85,7 +85,7 @@ statusRouter.get('/readyz', async (_req: Request, res: Response) => {
   // Distinguish "nothing configured" from "everything cooling down" from
   // "everything unhealthy" so the caller can act on the specific reason.
   let reason: string;
-  if (Number(agg.enabled_keys ?? 0) === 0) {
+  if ((agg.enabled_keys ?? 0) === 0) {
     reason = 'no_upstreams_configured';
   } else if (getSoonestCooldownExpiry() != null) {
     reason = 'all_upstreams_rate_limited';
@@ -109,7 +109,7 @@ interface PlatformKeyRow {
 // decide "route here or skip", with no key material and no PII. Behind the
 // unified API key (like the rest of /v1); mounted before the proxy rate limiter
 // so status polling doesn't draw down a caller's request budget.
-providersRouter.get('/providers', async (req: Request, res: Response) => {
+providersRouter.get('/providers', (req: Request, res: Response) => {
   const token = extractApiToken(req);
   const unifiedKey = getUnifiedApiKey();
   if (!token || !timingSafeStringEqual(token, unifiedKey)) {
@@ -117,49 +117,40 @@ providersRouter.get('/providers', async (req: Request, res: Response) => {
     return;
   }
 
-  const pool = getPostgresPool();
+  const db = getDb();
 
   // Per-platform key-status rollup (only enabled keys count toward serviceability).
-  const { rows: platformRows } = await pool.query<PlatformKeyRow>(`
+  const platformRows = db.prepare(`
     SELECT
-      p.provider_key AS platform,
-      COUNT(*) AS enabled_keys,
-      COUNT(*) FILTER (WHERE c.last_health_error IS NULL OR c.last_health_error = '') AS healthy_keys,
-      0 AS unknown_keys,
-      COUNT(*) FILTER (WHERE c.last_health_error IS NOT NULL AND c.last_health_error != '') AS invalid_keys,
-      0 AS error_keys
-    FROM credentials c
-    JOIN providers p ON p.id = c.provider_id
-    WHERE c.enabled = true
-    GROUP BY p.provider_key
-  `);
+      platform,
+      SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS enabled_keys,
+      SUM(CASE WHEN enabled = 1 AND status = 'healthy' THEN 1 ELSE 0 END) AS healthy_keys,
+      SUM(CASE WHEN enabled = 1 AND status = 'unknown' THEN 1 ELSE 0 END) AS unknown_keys,
+      SUM(CASE WHEN enabled = 1 AND status = 'invalid' THEN 1 ELSE 0 END) AS invalid_keys,
+      SUM(CASE WHEN enabled = 1 AND status = 'error' THEN 1 ELSE 0 END) AS error_keys
+    FROM api_keys
+    GROUP BY platform
+  `).all() as PlatformKeyRow[];
 
   // Active cooldowns (rate limiting) rolled up to the platform, with the soonest
   // resume time. rate_limit_cooldowns is per (platform, model, key); the MIN is
   // the earliest moment any of that platform's routes frees up.
-  // NOTE: rate_limit_cooldowns may not exist in PostgreSQL yet (legacy SQLite table).
   const now = Date.now();
-  let resumeByPlatform = new Map<string, number>();
-  try {
-    const { rows: cooldownRows } = await pool.query<{ platform: string; resume_ms: number }>(`
-      SELECT platform, MIN(expires_at_ms) AS resume_ms
-      FROM rate_limit_cooldowns
-      WHERE expires_at_ms > $1
-      GROUP BY platform
-    `, [now]);
-    resumeByPlatform = new Map(cooldownRows.map(r => [r.platform, r.resume_ms]));
-  } catch {
-    // Table may not exist yet; cooldowns are in-memory via ratelimit service
-  }
+  const cooldownRows = db.prepare(`
+    SELECT platform, MIN(expires_at_ms) AS resume_ms
+    FROM rate_limit_cooldowns
+    WHERE expires_at_ms > ?
+    GROUP BY platform
+  `).all(now) as Array<{ platform: string; resume_ms: number }>;
+  const resumeByPlatform = new Map(cooldownRows.map(r => [r.platform, r.resume_ms]));
 
   // Most recent probe error per platform (enabled keys, newest first).
-  const { rows: errorRows } = await pool.query<{ platform: string; last_health_error: string }>(`
-    SELECT p.provider_key AS platform, c.last_health_error
-    FROM credentials c
-    JOIN providers p ON p.id = c.provider_id
-    WHERE c.enabled = true AND c.last_health_error IS NOT NULL AND c.last_health_error != ''
-    ORDER BY c.last_checked_at DESC NULLS LAST
-  `);
+  const errorRows = db.prepare(`
+    SELECT platform, last_health_error
+    FROM api_keys
+    WHERE enabled = 1 AND last_health_error IS NOT NULL
+    ORDER BY last_checked_at DESC
+  `).all() as Array<{ platform: string; last_health_error: string }>;
   const lastErrorByPlatform = new Map<string, string>();
   for (const row of errorRows) {
     if (!lastErrorByPlatform.has(row.platform)) {
@@ -182,23 +173,17 @@ providersRouter.get('/providers', async (req: Request, res: Response) => {
   const counts = { healthy: 0, rate_limited: 0, invalid: 0, unknown: 0 };
 
   const providers = platformRows
-    .filter(p => Number(p.enabled_keys) > 0)
+    .filter(p => p.enabled_keys > 0)
     .map(p => {
-      const healthyKeys = Number(p.healthy_keys);
-      const unknownKeys = Number(p.unknown_keys);
-      const invalidKeys = Number(p.invalid_keys);
-      const errorKeys = Number(p.error_keys);
-      const enabledKeys = Number(p.enabled_keys);
       const onCooldown = resumeByPlatform.has(p.platform);
-
       let status: 'healthy' | 'rate_limited' | 'invalid' | 'unknown';
-      if (healthyKeys > 0 && !onCooldown) {
+      if (p.healthy_keys > 0 && !onCooldown) {
         status = 'healthy';
       } else if (onCooldown) {
         status = 'rate_limited';
-      } else if (unknownKeys > 0) {
+      } else if (p.unknown_keys > 0) {
         status = 'unknown';
-      } else if (invalidKeys > 0 || errorKeys > 0) {
+      } else if (p.invalid_keys > 0 || p.error_keys > 0) {
         status = 'invalid';
       } else {
         status = 'unknown';
@@ -210,7 +195,7 @@ providersRouter.get('/providers', async (req: Request, res: Response) => {
         platform: p.platform,
         name: provider?.name ?? p.platform,
         status,
-        keys: enabledKeys,
+        keys: p.enabled_keys,
       };
       if (status === 'rate_limited') {
         const resumeMs = resumeByPlatform.get(p.platform);

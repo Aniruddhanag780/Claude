@@ -20,7 +20,7 @@ import type { Db } from '../db/types.js';
 import { SPEKA_BASE_URL } from '../providers/speka.js';
 import { ELECTRONHUB_BASE_URL } from '../providers/electronhub.js';
 import { INFERBASE_BASE_URL } from '../providers/inferbase.js';
-import { AURAY_BASE_URL } from '../providers/auray.js';
+import { LLMTR_BASE_URL } from '../providers/llmtr.js';
 
 export interface EmbeddingModelRow {
   id: number;
@@ -112,7 +112,6 @@ export const EMBEDDING_PLATFORMS = new Set([
   'google',
   'nvidia',
   'openrouter',
-  'github',
   'cloudflare',
   'huggingface',
   'cohere',
@@ -120,7 +119,7 @@ export const EMBEDDING_PLATFORMS = new Set([
   'speka',
   'electronhub',
   'inferbase',
-  'auray',
+  'llmtr',
 ]);
 
 interface ProviderCallResult {
@@ -164,7 +163,7 @@ async function openAiStyleEmbed(
     usage?: { prompt_tokens?: number; total_tokens?: number };
   };
   const data = [...(j.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-  if (['electronhub', 'inferbase', 'auray'].includes(platform) && (
+  if (['electronhub', 'inferbase', 'llmtr'].includes(platform) && (
     j.model !== modelId || data.length !== inputs.length ||
     data.some((d, i) => d.index !== i || !Array.isArray(d.embedding) ||
       d.embedding.length !== (dimensions ?? expectedDimensions) ||
@@ -172,7 +171,7 @@ async function openAiStyleEmbed(
   )) {
     // A successful HTTP response is not enough: wrong model/dimension or
     // malformed vectors would corrupt the caller's embedding family.
-    const provider = platform === 'electronhub' ? 'ElectronHub' : platform === 'auray' ? 'Auray' : 'Inferbase';
+    const provider = platform === 'electronhub' ? 'ElectronHub' : platform === 'llmtr' ? 'LLMTR' : 'Inferbase';
     throw new EmbeddingsError(`${provider} returned mismatched or malformed embeddings`, 502);
   }
   return {
@@ -281,8 +280,6 @@ async function callProvider(row: EmbeddingModelRow, credential: ProviderCredenti
       return openAiStyleEmbed('https://integrate.api.nvidia.com/v1/embeddings', row.platform, key, row.model_id, inputs, { input_type: 'query' }, dimensions);
     case 'openrouter':
       return openAiStyleEmbed('https://openrouter.ai/api/v1/embeddings', row.platform, key, row.model_id, inputs, {}, dimensions);
-    case 'github':
-      return openAiStyleEmbed('https://models.github.ai/inference/embeddings', row.platform, key, row.model_id, inputs, {}, dimensions);
     case 'sealion':
       return openAiStyleEmbed('https://api.sea-lion.ai/v1/embeddings', row.platform, key, row.model_id, inputs, {}, dimensions);
     case 'speka':
@@ -291,13 +288,13 @@ async function callProvider(row: EmbeddingModelRow, credential: ProviderCredenti
       return openAiStyleEmbed(`${ELECTRONHUB_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions, row.dimensions);
     case 'inferbase':
       return openAiStyleEmbed(`${INFERBASE_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions, row.dimensions);
-    case 'auray':
-      // Auray documents fixed-width vectors, not Matryoshka truncation. A cold
-      // request can take longer than the generic 30-second embedding deadline.
+    case 'llmtr':
+      // The catalog-approved models return fixed-width vectors. Do not send a
+      // dimension override or accept a substituted model/embedding space.
       if (dimensions !== undefined && dimensions !== row.dimensions) {
-        throw new EmbeddingsError('Auray does not support an embedding dimension override', 400);
+        throw new EmbeddingsError('LLMTR does not support an embedding dimension override', 400);
       }
-      return openAiStyleEmbed(`${AURAY_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, {}, undefined, row.dimensions, 180_000);
+      return openAiStyleEmbed(`${LLMTR_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, {}, undefined, row.dimensions);
     case 'cloudflare': {
       // Key is stored as "account_id:token".
       const sep = key.indexOf(':');
@@ -395,7 +392,7 @@ export async function runEmbeddings(model: string | undefined, inputs: string[],
   // limited end to end earns a Retry-After, and then the soonest one.
   const hints = new RetryHintTracker();
   for (const row of chain) {
-    const { credential, budgetBlocked } = await reserveProviderCredential(row, estimateTokens(inputs));
+    const { credential, budgetBlocked } = reserveProviderCredential(row, estimateTokens(inputs));
     if (!credential) {
       if (budgetBlocked) {
         lastError = new EmbeddingsError('Monthly key budget exhausted', 429, 'quota_exceeded');

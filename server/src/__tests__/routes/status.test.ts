@@ -3,7 +3,6 @@ import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
-import { reloadRoutingRegistry } from '../../services/router-registry.js';
 
 async function request(
   app: Express,
@@ -21,20 +20,12 @@ async function request(
   return { status: res.status, body: data };
 }
 
-async function insertHealthyKey(platform: string) {
+function insertHealthyKey(platform: string) {
   const secret = encrypt(`${platform}-test-key`);
-  const pool = getDb();
-  const providerRes = await pool.query('SELECT id FROM providers WHERE provider_key = $1', [platform]);
-  let providerId = providerRes.rows[0]?.id;
-  if (!providerId) {
-    const newProv = await pool.query('INSERT INTO providers (provider_key, name, enabled) VALUES ($1, $1, true) RETURNING id', [platform]);
-    providerId = newProv.rows[0].id;
-  }
-  await pool.query(`
-    INSERT INTO credentials (provider_id, label, encrypted_key, iv, auth_tag, circuit_state, enabled)
-    VALUES ($1, 'test', $2, $3, $4, 'HEALTHY', true)
-  `, [providerId, secret.encrypted, secret.iv, secret.authTag]);
-  await reloadRoutingRegistry();
+  getDb().prepare(`
+    INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+    VALUES (?, 'test', ?, ?, ?, 'healthy', 1)
+  `).run(platform, secret.encrypted, secret.iv, secret.authTag);
 }
 
 // These tests share one in-memory DB and run top-to-bottom: the "no upstreams"
@@ -43,9 +34,9 @@ describe('status & interop endpoints (#433)', () => {
   let app: Express;
   let unifiedKey = '';
 
-  beforeAll(async () => {
+  beforeAll(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    await initDb(':memory:');
+    initDb(':memory:');
     app = createApp();
     unifiedKey = getUnifiedApiKey();
   });
@@ -80,7 +71,7 @@ describe('status & interop endpoints (#433)', () => {
   });
 
   it('GET /readyz returns 200 once a healthy upstream exists', async () => {
-    await insertHealthyKey('groq');
+    insertHealthyKey('groq');
     const { status, body } = await request(app, 'GET', '/readyz');
     expect(status).toBe(200);
     expect(body.status).toBe('ok');

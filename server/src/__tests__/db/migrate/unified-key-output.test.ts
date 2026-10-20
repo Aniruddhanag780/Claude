@@ -1,5 +1,6 @@
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { closePostgresPool, getUnifiedApiKey, initDb } from '../../../db/index.js';
+import { up as runLegacyBaseline } from '../../../db/migrations/20260101_000000_legacy_baseline.js';
 
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 const ORIGINAL_CI = process.env.CI;
@@ -25,7 +26,7 @@ describe('legacy baseline unified API key output', () => {
     });
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     vi.restoreAllMocks();
     restoreEnv('NODE_ENV', ORIGINAL_NODE_ENV);
     restoreEnv('CI', ORIGINAL_CI);
@@ -37,67 +38,71 @@ describe('legacy baseline unified API key output', () => {
     } else {
       Reflect.deleteProperty(process.stdout, 'isTTY');
     }
-    await closePostgresPool();
   });
 
-  it('does not put a fresh key in production logs, even with an attached TTY', async () => {
+  it('does not put a fresh key in production logs, even with an attached TTY', () => {
     process.env.NODE_ENV = 'production';
     setStdoutTTY(true);
 
-    const key = await runBaselineAndReadKey();
+    const key = runBaselineAndReadKey();
 
     expect(output.join('')).not.toContain(key);
     expect(output.join('')).toContain('dashboard');
     expect(output.join('')).toContain('Keys page');
   });
 
-  it('does not put a fresh key in non-TTY development logs', async () => {
+  it('does not put a fresh key in non-TTY development logs', () => {
     process.env.NODE_ENV = 'development';
     setStdoutTTY(false);
 
-    const key = await runBaselineAndReadKey();
+    const key = runBaselineAndReadKey();
 
     expect(output.join('')).not.toContain(key);
     expect(output.join('')).toContain('dashboard');
     expect(output.join('')).toContain('Keys page');
   });
 
-  it('does not disclose a key from a Kubernetes TTY', async () => {
+  it('does not disclose a key from a Kubernetes TTY', () => {
     process.env.NODE_ENV = 'development';
     process.env.KUBERNETES_SERVICE_HOST = '10.0.0.1';
     setStdoutTTY(true);
 
-    const key = await runBaselineAndReadKey();
+    const key = runBaselineAndReadKey();
 
     expect(output.join('')).not.toContain(key);
     expect(output.join('')).toContain('not printed to logs');
   });
 
-  it('does not disclose a key in CI even with a development TTY', async () => {
+  it('does not disclose a key in CI even with a development TTY', () => {
     process.env.NODE_ENV = 'development';
     process.env.CI = 'true';
     setStdoutTTY(true);
 
-    const key = await runBaselineAndReadKey();
+    const key = runBaselineAndReadKey();
 
     expect(output.join('')).not.toContain(key);
     expect(output.join('')).toContain('not printed to logs');
   });
 
-  it('discloses the full key only for interactive local development', async () => {
+  it('discloses the full key only for interactive local development', () => {
     process.env.NODE_ENV = 'development';
     setStdoutTTY(true);
 
-    const key = await runBaselineAndReadKey();
+    const key = runBaselineAndReadKey();
 
     expect(output.join('')).toContain(`Your unified API key: ${key}`);
   });
 });
 
-async function runBaselineAndReadKey(): Promise<string> {
-  await closePostgresPool();
-  await initDb(':memory:');
-  return getUnifiedApiKey();
+function runBaselineAndReadKey(): string {
+  const db = new Database(':memory:');
+  try {
+    runLegacyBaseline(db);
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get() as { value: string };
+    return row.value;
+  } finally {
+    db.close();
+  }
 }
 
 function setStdoutTTY(value: boolean): void {

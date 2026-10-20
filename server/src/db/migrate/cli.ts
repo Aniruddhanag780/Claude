@@ -2,8 +2,9 @@ import '../../env.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import pg from 'pg';
-import { getPostgresPool, closePostgresPool } from '../postgres.js';
+
+import type { Db } from '../types.js';
+import { connectDb } from '../index.js';
 import { getMigrationStatuses, runMigrations } from './runner.js';
 
 type Command = 'up' | 'down' | 'fresh' | 'status' | 'create';
@@ -21,43 +22,39 @@ async function main(): Promise<void> {
     return;
   }
 
-  const pool = getPostgresPool();
+  const db = connectDb();
 
-  try {
-    switch (command) {
-      case 'up':
-        await runMigrations(pool, 'up');
-        return;
-      case 'down':
-        await runMigrations(pool, 'down');
-        return;
-      case 'fresh':
-        await runFresh(pool);
-        return;
-      case 'status':
-        await printStatus(pool);
-        return;
-      default:
-        console.error('Usage: tsx src/db/migrate/cli.ts <up|down|fresh|status|create>');
-        process.exit(1);
-    }
-  } finally {
-    await closePostgresPool();
+  switch (command) {
+    case 'up':
+      await runMigrations(db, 'up');
+      return;
+    case 'down':
+      await runMigrations(db, 'down');
+      return;
+    case 'fresh':
+      await runFresh(db);
+      return;
+    case 'status':
+      printStatus(db);
+      return;
+    default:
+      console.error('Usage: tsx src/db/migrate/cli.ts <up|down|fresh|status|create>');
+      process.exit(1);
   }
 }
 
-async function runFresh(pool: pg.Pool): Promise<void> {
+async function runFresh(db: Db): Promise<void> {
   if (process.env.NODE_ENV === 'production') {
     console.error('db:migration:fresh is not allowed in production');
     process.exit(1);
   }
 
-  await dropAllUserTables(pool);
-  await runMigrations(pool, 'up');
+  dropAllUserTables(db);
+  await runMigrations(db, 'up');
 }
 
-async function printStatus(pool: pg.Pool): Promise<void> {
-  const statuses = await getMigrationStatuses(pool);
+function printStatus(db: Db): void {
+  const statuses = getMigrationStatuses(db);
   console.table(statuses.map(status => ({
     filename: status.filename,
     status: status.status,
@@ -186,16 +183,30 @@ function toMigrationBindingName(filename: string): string {
   return `migration${filename.replace(/\.ts$/, '').replace(/[^a-zA-Z0-9_]/g, '_')}`;
 }
 
-async function dropAllUserTables(pool: pg.Pool): Promise<void> {
-  const res = await pool.query(`
-    SELECT tablename
-      FROM pg_tables
-     WHERE schemaname = 'public'
-  `);
+function dropAllUserTables(db: Db): void {
+  const tables = db.prepare(`
+    SELECT name
+      FROM sqlite_master
+     WHERE type = 'table'
+       AND name NOT LIKE 'sqlite_%'
+     ORDER BY name ASC
+  `).all() as { name: string }[];
 
-  for (const row of res.rows) {
-    await pool.query(`DROP TABLE IF EXISTS "${row.tablename}" CASCADE`);
+  db.pragma('foreign_keys = OFF');
+  try {
+    const dropTables = db.transaction(() => {
+      for (const { name } of tables) {
+        db.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(name)}`);
+      }
+    });
+    dropTables();
+  } finally {
+    db.pragma('foreign_keys = ON');
   }
+}
+
+function quoteIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
 }
 
 function toPosixPath(value: string): string {

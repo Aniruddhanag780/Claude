@@ -90,14 +90,8 @@ describe('client profiles (#411)', () => {
       expect(created.name).toBe('crud-bot');
       expect(created.systemPrompt).toBe('be helpful');
       expect(created.enabled).toBe(true);
-      // Masked display comes from the encrypted copy, never the hash. The
-      // exact glyphs are the fork's own (it keeps the provider prefix
-      // visible); what matters is that the secret cannot be recovered from
-      // the mask.
-      expect(created.maskedKey).not.toBe(created.key);
-      expect(created.maskedKey).not.toContain(created.key.slice(6, -4));
-      expect(created.maskedKey.endsWith(created.key.slice(-4))).toBe(true);
-      expect(created.maskedKey.length).toBeLessThan(created.key.length);
+      // Masked display comes from the encrypted copy, never the hash.
+      expect(created.maskedKey).toBe(`${created.key.slice(0, 4)}...${created.key.slice(-4)}`);
 
       const list = await request(app, 'GET', '/api/client-profiles', { token: dashToken });
       expect(list.status).toBe(200);

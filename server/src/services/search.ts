@@ -1,14 +1,17 @@
-import { getDb, getPostgresPool, getSetting, setSetting } from '../db/index.js';
-import { getActiveRegistry } from './router-registry.js';
-import { parseRetryAfterMs } from '../providers/base.js';
+import { getDb, getSetting, setSetting } from '../db/index.js';
+import { parseRetryAfterMs, parseStatedRetryMs } from '../providers/base.js';
 import { RetryHintTracker } from '../lib/retry-hint.js';
 import { getClientContext } from '../lib/client-context.js';
 import { proxyFetch } from '../lib/proxy.js';
 import { isSearchPlatform } from '../lib/search-platforms.js';
 import { TAVILY_BASE_URL } from '../providers/tavily.js';
+import { SERPSEARCH_BASE_URL } from '../providers/serpsearch.js';
 import { EXA_BASE_URL } from '../providers/exa.js';
 import { FIRECRAWL_BASE_URL } from '../providers/firecrawl.js';
 import { LINKUP_BASE_URL } from '../providers/linkup.js';
+import { PARALLEL_BASE_URL, PARALLEL_MCP_URL } from '../providers/parallel.js';
+import { isAnonymousCredential } from '../lib/credential.js';
+import { randomUUID } from 'node:crypto';
 import { secondsUntilNextMonth } from './key-budget.js';
 import { reserveProviderCredential, type ReservedProviderCredential } from './provider-credential.js';
 import { isOnCooldown, setCooldown } from './ratelimit.js';
@@ -182,14 +185,33 @@ async function upstream(url: string, platform: string, init: RequestInit, signal
   );
   if (!res.ok) {
     const body = await res.text().catch(() => '');
+    // Header first, then a back-off stated inside the body (RetryInfo or
+    // prose), mirroring buildUpstreamError in providers/base.ts.
+    let stated: number | undefined;
+    try {
+      stated = parseStatedRetryMs(JSON.parse(body));
+    } catch {
+      stated = parseStatedRetryMs(body);
+    }
     throw new SearchError(
       `${platform} ${res.status}: ${body.slice(0, 200)}`,
       res.status,
       undefined,
-      parseRetryAfterMs(res.headers?.get('retry-after') ?? null),
+      parseRetryAfterMs(res.headers?.get('retry-after') ?? null) ?? stated,
     );
   }
+  // MCP servers may answer a POST as a one-event stream instead of plain JSON.
+  if ((res.headers?.get('content-type') ?? '').includes('text/event-stream')) {
+    return lastSseJson(await res.text());
+  }
   return res.json();
+}
+
+/** The JSON payload of the last `data:` event in an SSE body. */
+function lastSseJson(body: string): unknown {
+  const data = body.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trim()).filter(Boolean);
+  if (data.length === 0) throw new SearchError('upstream sent an empty event stream', 502);
+  return JSON.parse(data[data.length - 1]!);
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -222,6 +244,28 @@ function keepHits(hits: Array<{ title: string; url: string; content: string; sco
   }));
 }
 
+// Parallel's anonymous Search MCP asks for a stable conversation id on every
+// call (used for its free-tier rate limiting); one per server process.
+const PARALLEL_SESSION_ID = `freellmapi-${randomUUID()}`;
+const RATE_LIMIT_TEXT = /rate.?limit|too many requests|quota/i;
+
+/** Unwrap a JSON-RPC `tools/call` reply from Parallel's Search MCP into the
+ *  REST-shaped search response its text content carries. */
+function parallelMcpPayload(rpc: unknown): { results?: Array<Record<string, unknown>> } {
+  const r = rpc as { error?: { message?: unknown }; result?: { isError?: boolean; content?: Array<{ type?: string; text?: unknown }> } };
+  const text = (r?.result?.content ?? []).find(c => c?.type === 'text' && typeof c.text === 'string')?.text as string | undefined;
+  const failure = typeof r?.error?.message === 'string' ? r.error.message : (r?.result?.isError ? (text ?? 'tool error') : null);
+  if (failure !== null) {
+    throw new SearchError(`parallel MCP: ${failure.slice(0, 200)}`, RATE_LIMIT_TEXT.test(failure) ? 429 : 502);
+  }
+  if (!text) throw new SearchError('parallel MCP returned no text content', 502);
+  try {
+    return JSON.parse(text) as { results?: Array<Record<string, unknown>> };
+  } catch {
+    throw new SearchError('parallel MCP returned non-JSON content', 502);
+  }
+}
+
 /** Tavily's wire shape, shared by Tavily itself and custom search relays. */
 async function tavilyShaped(url: string, platform: string, cred: ReservedProviderCredential, query: string, opts: SearchOptions, maxResults: number): Promise<AdapterResult> {
   const body: Record<string, unknown> = { query, max_results: maxResults };
@@ -242,6 +286,33 @@ async function tavilyShaped(url: string, platform: string, cred: ReservedProvide
 }
 
 const ADAPTERS: Record<string, Adapter> = {
+  serpsearch: async (cred, query, opts, n) => {
+    const news = opts.topic === 'news';
+    const url = new URL(`${SERPSEARCH_BASE_URL}/${news ? 'news' : 'search'}`);
+    url.searchParams.set('query', query);
+    const parsed = await upstream(url.toString(), 'serpsearch', {
+      method: 'GET', redirect: 'error', headers: { Authorization: `Bearer ${cred.key}` },
+    }, opts.signal);
+    let rows: unknown[];
+    if (news) {
+      if (!Array.isArray(parsed) || parsed.some(g => !g || !Array.isArray(g.articles))) {
+        throw new SearchError('SerpSearch returned invalid news results', 502);
+      }
+      rows = parsed.flatMap(g => g.articles);
+    } else {
+      const result = parsed as { organic_results?: unknown; error?: unknown } | null;
+      if (!result || typeof result !== 'object' || Array.isArray(result) || result.error ||
+          (result.organic_results !== undefined && !Array.isArray(result.organic_results))) {
+        throw new SearchError('SerpSearch returned invalid search results', 502);
+      }
+      // A valid SERP may omit organic_results entirely (e.g. no matches).
+      rows = (result.organic_results ?? []) as unknown[];
+    }
+    const hits = rows.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object').map(r => ({
+      title: str(r.title), url: str(r.url), content: str(r.description),
+    }));
+    return { results: keepHits(hits).slice(0, n) };
+  },
   tavily: (cred, query, opts, n) => tavilyShaped(`${TAVILY_BASE_URL}/search`, 'tavily', cred, query, opts, n),
 
   custom: (cred, query, opts, n) => {
@@ -308,6 +379,34 @@ const ADAPTERS: Record<string, Adapter> = {
       .map(r => ({ title: str(r.name), url: str(r.url), content: str(r.content) }));
     return { results: keepHits(hits) };
   },
+
+  // Keyless: the stored `no-key` sentinel goes through the anonymous Search
+  // MCP; a real key uses the REST API. Both return the same result shape.
+  parallel: async (cred, query, opts, n) => {
+    const args = { objective: query, search_queries: [query] };
+    const parsed = isAnonymousCredential(cred.key)
+      ? parallelMcpPayload(await upstream(PARALLEL_MCP_URL, 'parallel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: { name: 'web_search', arguments: { ...args, session_id: PARALLEL_SESSION_ID } },
+          }),
+        }, opts.signal))
+      : await upstream(`${PARALLEL_BASE_URL}/search`, 'parallel', {
+          method: 'POST',
+          headers: { 'x-api-key': cred.key.trim(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...args, mode: 'fast', advanced_settings: { max_results: n } }),
+        }, opts.signal) as { results?: Array<Record<string, unknown>> };
+    const hits = (Array.isArray(parsed?.results) ? parsed.results : []).slice(0, n).map(r => ({
+      title: str(r.title) || str(r.url),
+      url: str(r.url),
+      content: Array.isArray(r.excerpts) ? r.excerpts.filter(e => typeof e === 'string').join(' … ') : '',
+    }));
+    return { results: keepHits(hits) };
+  },
 };
 
 /** Platforms with a search adapter. catalog-sync gates searchEngines rows on
@@ -325,17 +424,6 @@ function logSearch(row: SearchEngineRow, keyId: number | null, status: 'ok' | 'e
   } catch (e) {
     console.error('Failed to log search request:', e);
   }
-
-  try {
-    const pool = getPostgresPool();
-    if (pool && !('isMock' in pool && (pool as any).isMock?.())) {
-      pool.query(
-        `INSERT INTO search_requests (engine_id, platform, key_id, status, latency_ms, result_count, client_agent, error)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [row.model_id, row.platform, keyId, status, latencyMs, resultCount, clientAgent, error]
-      ).catch((e: any) => console.error('Failed to log search request to Postgres:', e?.message));
-    }
-  } catch {}
 }
 
 /** Bench this key for this engine according to what the upstream said. */
@@ -359,19 +447,15 @@ function coolDown(row: SearchEngineRow, keyId: number, e: SearchError): void {
  *  be attempted. The agents' web_search integration keys off this. */
 export function searchAvailable(): boolean {
   const db = getDb();
-  const registryCreds = getActiveRegistry()?.getAllCredentials() ?? [];
-
   for (const row of orderedEngines()) {
     if (row.enabled !== 1) continue;
     if (row.platform === 'custom') {
       if (row.key_id == null) continue;
-      if (registryCreds.some(c => c.id === row.key_id && c.enabled && !c.runtime.lastHealthError)) return true;
       const k = db.prepare("SELECT 1 FROM api_keys WHERE id = ? AND enabled = 1 AND status IN ('healthy', 'unknown')").get(row.key_id);
       if (k) return true;
       continue;
     }
     if (!ADAPTERS[row.platform]) continue;
-    if (registryCreds.some(c => c.providerKey === row.platform && c.enabled && !c.runtime.lastHealthError)) return true;
     const k = db.prepare("SELECT 1 FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') LIMIT 1").get(row.platform);
     if (k) return true;
   }
@@ -410,7 +494,7 @@ export async function runSearch(query: string, opts: SearchOptions = {}): Promis
     const tried = new Set<number>();
     for (;;) {
       if (opts.signal?.aborted) throw new SearchError('search cancelled by the client', 499);
-      const { credential, budgetBlocked } = await reserveProviderCredential(
+      const { credential, budgetBlocked } = reserveProviderCredential(
         row,
         0,
         keyId => tried.has(keyId) || isOnCooldown(row.platform, row.model_id, keyId),
@@ -463,7 +547,7 @@ export async function runSearch(query: string, opts: SearchOptions = {}): Promis
       );
     }
     throw new SearchError(
-      'No search key configured. Add a Tavily, Exa, Firecrawl or Linkup key on the Keys page.',
+      'No search key configured. Enable Parallel (no key needed) or add a Tavily, Exa, Firecrawl or Linkup key on the Keys page.',
       503,
       'no_search_keys',
     );
@@ -512,35 +596,24 @@ const FREE_LAG_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function listSearchEngines(): SearchEngineView[] {
   const db = getDb();
-  const keyRows = ((db.prepare(`
+  const keyRows = db.prepare(`
     SELECT id, platform, enabled, status FROM api_keys
      WHERE platform = 'custom' OR platform IN (${[...SEARCH_ENGINE_PLATFORMS].map(() => '?').join(', ')})
-  `).all(...SEARCH_ENGINE_PLATFORMS) as { id: number; platform: string; enabled: number; status: string }[] | undefined) ?? []);
+  `).all(...SEARCH_ENGINE_PLATFORMS) as { id: number; platform: string; enabled: number; status: string }[];
   const healthy = (k: { enabled: number; status: string }) => k.enabled === 1 && (k.status === 'healthy' || k.status === 'unknown');
   const monthCounts = new Map(
-    ((db.prepare(`
+    (db.prepare(`
       SELECT platform, engine_id, COUNT(*) AS n FROM search_requests
        WHERE status = 'ok' AND created_at >= datetime('now', 'start of month')
        GROUP BY platform, engine_id
-    `).all() as { platform: string; engine_id: string; n: number }[] | undefined) ?? []).map(r => [`${r.platform}:${r.engine_id}`, r.n]),
+    `).all() as { platform: string; engine_id: string; n: number }[]).map(r => [`${r.platform}:${r.engine_id}`, r.n]),
   );
-
-  const registryCreds = getActiveRegistry()?.getAllCredentials() ?? [];
 
   return orderedEngines().map(row => {
     const meta = parseSearchMeta(row.meta_json);
     const keys = row.platform === 'custom'
       ? keyRows.filter(k => k.id === row.key_id)
       : keyRows.filter(k => k.platform === row.platform);
-    const regKeys = row.platform === 'custom'
-      ? registryCreds.filter(k => k.id === row.key_id)
-      : registryCreds.filter(k => k.providerKey === row.platform);
-
-    const keyCount = keys.length || regKeys.length;
-    const healthyKeyCount = keys.length
-      ? keys.filter(healthy).length
-      : regKeys.filter(k => k.enabled && !k.runtime.lastHealthError).length;
-
     const premiumSince = typeof meta.premiumSince === 'string' ? meta.premiumSince : null;
     const premiumMs = premiumSince ? Date.parse(premiumSince) : NaN;
     return {
@@ -556,8 +629,8 @@ export function listSearchEngines(): SearchEngineView[] {
       premiumSince,
       freeFrom: Number.isFinite(premiumMs) ? new Date(premiumMs + FREE_LAG_MS).toISOString() : null,
       isCustom: row.platform === 'custom',
-      keyCount,
-      healthyKeyCount,
+      keyCount: keys.length,
+      healthyKeyCount: keys.filter(healthy).length,
       searchesThisMonth: monthCounts.get(engineKey(row)) ?? 0,
     };
   });
@@ -619,120 +692,34 @@ export function searchAnalytics(range: SearchAnalyticsRange): SearchAnalytics {
            COALESCE(SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END), 0) AS ok,
            COALESCE(AVG(latency_ms), 0) AS avg_latency
       FROM search_requests ${where}
-  `).get(...args) as { attempts?: number; ok?: number; avg_latency?: number } | undefined;
-
-  const todayRow = db.prepare(`
+  `).get(...args) as { attempts: number; ok: number; avg_latency: number };
+  const today = (db.prepare(`
     SELECT COUNT(*) AS n FROM search_requests WHERE status = 'ok' AND created_at >= datetime('now', 'start of day')
-  `).get() as { n?: number } | undefined;
-  const today = Number(todayRow?.n ?? 0);
-
-  const attempts = Number(totals?.attempts ?? 0);
-  const ok = Number(totals?.ok ?? 0);
-  const avgLatency = Number(totals?.avg_latency ?? 0);
+  `).get() as { n: number }).n;
 
   const names = new Map(allEngineRows().map(r => [r.model_id, r.display_name]));
-  const byEngineRows = (db.prepare(`
+  const byEngine = (db.prepare(`
     SELECT engine_id, COUNT(*) AS n FROM search_requests
      ${where ? `${where} AND` : 'WHERE'} status = 'ok'
      GROUP BY engine_id ORDER BY n DESC, engine_id
-  `).all(...args) as { engine_id: string; n: number }[] | undefined) ?? [];
-
-  const byEngine = byEngineRows.map(r => ({
-    engineId: r.engine_id,
-    displayName: names.get(r.engine_id) ?? r.engine_id,
-    count: Number(r.n ?? 0),
-  }));
-
-  const seriesRows = (db.prepare(`
+  `).all(...args) as { engine_id: string; n: number }[])
+    .map(r => ({ engineId: r.engine_id, displayName: names.get(r.engine_id) ?? r.engine_id, count: r.n }));
+  const series = (db.prepare(`
     SELECT date(created_at) AS day, engine_id, COUNT(*) AS n FROM search_requests
      ${where ? `${where} AND` : 'WHERE'} status = 'ok'
      GROUP BY day, engine_id ORDER BY day, engine_id
-  `).all(...args) as { day: string; engine_id: string; n: number }[] | undefined) ?? [];
-
-  const series = seriesRows.map(r => ({
-    date: r.day,
-    engineId: r.engine_id,
-    count: Number(r.n ?? 0),
-  }));
+  `).all(...args) as { day: string; engine_id: string; n: number }[])
+    .map(r => ({ date: r.day, engineId: r.engine_id, count: r.n }));
 
   return {
-    total: ok,
+    total: totals.ok,
     today,
     // Percent, 0–100, one decimal: the same scale as the chat summary.
-    successRate: attempts > 0 ? Math.round((ok / attempts) * 1000) / 10 : 0,
-    avgLatencyMs: Math.round(avgLatency),
+    successRate: totals.attempts > 0 ? Math.round((totals.ok / totals.attempts) * 1000) / 10 : 0,
+    avgLatencyMs: Math.round(totals.avg_latency),
     byEngine,
     series,
   };
-}
-
-export async function getSearchAnalytics(range: SearchAnalyticsRange): Promise<SearchAnalytics> {
-  const pool = getPostgresPool();
-  if (!pool || ('isMock' in pool && (pool as any).isMock?.())) {
-    return searchAnalytics(range);
-  }
-
-  try {
-    const days = { '24h': 1, '7d': 7, '30d': 30, '90d': 90 } as const;
-    const sinceDate = range === 'all' ? null : new Date(Date.now() - days[range] * 24 * 60 * 60 * 1000);
-    const whereClause = sinceDate ? 'WHERE created_at >= $1' : '';
-    const queryArgs = sinceDate ? [sinceDate.toISOString()] : [];
-
-    const totalsRes = await pool.query(
-      `SELECT COUNT(*) AS attempts,
-              COALESCE(SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END), 0) AS ok,
-              COALESCE(AVG(latency_ms), 0) AS avg_latency
-         FROM search_requests ${whereClause}`,
-      queryArgs
-    );
-    const totals = totalsRes.rows[0] || {};
-    const attempts = Number(totals.attempts || 0);
-    const ok = Number(totals.ok || 0);
-    const avgLatency = Number(totals.avg_latency || 0);
-
-    const todayRes = await pool.query(
-      `SELECT COUNT(*) AS n FROM search_requests WHERE status = 'ok' AND created_at >= date_trunc('day', NOW())`
-    );
-    const today = Number(todayRes.rows[0]?.n || 0);
-
-    const names = new Map(allEngineRows().map(r => [r.model_id, r.display_name]));
-
-    const byEngineRes = await pool.query(
-      `SELECT engine_id, COUNT(*) AS n FROM search_requests
-       ${whereClause ? `${whereClause} AND` : 'WHERE'} status = 'ok'
-       GROUP BY engine_id ORDER BY n DESC, engine_id`,
-      queryArgs
-    );
-    const byEngine = byEngineRes.rows.map(r => ({
-      engineId: r.engine_id,
-      displayName: names.get(r.engine_id) ?? r.engine_id,
-      count: Number(r.n || 0),
-    }));
-
-    const seriesRes = await pool.query(
-      `SELECT TO_CHAR(created_at, 'YYYY-MM-DD') AS day, engine_id, COUNT(*) AS n FROM search_requests
-       ${whereClause ? `${whereClause} AND` : 'WHERE'} status = 'ok'
-       GROUP BY day, engine_id ORDER BY day, engine_id`,
-      queryArgs
-    );
-    const series = seriesRes.rows.map(r => ({
-      date: r.day,
-      engineId: r.engine_id,
-      count: Number(r.n || 0),
-    }));
-
-    return {
-      total: ok,
-      today,
-      successRate: attempts > 0 ? Math.round((ok / attempts) * 1000) / 10 : 0,
-      avgLatencyMs: Math.round(avgLatency),
-      byEngine,
-      series,
-    };
-  } catch (err: any) {
-    console.warn('[search-analytics] Postgres query failed, falling back to sync searchAnalytics:', err?.message ?? err);
-    return searchAnalytics(range);
-  }
 }
 
 /** Search platforms are not chat providers; re-exported for routes that

@@ -214,11 +214,12 @@ export function listMediaModels(modality: MediaModality): MediaModelRow[] {
 }
 
 /** All media models (every media modality, including disabled) for the
- *  dashboard. Search engines share the table (modality 'search') but have
- *  their own page and API (routes/search.ts), so they are left out here. */
+ *  dashboard. Search engines and decision models share the table (modality
+ *  'search' / 'decision') but have their own pages and APIs, so they are left
+ *  out here. */
 export function listAllMediaModels(): MediaModelRow[] {
   return getDb()
-    .prepare("SELECT * FROM media_models WHERE modality != 'search' ORDER BY modality, priority, id")
+    .prepare("SELECT * FROM media_models WHERE modality NOT IN ('search', 'decision') ORDER BY modality, priority, id")
     .all() as MediaModelRow[];
 }
 
@@ -853,7 +854,7 @@ export async function runImageGeneration(model: string | undefined, params: Imag
   for (const row of chain) {
     const { credential, budgetBlocked } = KEYLESS_CAPABLE.has(row.platform)
       ? { credential: { id: null, key: null, baseUrl: null, release: () => {} }, budgetBlocked: false }
-      : await reserveProviderCredential(row, 0);
+      : reserveProviderCredential(row, 0);
     if (!credential) {
       if (budgetBlocked) {
         lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');
@@ -895,7 +896,7 @@ export async function runVideoGeneration(
   const hints = new RetryHintTracker();
   for (const row of chain) {
     throwIfClientGone(clientSignal);
-    const { credential, budgetBlocked } = await reserveProviderCredential(row, 0,
+    const { credential, budgetBlocked } = reserveProviderCredential(row, 0,
       keyId => isOnCooldown(row.platform, row.model_id, keyId));
     if (!credential) {
       if (budgetBlocked) {
@@ -1188,7 +1189,7 @@ export async function runTranscription(model: string | undefined, p: Transcripti
   // Only a chain rate limited end to end earns a Retry-After (the soonest).
   const hints = new RetryHintTracker();
   for (const m of usable) {
-    const { credential, budgetBlocked } = await reserveProviderCredential({ platform: m.platform, key_id: m.keyId }, 0,
+    const { credential, budgetBlocked } = reserveProviderCredential({ platform: m.platform, key_id: m.keyId }, 0,
       keyId => isOnCooldown(m.platform, m.modelId, keyId));
     if (!credential) {
       if (budgetBlocked) {
@@ -1230,7 +1231,7 @@ export async function runSpeech(model: string | undefined, params: SpeechParams)
   for (const row of chain) {
     const { credential, budgetBlocked } = KEYLESS_CAPABLE.has(row.platform)
       ? { credential: { id: null, key: null, baseUrl: null, release: () => {} }, budgetBlocked: false }
-      : await reserveProviderCredential(row, 0);
+      : reserveProviderCredential(row, 0);
     if (!credential) {
       if (budgetBlocked) {
         lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');

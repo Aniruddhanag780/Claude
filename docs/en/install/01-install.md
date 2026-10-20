@@ -8,8 +8,6 @@ Everything about getting FreeLLMAPI running: the one-liner, Docker Compose, loca
 
 - [Quick start (one-liner)](#quick-start-one-liner)
 - [Docker Compose](#docker-compose)
-- [Production Deployment (Render + Neon PostgreSQL)](#production-deployment-render--neon-postgresql)
-
 - [Local development](#local-development)
 - [Declarative startup config](#declarative-startup-config)
 - [Docker image & operations](#docker-image--operations)
@@ -23,36 +21,6 @@ Docker required — sets up `~/freellmapi`, generates an encryption key, pulls t
 
 ```bash
 curl -fsSL https://freellmapi.co/install.sh | bash
-
-## Production Deployment (Render + Neon PostgreSQL)
-
-FreeLLMAPI is architected for zero-cost production hosting on **Render Free Tier (Compute)** and **Neon Free Tier (Serverless PostgreSQL)**.
-
-### Architecture Highlights:
-- **Zero-DB Inference Hot Path:** After startup, `/v1/chat/completions` runs entirely from an in-memory routing registry with 0 database queries.
-- **AES-256-GCM Credential Encryption:** API keys are encrypted at rest and always masked with bullets (`sk-••••••••abcd`) in responses.
-- **Memory-First Hourly Analytics:** Request metrics are aggregated in memory into hourly buckets and asynchronously flushed in batches to Neon every 60 seconds.
-- **Automatic Schema Migrations:** Tables and initial provider/model catalogs are automatically created on startup via PostgreSQL migrations.
-
-### Deployment Steps:
-1. **Create a Neon Database:**
-   - Sign up at [neon.tech](https://neon.tech) and create a free project.
-   - Copy your connection string (`postgresql://neondb_owner:npg_xxx@ep-sample-123456.us-east-2.aws.neon.tech/neondb?sslmode=require`).
-
-2. **Deploy on Render:**
-   - Create a new **Web Service** on [render.com](https://render.com) from your Git repository.
-   - **Environment:** Node.js
-   - **Build Command:** `npm run build`
-   - **Start Command:** `node server/dist/server/src/index.js`
-   - **Environment Variables:**
-     - `DATABASE_URL`: Your Neon PostgreSQL connection string.
-     - `ENCRYPTION_KEY`: A 64-character hex key (generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`).
-     - `NODE_ENV`: `production`
-
-3. **Verify Deployment:**
-   - Access `https://your-app.onrender.com/health` to verify service and database health.
-   - Access the dashboard UI at `https://your-app.onrender.com` to manage keys, models, and fallback chains.
-
 ```
 
 Prefer to read before you pipe to bash? [The script is here](https://freellmapi.co/install.sh). Re-running it is safe: your `.env` (and encryption key) is preserved and the container updates to `:latest`. Override the defaults with `FREELLMAPI_DIR`, `PORT`, or `HOST_BIND` env vars.
@@ -376,6 +344,9 @@ install. For the server (non-desktop) deployment, the equivalent state is the
 **Desktop app — there is no password.** The dashboard signs itself in with a
 hidden local account, so there is nothing to remember and nothing to reset. If
 you cannot see the dashboard, open it from the tray icon → **Open Dashboard**.
+A browser tab on the same computer (for example http://127.0.0.1:31415) signs in
+the same way. Only another device reaching the app over LAN access is asked to
+sign in.
 
 **Server installs** (Docker, one-liner, `npm run dev`) do have an email +
 password account, and there is no email delivery to send a reset link to. The

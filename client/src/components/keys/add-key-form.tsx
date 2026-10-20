@@ -13,7 +13,7 @@ import { toast } from '@/lib/toast'
 import type { FallbackEntry } from '@/lib/routing'
 import { scopeCandidates, shouldOfferModelPicker, type ScopeCandidate } from '@/lib/model-scope-selection'
 import { SEARCH_PROVIDERS } from '@/lib/search'
-import { GetKeyLink, PLATFORMS } from './shared'
+import { GetKeyLink, LISTED_PLATFORMS, PLATFORMS } from './shared'
 
 /** A key that just landed, plus the models the picker should offer for it.
  *  Only produced when the picker is actually worth showing (#657) — otherwise
@@ -95,7 +95,7 @@ export function AddKeyForm({ onSuccess, initialPlatform }: { onSuccess: (offer?:
   const platformOptions = useMemo(
     () => [
       ...SEARCH_PROVIDERS.map(p => ({ ...p, group: t('search.pickerSearch') })),
-      ...PLATFORMS.map(p => ({ ...p, group: t('search.pickerModels') })),
+      ...LISTED_PLATFORMS.map(p => ({ ...p, group: t('search.pickerModels') })),
     ]
       // The selected provider always stays listed, so hiding added ones never
       // blanks out the trigger label.
@@ -147,7 +147,7 @@ export function AddKeyForm({ onSuccess, initialPlatform }: { onSuccess: (offer?:
   const needsAccountId = platform === 'cloudflare'
   // Key-optional providers (Kilo, OVH, AI Horde) work anonymously, but accept a
   // real key too (#1331): the field stays editable and may be left blank.
-  const isKeyless = PLATFORMS.find(p => p.value === platform)?.keyless ?? false
+  const isKeyless = [...SEARCH_PROVIDERS, ...PLATFORMS].find(p => p.value === platform)?.keyless ?? false
   // Cloudflare pairs each token with an account id, and a key-optional
   // provider keeps a single anonymous row, so neither takes a list.
   const canPasteSeveral = !isKeyless && !needsAccountId

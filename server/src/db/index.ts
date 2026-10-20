@@ -1,225 +1,251 @@
 import crypto from 'crypto';
-import pg from 'pg';
-import { getPostgresPool, initPostgresPool, closePostgresPool, type QueryResult } from './postgres.js';
-import { runMigrations } from './migrate/runner.js';
+import fs from 'fs';
+import path from 'path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'url';
+import { runMigrationsSync } from './migrate/runner.js';
 import { initEncryptionKey, isEncryptionKeyInitialized } from '../lib/crypto.js';
+import { restrictAllToOwner, restrictDirToOwner } from '../lib/file-permissions.js';
+import { nodeSqliteFactory } from './node-sqlite.js';
+import type { Db, DbFactory } from './types.js';
 
-let cachedUnifiedApiKey: string | null = null;
-const settingsCache = new Map<string, string>();
+export type { Db, DbFactory } from './types.js';
 
-export { getPostgresPool, initPostgresPool, closePostgresPool };
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DB_PATH = path.resolve(__dirname, '../../data/freeapi.db');
+const runtimeRequire = createRequire(import.meta.url);
 
-export function initDb(connectionString?: string): Promise<pg.Pool> & pg.Pool {
-  const pool = initPostgresPool(connectionString);
-  settingsCache.clear();
-  cachedUnifiedApiKey = null;
+let db: Db;
 
-  const promise = (async () => {
-    // Run migrations automatically
-    try {
-      await runMigrations(pool, 'up');
-      console.log('[db] PostgreSQL migrations applied successfully');
-
-      if (!isEncryptionKeyInitialized()) {
-        initEncryptionKey();
-      }
-
-      // Load all settings into in-memory cache for zero-DB reads in request path
-      await loadSettingsCache(pool);
-
-      // Ensure default unified API key exists
-      await ensureUnifiedApiKey();
-    } catch (err: any) {
-      if (err?.message === 'Database is closed') {
-        return pool;
-      }
-      console.error('[db] Error running PostgreSQL migrations:', err?.message ?? err);
-      throw err;
-    }
-
-    return pool;
-  })();
-
-  const hybrid = new Proxy(promise, {
-    get(target, prop, receiver) {
-      if (prop in target) {
-        const val = Reflect.get(target, prop, receiver);
-        return typeof val === 'function' ? val.bind(target) : val;
-      }
-      const val = Reflect.get(pool, prop, pool);
-      return typeof val === 'function' ? val.bind(pool) : val;
-    }
-  });
-
-  return hybrid as any;
-}
-
-export function getDb(): pg.Pool & any {
-  return getPostgresPool() as any;
-}
-
-export async function query<T extends pg.QueryResultRow = any>(text: string, params?: any[]): Promise<QueryResult<T>> {
-  const pool = getPostgresPool();
-  return pool.query<T>(text, params);
-}
-
-/**
- * Run a callback inside a BEGIN/COMMIT transaction with ROLLBACK on error.
- * Works on the real pool (pg) and on the in-memory mock pool alike, since both
- * honour BEGIN/COMMIT/ROLLBACK through `client.query`.
- */
-export async function transaction<T>(callback: (client: pg.PoolClient) => Promise<T>): Promise<T> {
-  const pool = getPostgresPool();
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await callback(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    client.release();
+export function getDb(): Db {
+  if (!db) {
+    throw new Error('Database not initialized. Call initDb() or connectDb() first.');
   }
+  return db;
 }
 
 export function getDefaultDbPath(): string {
-  return process.env.DATABASE_URL || 'neon-postgresql';
+  return process.env.FREEAPI_DB_PATH?.trim() || DB_PATH;
 }
 
-async function loadSettingsCache(pool: pg.Pool): Promise<void> {
+/** Default factory: opens a better-sqlite3 connection at the given path. */
+function betterSqliteFactory(resolvedPath: string): Db {
+  let BetterSqlite: new (path: string) => unknown;
   try {
-    const res = await pool.query('SELECT key, value FROM settings');
-    for (const row of res.rows) {
-      if (row.key && row.value !== undefined && row.value !== null) {
-        settingsCache.set(row.key, row.value);
-      }
-    }
-    if (settingsCache.has('unified_api_key')) {
-      cachedUnifiedApiKey = settingsCache.get('unified_api_key')!;
-    }
-  } catch (err: any) {
-    console.warn('[db] Failed to preload settings cache:', err?.message ?? err);
-  }
-}
-
-export function getUnifiedApiKey(): string {
-  if (cachedUnifiedApiKey) {
-    return cachedUnifiedApiKey;
-  }
-  const fromCache = settingsCache.get('unified_api_key');
-  if (fromCache) {
-    cachedUnifiedApiKey = fromCache;
-    return fromCache;
-  }
-  const defaultKey = `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
-  cachedUnifiedApiKey = defaultKey;
-  settingsCache.set('unified_api_key', defaultKey);
-  try {
-    const pool = getPostgresPool() as any;
-    pool.prepare?.("INSERT INTO settings (key, value) VALUES ('unified_api_key', ?) ON CONFLICT (key) DO NOTHING")?.run(defaultKey);
-  } catch {}
-  return defaultKey;
-}
-
-export function getCachedUnifiedApiKey(): string | null {
-  return cachedUnifiedApiKey ?? settingsCache.get('unified_api_key') ?? getUnifiedApiKey();
-}
-
-export async function regenerateUnifiedKey(): Promise<string> {
-  const pool = getPostgresPool();
-  const key = `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
-  await pool.query(
-    `INSERT INTO settings (key, value, updated_at) VALUES ('unified_api_key', $1, NOW())
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-    [key]
-  );
-  cachedUnifiedApiKey = key;
-  settingsCache.set('unified_api_key', key);
-  return key;
-}
-
-// The one intentional credential disclosure (restored from the deleted
-// SQLite-era legacy baseline): a freshly generated unified key is written
-// straight to stdout, bypassing the console redaction installed in index.ts —
-// the operator must be able to copy it once. Any other environment
-// (production, non-TTY, Kubernetes, CI) only receives a pointer message so the
-// key can never land in a captured log or CI transcript.
-function discloseUnifiedKey(key: string): void {
-  const dev = process.env.NODE_ENV !== 'production';
-  const kubernetes = process.env.KUBERNETES_SERVICE_HOST != null;
-  const ci = process.env.CI != null && process.env.CI !== '';
-  if (dev && !kubernetes && !ci && process.stdout.isTTY) {
-    process.stdout.write(`\n  Your unified API key: ${key}\n\n`);
-    return;
-  }
-  console.log('New unified API key created. View it in the dashboard under the Keys page; it is not printed to logs.');
-}
-
-async function ensureUnifiedApiKey(): Promise<void> {
-  const pool = getPostgresPool();
-  const res = await pool.query("SELECT value FROM settings WHERE key = 'unified_api_key'");
-  if (res.rows.length === 0 || !res.rows[0].value) {
-    const key = cachedUnifiedApiKey || `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
-    await pool.query(
-      `INSERT INTO settings (key, value, updated_at) VALUES ('unified_api_key', $1, NOW())
-       ON CONFLICT (key) DO NOTHING`,
-      [key]
+    BetterSqlite = runtimeRequire('better-sqlite3') as new (path: string) => unknown;
+  } catch (cause) {
+    throw new Error(
+      'better-sqlite3 is not installed. Reinstall dependencies, or use Node.js 22.13+ on Android/Termux.',
+      { cause },
     );
-    cachedUnifiedApiKey = key;
-    settingsCache.set('unified_api_key', key);
-    discloseUnifiedKey(key);
-  } else {
-    cachedUnifiedApiKey = res.rows[0].value;
-    settingsCache.set('unified_api_key', res.rows[0].value);
   }
+  return new BetterSqlite(resolvedPath) as Db;
 }
 
-export function getSetting(key: string): string | undefined {
-  try {
-    const pool = getPostgresPool() as any;
-    if (pool.prepare) {
-      const row = pool.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value?: string } | undefined;
-      if (row?.value !== undefined) {
-        settingsCache.set(key, row.value);
-        return row.value;
-      } else {
-        settingsCache.delete(key);
-        return undefined;
-      }
+export function defaultDbFactory(platform: NodeJS.Platform = process.platform): DbFactory {
+  return platform === 'android' ? nodeSqliteFactory : betterSqliteFactory;
+}
+
+export function connectDb(
+  dbPath?: string,
+  opts?: {
+    /** Create the parent directory if absent. Default: true. Set false in
+     *  environments that do not have a writable local filesystem. */
+    ensureDir?: boolean;
+    /** Factory that constructs the raw Db connection. Default: better-sqlite3. */
+    factory?: DbFactory;
+  },
+): Db {
+  const resolvedPath = dbPath ?? getDefaultDbPath();
+  const isMemory = resolvedPath === ':memory:';
+  const ensureDir = opts?.ensureDir ?? true;
+  const factory = opts?.factory ?? defaultDbFactory();
+
+  // Gated on ensureDir along with the mkdir: that flag means "this process does
+  // not shape the filesystem here", and changing a directory's permissions is
+  // exactly that kind of change. It also keeps the warning below from firing on
+  // every boot in the read-only environments the flag exists for.
+  if (!isMemory && ensureDir) {
+    const dataDir = path.dirname(resolvedPath);
+    let created = false;
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+      created = true;
     }
-  } catch {}
-  return settingsCache.get(key);
+    // Before the connection, not after: on Windows the restriction is inherited,
+    // so hardening first means the database file is born protected instead of
+    // spending its first moments with whatever ACL the parent handed down.
+    restrictDataDir(dataDir, created);
+  }
+
+  db = factory(resolvedPath);
+  if (!isMemory) db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  // The dashboard and the proxy hot path write concurrently; without a busy
+  // timeout the loser of a write race gets SQLITE_BUSY immediately and the
+  // request fails. Five seconds is far longer than any write here takes.
+  db.pragma('busy_timeout = 5000');
+
+  if (!isMemory) restrictDbFilePermissions(resolvedPath);
+
+  console.log(`Database initialized at ${resolvedPath}`);
+  return db;
 }
 
-export function deleteSetting(key: string): void {
-  settingsCache.delete(key);
-  try {
-    const pool = getPostgresPool() as any;
-    pool.prepare?.('DELETE FROM settings WHERE key = ?')?.run(key);
-  } catch {}
+/**
+ * Whether the directory holding the database may be restricted to this account.
+ *
+ * The sidecars can only be covered by the directory: SQLite creates `-wal` and
+ * `-shm` on the first write and deletes them on the last clean close, so at
+ * startup there is nothing there to chmod. But the directory is also shared
+ * state — FREEAPI_DB_PATH may point anywhere — and locking down a directory
+ * that is not ours is a worse outage than the leak it prevents. Pointing the DB
+ * at `/tmp/freeapi.db` must not chmod 0700 `/tmp`.
+ *
+ * So the rule is ownership by construction rather than a guess about what is
+ * safe. Two cases qualify, and nothing else does:
+ *
+ *   1. We just created the directory. Nothing else can be living in a directory
+ *      that did not exist a moment ago.
+ *   2. It is the built-in default data directory, which ships as ours.
+ *
+ * Case 2 is what covers the installed base: an existing deployment already has
+ * `server/data`, so case 1 alone would harden new installs and quietly leave
+ * every upgrade behind.
+ *
+ * An operator who points FREEAPI_DB_PATH at a dedicated directory can opt in
+ * with FREEAPI_DB_DIR_HARDENING=1, and one who dislikes the default can opt out
+ * with =0. It is a deliberate default-on-where-safe rather than a flag, because
+ * hardening that only runs when someone remembers to ask for it is the same
+ * class of failure as hardening nobody noticed had stopped running.
+ */
+export function shouldHardenDataDir(
+  dataDir: string,
+  created: boolean,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const override = parseDirHardeningOverride();
+  if (override !== undefined) return override;
+  if (created) return true;
+
+  // Windows paths are case-insensitive; comparing them case-sensitively would
+  // miss `C:\App\Data` vs `c:\app\data` and silently skip the default install.
+  const normalize = (p: string): string =>
+    platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p);
+  return normalize(dataDir) === normalize(path.dirname(DB_PATH));
 }
 
-export async function getSettingAsync(key: string): Promise<string | undefined> {
-  if (settingsCache.has(key)) {
-    return settingsCache.get(key);
-  }
-  const pool = getPostgresPool();
-  const res = await pool.query('SELECT value FROM settings WHERE key = $1', [key]);
-  if (res.rows[0]?.value !== undefined) {
-    settingsCache.set(key, res.rows[0].value);
-    return res.rows[0].value;
-  }
+/** Tri-state, matching CSP_UPGRADE_INSECURE_REQUESTS in lib/config.ts: on, off,
+ *  or unset to leave the policy above in charge. */
+function parseDirHardeningOverride(): boolean | undefined {
+  const raw = process.env.FREEAPI_DB_DIR_HARDENING;
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const lower = raw.trim().toLowerCase();
+  if (lower === 'true' || lower === '1' || lower === 'yes') return true;
+  if (lower === 'false' || lower === '0' || lower === 'no') return false;
   return undefined;
 }
 
-export async function setSetting(key: string, value: string): Promise<void> {
-  settingsCache.set(key, value);
-  const pool = getPostgresPool();
-  await pool.query(
-    `INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, NOW())
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-    [key, value]
-  );
+/** Emitted at most once: connectDb runs once in a server, but a test suite
+ *  reconnects constantly and does not need the same line each time. */
+let warnedUnhardenedDataDir = false;
+
+function restrictDataDir(dataDir: string, created: boolean): void {
+  if (!shouldHardenDataDir(dataDir, created)) {
+    if (!warnedUnhardenedDataDir) {
+      warnedUnhardenedDataDir = true;
+      console.log(
+        `[db] leaving permissions on ${dataDir} as they are: it is not a directory this server created. ` +
+        'The WAL sidecars written there inherit whatever it already grants. ' +
+        'Set FREEAPI_DB_DIR_HARDENING=1 if it belongs to this account alone.',
+      );
+    }
+    return;
+  }
+
+  if (!restrictDirToOwner(dataDir)) {
+    console.warn(
+      `[db] could not restrict permissions on ${dataDir}; ` +
+      'the database and its WAL sidecars may be readable by other local accounts',
+    );
+  }
+}
+
+/** Restrict the DB and its WAL sidecars to the owner. The file holds encrypted
+ *  provider keys plus the dashboard password hash, so it must not be readable by
+ *  other local users. Best-effort: a filesystem that cannot express the
+ *  restriction must not stop startup — but it now says so instead of failing
+ *  silently, because a hardening step nobody can see failing is one nobody
+ *  notices is absent.
+ *
+ *  This pass only ever finds the main file on a clean start; the sidecars do not
+ *  exist yet. They are covered by the directory instead — see
+ *  shouldHardenDataDir. It still runs for both, because a directory this server
+ *  is not allowed to touch can still hold sidecars left behind by an unclean
+ *  shutdown, and because the main file predates the directory pass on any
+ *  install that upgraded into it. */
+function restrictDbFilePermissions(resolvedPath: string): void {
+  const failed = restrictAllToOwner(['', '-wal', '-shm'].map(suffix => `${resolvedPath}${suffix}`));
+  if (failed.length > 0) {
+    console.warn(
+      `[db] could not restrict database file permissions (${failed.length} of 3 targets); ` +
+      'the database may be readable by other local accounts',
+    );
+  }
+}
+
+export function initDb(
+  dbPath?: string,
+  opts?: { ensureDir?: boolean; factory?: DbFactory },
+): Db {
+  const db = connectDb(dbPath, opts);
+
+  if (process.env.NODE_ENV !== 'development') {
+    runMigrationsSync(db, 'up');
+  } else {
+    // In dev, verify the DB has been initialised. If not, give a clear error.
+    const ready = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='migrations'"
+    ).get();
+    if (!ready) {
+      console.error(
+        '\n  [dev] Database not initialised. Run:\n\n' +
+        '    npm run db:migration:up\n\n' +
+        '  Then restart the server.\n'
+      );
+      process.exit(1);
+    }
+  }
+
+  if (!isEncryptionKeyInitialized()) initEncryptionKey(db);
+
+  return db;
+}
+
+export function getUnifiedApiKey(): string {
+  const db = getDb();
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get() as { value: string };
+  return row.value;
+}
+
+export function regenerateUnifiedKey(): string {
+  const db = getDb();
+  const key = `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
+  db.prepare("UPDATE settings SET value = ? WHERE key = 'unified_api_key'").run(key);
+  return key;
+}
+
+// Generic key/value settings accessors (used by routing strategy, etc.).
+export function getSetting(key: string): string | undefined {
+  const db = getDb();
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function setSetting(key: string, value: string): void {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(key, value);
 }

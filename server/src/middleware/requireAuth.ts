@@ -1,19 +1,18 @@
 import type { Request, Response, NextFunction } from 'express';
 import { validateSession } from '../services/auth.js';
 
-export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+// Gate the /api/* admin surface behind a dashboard session (#35, item #2).
+// The token is the opaque session token issued by /api/auth/login|setup, sent
+// as `Authorization: Bearer <token>`. The /v1 proxy is NOT gated by this — it
+// keeps its own unified-API-key auth for app clients.
+export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, '')
     ?? (req.headers['x-dashboard-token'] as string | undefined);
-  
-  try {
-    const session = await validateSession(token);
-    if (!session) {
-      res.status(401).json({ error: { message: 'Authentication required', type: 'authentication_error' } });
-      return;
-    }
-    (req as Request & { user?: typeof session }).user = session;
-    next();
-  } catch (_err) {
-    res.status(401).json({ error: { message: 'Authentication failed', type: 'authentication_error' } });
+  const session = validateSession(token);
+  if (!session) {
+    res.status(401).json({ error: { message: 'Authentication required', type: 'authentication_error' } });
+    return;
   }
+  (req as Request & { user?: typeof session }).user = session;
+  next();
 }

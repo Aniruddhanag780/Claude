@@ -46,7 +46,7 @@ import { customModelSyncFreePatterns, customModelSyncIntervalMs } from './custom
  *  zero rows, enabled or disabled, in the signed live catalog (checked against
  *  2026.09.27). Remove a platform here in the same change that adds it to the
  *  catalog; managedPlatforms in the catalog covers binaries already shipped. */
-export const BUILTIN_DISCOVERY_PLATFORMS: readonly Platform[] = ['github', 'longcat', 'siliconflow'];
+export const BUILTIN_DISCOVERY_PLATFORMS: readonly Platform[] = ['longcat', 'siliconflow'];
 
 /** `BUILTIN_MODEL_DISCOVERY`: 'manual' (default) keeps only the dashboard's
  *  Fetch models action, so nothing is registered without the operator picking
@@ -107,10 +107,12 @@ export function ineligibleMessage(platform: string, reason: IneligibleReason | u
 // (or the bundled baseline) wrote, or any embedding / media row, which only
 // the catalog and the bundled baseline write for a built-in platform.
 function hasCatalogOwnedRows(db: Db, platform: string): boolean {
-  const chat = (db.prepare("SELECT COUNT(*) AS n FROM models WHERE platform = ? AND source = 'catalog'").get(platform) as { n: number } | undefined)?.n ?? 0;
-  const embed = (db.prepare("SELECT COUNT(*) AS n FROM embedding_models WHERE platform = ?").get(platform) as { n: number } | undefined)?.n ?? 0;
-  const media = (db.prepare("SELECT COUNT(*) AS n FROM media_models WHERE platform = ?").get(platform) as { n: number } | undefined)?.n ?? 0;
-  return (Number(chat) + Number(embed) + Number(media)) > 0;
+  const row = db.prepare(`
+    SELECT (SELECT COUNT(*) FROM models           WHERE platform = ? AND source = 'catalog')
+         + (SELECT COUNT(*) FROM embedding_models WHERE platform = ?)
+         + (SELECT COUNT(*) FROM media_models     WHERE platform = ?) AS c
+  `).get(platform, platform, platform) as { c: number };
+  return row.c > 0;
 }
 
 interface KeyRow {

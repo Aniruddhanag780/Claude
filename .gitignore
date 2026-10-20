@@ -8,8 +8,6 @@ server/data/
 *.db-wal
 *.db-shm
 *.bak
-/backups/
-server/backups/
 # Auto-generated dev encryption key (written next to the SQLite DB when
 # ENCRYPTION_KEY is unset outside production). Never commit it.
 .encryption-key

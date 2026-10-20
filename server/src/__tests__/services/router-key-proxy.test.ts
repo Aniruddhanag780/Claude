@@ -9,9 +9,9 @@ import { routeRequest, setRoutingStrategy } from '../../services/router.js';
 // attempt. These pin that contract — the loop reads route.proxyUrl and nothing
 // else.
 describe('Router — per-key proxy override (#590)', () => {
-  beforeAll(async () => {
+  beforeAll(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    await initDb(':memory:');
+    initDb(':memory:');
   });
 
   beforeEach(() => {

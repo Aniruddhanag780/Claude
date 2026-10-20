@@ -7,6 +7,7 @@ import { TavilyProvider } from './tavily.js';
 import { ExaProvider } from './exa.js';
 import { FirecrawlProvider } from './firecrawl.js';
 import { LinkupProvider } from './linkup.js';
+import { ParallelProvider } from './parallel.js';
 import { CloudflareProvider } from './cloudflare.js';
 import { AIHordeProvider } from './aihorde.js';
 import { ModelScopeProvider } from './modelscope.js';
@@ -36,7 +37,9 @@ import { AirforceProvider } from './airforce.js';
 import { DreamPromptingProvider } from './dreamprompting.js';
 import { WaterfallProvider } from './waterfall.js';
 import { LogfareProvider } from './logfare.js';
-import { AurayProvider } from './auray.js';
+import { BeatApiProvider } from './beatapi.js';
+import { ApinexProvider } from './apinex.js';
+import { SerpSearchProvider } from './serpsearch.js';
 
 const providers = new Map<Platform, BaseProvider>();
 
@@ -80,7 +83,9 @@ register(new LlmtrProvider());
 register(new GizmoProvider());
 register(new BlockRunProvider());
 register(new MoondreamProvider());
-register(new AurayProvider());
+register(new BeatApiProvider());
+register(new ApinexProvider());
+register(new SerpSearchProvider());
 
 // Free-plan grants are shared wallets, not free credits per model. Eligibility
 // and tested model rows belong in Oracle, never in bundled DB migrations.
@@ -195,14 +200,10 @@ register(new OpenAICompatProvider({
   },
 }));
 
-// GitHub Models — OpenAI-compatible. Catalog uses `<publisher>/<model>` ids
-// (e.g. `openai/gpt-4.1`); the old Azure endpoint rejects that prefix with
-// "Unknown model", so route to the current models.github.ai endpoint.
-register(new OpenAICompatProvider({
-  platform: 'github',
-  name: 'GitHub Models',
-  baseUrl: 'https://models.github.ai/inference',
-}));
+// GitHub Models was retired upstream on 30 July 2026 (#549): models.github.ai
+// now answers every request with 200 "OK" in plain text, so a registered
+// adapter only produced fake-healthy keys and broken streams (#1557). The
+// provider is gone; migration 20261017_000002 removes leftover rows.
 
 // Cohere - OpenAI-compatible via Cohere compatibility endpoint
 register(new CohereProvider());
@@ -213,6 +214,8 @@ register(new TavilyProvider());
 register(new ExaProvider());
 register(new FirecrawlProvider());
 register(new LinkupProvider());
+// Keyless: anonymous Search MCP by default, REST API with a real key.
+register(new ParallelProvider());
 
 // Cloudflare Workers AI - OpenAI-compatible endpoint (key = "account_id:token")
 register(new CloudflareProvider());

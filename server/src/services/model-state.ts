@@ -1,3 +1,4 @@
+import type { Db } from '../db/types.js';
 import type { applyCatalog } from './catalog-sync.js';
 
 export type CatalogModelKind = 'chat' | 'media';
@@ -20,6 +21,9 @@ export interface ModelOverridePatch {
 
 type StoredOverrides = Partial<ModelOverridePatch>;
 
+// Keep catalog values separately from effective local edits. Legacy blobs
+// recover their defaults from the verified catalog cache; catalog sync refreshes
+// recorded baselines before reapplying overrides. Unknown defaults stay unknown.
 const CATALOG_BASELINE_KEY = 'catalogDefaults';
 
 const OVERRIDE_COLUMNS: Record<keyof ModelOverridePatch, string> = {
@@ -42,7 +46,7 @@ function parseOverrides(raw: string | undefined): StoredOverrides {
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === 'object' ? (parsed as StoredOverrides) : {};
+    return parsed && typeof parsed === 'object' ? parsed as StoredOverrides : {};
   } catch {
     return {};
   }
@@ -63,8 +67,10 @@ function cleanPatch(patch: ModelOverridePatch): StoredOverrides {
   return cleaned;
 }
 
+// The blob split into its two parts: the fields actually overridden, and the
+// pre-override values they are measured against.
 function parseOverridesBlob(raw: string | undefined): { overrides: StoredOverrides; baselines: StoredOverrides } {
-  const overrides = parseOverrides(raw);
+  const overrides = { ...parseOverrides(raw) };
   const rawBaselines = (overrides as Record<string, unknown>)[CATALOG_BASELINE_KEY];
   delete (overrides as Record<string, unknown>)[CATALOG_BASELINE_KEY];
   const baselines: StoredOverrides = {};
@@ -76,6 +82,7 @@ function parseOverridesBlob(raw: string | undefined): { overrides: StoredOverrid
   return { overrides, baselines };
 }
 
+// Convert a catalog-applied database value into the PATCH representation.
 function modelRowValue(row: Record<string, unknown> | undefined, key: keyof ModelOverridePatch): unknown {
   if (!row) return undefined;
   const value = row[OVERRIDE_COLUMNS[key]];
@@ -83,17 +90,7 @@ function modelRowValue(row: Record<string, unknown> | undefined, key: keyof Mode
   return value ?? null;
 }
 
-export function overriddenFieldNames(overridesJson: string | null | undefined): Array<keyof ModelOverridePatch> {
-  const stored = parseOverrides(overridesJson ?? undefined);
-  return (Object.keys(stored) as Array<keyof ModelOverridePatch>).filter(key => key in OVERRIDE_COLUMNS);
-}
-
-export function routableContextWindow(platform: string, modelId: string, contextWindow: number | null): number | null {
-  if (platform === 'github' && modelId === 'openai/gpt-4.1') return 8000;
-  return contextWindow;
-}
-
-function cachedCatalogDefaults(db: any, platform: string, modelId: string): StoredOverrides {
+function cachedCatalogDefaults(db: Db, platform: string, modelId: string): StoredOverrides {
   const row = db.prepare("SELECT value FROM settings WHERE key = 'catalog_applied_json'").get() as { value: string } | undefined;
   if (!row) return {};
   try {
@@ -106,14 +103,15 @@ function cachedCatalogDefaults(db: any, platform: string, modelId: string): Stor
       rpmLimit: model.limits.rpm, rpdLimit: model.limits.rpd,
       tpmLimit: model.limits.tpm, tpdLimit: model.limits.tpd,
       monthlyTokenBudget: model.monthlyTokenBudget ?? '',
-      contextWindow: routableContextWindow(platform, modelId, model.contextWindow),
+      contextWindow: model.contextWindow,
       supportsVision: model.supportsVision, supportsTools: model.supportsTools,
       enabled: model.enabled,
     };
   } catch { return {}; }
 }
 
-export function refreshModelOverrideBaselines(db: any, platform: string, modelId: string): void {
+/** Called after catalog metadata is written, before local overrides are applied. */
+export function refreshModelOverrideBaselines(db: Db, platform: string, modelId: string): void {
   const existing = db.prepare('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?')
     .get(platform, modelId) as { overrides_json: string } | undefined;
   if (!existing) return;
@@ -128,11 +126,36 @@ export function refreshModelOverrideBaselines(db: any, platform: string, modelId
     .run(JSON.stringify({ ...overrides, [CATALOG_BASELINE_KEY]: baselines }), platform, modelId);
 }
 
+/**
+ * The fields a stored overrides blob actually overrides, for callers that
+ * already selected `model_overrides.overrides_json` alongside the model row.
+ * The dashboard uses this to mark individual inputs as locally overridden
+ * instead of flagging the whole model (#551).
+ */
+export function overriddenFieldNames(overridesJson: string | null | undefined): Array<keyof ModelOverridePatch> {
+  const stored = parseOverrides(overridesJson ?? undefined);
+  return (Object.keys(stored) as Array<keyof ModelOverridePatch>).filter(key => key in OVERRIDE_COLUMNS);
+}
+
 export function isCatalogManagedModel(row: { platform: string; key_id?: number | null; source?: string }): boolean {
+  // `source` is the authoritative provenance (models.source: 'catalog', 'user'
+  // or 'discovered'). Discovered rows on built-in platforms (#1348) count as
+  // catalog-managed: deleting one records a catalog tombstone, which both
+  // discovery and a later catalog honor;
+  // callers that select it get an exact answer. The platform/key_id fallback
+  // covers callers that don't have the column in hand.
   if (row.source === 'user') return false;
   return row.platform !== 'custom' && row.key_id == null;
 }
 
+// Why a catalog model carries a tombstone:
+//   'user'        — deleted in the dashboard. Stays deleted across syncs, and
+//                   the row is removed from `models` on the next catalog apply.
+//   'upstream_eol' — the provider reported it permanently gone (410 / end of
+//                   life, issue #634). The row SURVIVES and is only disabled,
+//                   so the dashboard can show "retired upstream" instead of
+//                   silently losing the model, and so a later catalog that
+//                   still lists it can lift the retirement.
 export type CatalogTombstoneSource = 'user' | 'upstream_eol';
 
 export interface CatalogModelTombstone {
@@ -142,28 +165,30 @@ export interface CatalogModelTombstone {
 }
 
 export function getCatalogModelTombstone(
-  db: any,
+  db: Db,
   kind: CatalogModelKind,
   platform: string,
   modelId: string,
 ): CatalogModelTombstone | undefined {
-  try {
-    const row = db
-      .prepare('SELECT source, reason, created_at FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?')
-      .get(kind, platform, modelId) as { source: string; reason: string | null; created_at: string } | undefined;
-    if (!row) return undefined;
-    return {
-      source: row.source === 'upstream_eol' ? 'upstream_eol' : 'user',
-      reason: row.reason ?? null,
-      createdAt: row.created_at,
-    };
-  } catch {
-    return undefined;
-  }
+  const row = db
+    .prepare('SELECT source, reason, created_at FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?')
+    .get(kind, platform, modelId) as { source: string; reason: string | null; created_at: string } | undefined;
+  if (!row) return undefined;
+  return {
+    source: row.source === 'upstream_eol' ? 'upstream_eol' : 'user',
+    reason: row.reason ?? null,
+    createdAt: row.created_at,
+  };
 }
 
+/**
+ * True only for models the USER deleted — the "keep it deleted" contract every
+ * caller here means. An upstream-retirement tombstone deliberately does NOT
+ * count: those models stay in the catalog's write path so a refreshed catalog
+ * can reinstate them (see reinstateUpstreamRetiredCatalogModel).
+ */
 export function isCatalogModelTombstoned(
-  db: any,
+  db: Db,
   kind: CatalogModelKind,
   platform: string,
   modelId: string,
@@ -172,28 +197,40 @@ export function isCatalogModelTombstoned(
 }
 
 export function recordCatalogModelTombstone(
-  db: any,
+  db: Db,
   kind: CatalogModelKind,
   platform: string,
   modelId: string,
   options: { source?: CatalogTombstoneSource; reason?: string | null } = {},
 ): void {
   const source: CatalogTombstoneSource = options.source ?? 'user';
-  try {
-    db.prepare(`
-      INSERT INTO catalog_model_tombstones (kind, platform, model_id, source, reason)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(kind, platform, model_id)
-      DO UPDATE SET created_at = datetime('now'), source = excluded.source, reason = excluded.reason
-    `).run(kind, platform, modelId, source, options.reason ?? null);
-    if (kind === 'chat' && source === 'user') {
-      db.prepare('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?').run(platform, modelId);
-    }
-  } catch {}
+  db.prepare(`
+    INSERT INTO catalog_model_tombstones (kind, platform, model_id, source, reason)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(kind, platform, model_id)
+    DO UPDATE SET created_at = datetime('now'), source = excluded.source, reason = excluded.reason
+  `).run(kind, platform, modelId, source, options.reason ?? null);
+  // A user deletion drops their local metadata edits with the row. An upstream
+  // retirement keeps the row, so it keeps the overrides too — they must survive
+  // if the model is reinstated.
+  if (kind === 'chat' && source === 'user') {
+    db.prepare('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?').run(platform, modelId);
+  }
 }
 
+/**
+ * Auto-disable a catalog model the provider reports as permanently retired
+ * (issue #634). Deliberately NOT a delete: the row stays visible in the
+ * dashboard, tagged with the upstream wording, and the user can flip it back on
+ * if they disagree. Turning off the chain entries (and the active profile's
+ * copy) is exactly what the dashboard's own switch does, so the router stops
+ * picking it while an explicitly-requested model id still resolves.
+ *
+ * Returns true when this call performed the retirement (false when it was
+ * already retired, or the user had deleted the model outright).
+ */
 export function retireCatalogModelUpstream(
-  db: any,
+  db: Db,
   modelDbId: number,
   platform: string,
   modelId: string,
@@ -202,48 +239,45 @@ export function retireCatalogModelUpstream(
   const existing = getCatalogModelTombstone(db, 'chat', platform, modelId);
   if (existing) return false;
   recordCatalogModelTombstone(db, 'chat', platform, modelId, { source: 'upstream_eol', reason });
-  try {
-    db.prepare('UPDATE fallback_config SET enabled = 0 WHERE model_db_id = ?').run(modelDbId);
-  } catch {}
-  try {
-    db.prepare('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?').run(modelDbId);
-  } catch {}
+  db.prepare('UPDATE fallback_config SET enabled = 0 WHERE model_db_id = ?').run(modelDbId);
+  db.prepare('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?').run(modelDbId);
   return true;
 }
 
+/**
+ * Lift an upstream retirement: a catalog that still lists the model — and lists
+ * it enabled — is newer and better evidence than one provider's 404. Returns
+ * true when a retirement was actually lifted.
+ */
 export function reinstateUpstreamRetiredCatalogModel(
-  db: any,
+  db: Db,
   platform: string,
   modelId: string,
 ): boolean {
   if (getCatalogModelTombstone(db, 'chat', platform, modelId)?.source !== 'upstream_eol') return false;
   clearCatalogModelTombstone(db, 'chat', platform, modelId);
-  try {
-    const row = db
-      .prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
-      .get(platform, modelId) as { id: number } | undefined;
-    if (row) {
-      db.prepare('UPDATE fallback_config SET enabled = 1 WHERE model_db_id = ?').run(row.id);
-      db.prepare('UPDATE profile_models SET enabled = 1 WHERE model_db_id = ?').run(row.id);
-    }
-  } catch {}
+  const row = db
+    .prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
+    .get(platform, modelId) as { id: number } | undefined;
+  if (row) {
+    db.prepare('UPDATE fallback_config SET enabled = 1 WHERE model_db_id = ?').run(row.id);
+    db.prepare('UPDATE profile_models SET enabled = 1 WHERE model_db_id = ?').run(row.id);
+  }
   return true;
 }
 
 export function clearCatalogModelTombstone(
-  db: any,
+  db: Db,
   kind: CatalogModelKind,
   platform: string,
   modelId: string,
 ): void {
-  try {
-    db.prepare('DELETE FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?')
-      .run(kind, platform, modelId);
-  } catch {}
+  db.prepare('DELETE FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?')
+    .run(kind, platform, modelId);
 }
 
 export function upsertModelOverrides(
-  db: any,
+  db: Db,
   platform: string,
   modelId: string,
   patch: ModelOverridePatch,
@@ -262,12 +296,16 @@ export function upsertModelOverrides(
   for (const key of Object.keys(cleaned) as Array<keyof ModelOverridePatch>) {
     const next = cleaned[key] as never;
     if (mergedBaselines[key] === undefined && options.baselineRow) {
+      // An old override is already applied to the row. Never mistake that
+      // effective value for the catalog value during an upgrade.
       const captured = catalogDefaults[key] !== undefined ? catalogDefaults[key]
         : stored[key] === undefined ? modelRowValue(options.baselineRow, key) : undefined;
       if (captured !== undefined) mergedBaselines[key] = captured as never;
     }
     const baseline = mergedBaselines[key];
     if (options.baselineRow && baseline !== undefined && next === baseline) {
+      // Back at the pre-override value: the override (and its baseline) drop
+      // out, so the field tracks the catalog again.
       delete merged[key];
       delete mergedBaselines[key];
     } else {
@@ -276,6 +314,8 @@ export function upsertModelOverrides(
   }
 
   if (Object.keys(merged).length === 0) {
+    // Nothing left to pin: drop the row so has_overrides goes false and the
+    // dashboard's badge clears.
     db.prepare('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?').run(platform, modelId);
     return {};
   }
@@ -290,7 +330,7 @@ export function upsertModelOverrides(
 }
 
 export function getModelOverrides(
-  db: any,
+  db: Db,
   platform: string,
   modelId: string,
 ): StoredOverrides {
@@ -300,8 +340,18 @@ export function getModelOverrides(
   return parseOverrides(row?.overrides_json);
 }
 
+/**
+ * Every model whose stored overrides pin ONE given field, as a set of
+ * "platform:model_id" keys. One query over a table that only ever holds the
+ * models a user has actually touched, so callers that need "is this field
+ * user-owned?" for a whole catalog don't do it per model.
+ *
+ * Note it keys off the field, not the row: a user who renamed a model has an
+ * override row but has said nothing about its speed_rank, so a derived value
+ * may still fill that column (#619).
+ */
 export function modelsWithOverriddenField(
-  db: any,
+  db: Db,
   field: keyof ModelOverridePatch,
 ): Set<string> {
   const rows = db.prepare('SELECT platform, model_id, overrides_json FROM model_overrides')
@@ -315,7 +365,7 @@ export function modelsWithOverriddenField(
 }
 
 export function applyModelOverrides(
-  db: any,
+  db: Db,
   platform: string,
   modelId: string,
 ): boolean {
@@ -334,7 +384,7 @@ export function applyModelOverrides(
   return true;
 }
 
-export function applyAllModelOverrides(db: any): number {
+export function applyAllModelOverrides(db: Db): number {
   const rows = db.prepare('SELECT platform, model_id FROM model_overrides').all() as { platform: string; model_id: string }[];
   let applied = 0;
   for (const row of rows) {
@@ -343,7 +393,10 @@ export function applyAllModelOverrides(db: any): number {
   return applied;
 }
 
-export function deleteTombstonedCatalogModels(db: any): number {
+// Only USER tombstones delete rows. An upstream-retirement tombstone disables
+// its model and keeps it (see retireCatalogModelUpstream), so deleting here
+// would throw away both the row and the reason the dashboard shows for it.
+export function deleteTombstonedCatalogModels(db: Db): number {
   const chatRows = db.prepare(`
     SELECT m.id, m.platform, m.model_id
       FROM models m

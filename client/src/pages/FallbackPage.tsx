@@ -49,6 +49,8 @@ import { Tooltip } from '@/components/tooltip'
 import { PenaltyInspector } from '@/components/penalty-inspector'
 import { PeakHoursControls } from '@/components/peak-hours-controls'
 import { ReliabilityFloorControl } from '@/components/reliability-floor-control'
+import { ProviderMomentControl } from '@/components/provider-moment-control'
+import { DecisionRoutingPopover, DecisionSetupGuide } from '@/components/decision-routing-popover'
 import { ChainManager } from '@/components/chain-manager'
 
 // `tKey` is the i18n suffix under `strategies.*` (label) and `strategies.*Blurb`.
@@ -60,6 +62,7 @@ const STRATEGIES: { key: RoutingStrategy; tKey: string }[] = [
   { key: 'fastest', tKey: 'fastest' },
   { key: 'reliable', tKey: 'reliable' },
   { key: 'custom', tKey: 'custom' },
+  { key: 'decision', tKey: 'decision' },
 ]
 
 // Minimum-context filter buckets for the Models page toolbar. `key` is the token
@@ -180,6 +183,7 @@ export default function FallbackPage() {
       strategy: RoutingStrategy; weights?: RoutingWeights; exploreEnabled?: boolean
       peakHoursAdjust?: boolean; peakStartHour?: number; peakEndHour?: number; peakTimezone?: string
       keySelectionStrategy?: KeySelectionStrategy; cooldownCeilingMs?: number | null
+      decisionModel?: string; decisionMinProbability?: number
     }) =>
       apiFetch('/api/fallback/routing', { method: 'PUT', body: JSON.stringify(payload) }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] }),
@@ -347,8 +351,8 @@ export default function FallbackPage() {
         {tokenUsage && tokenUsage.totalBudget > 0 && <TokenUsageBar data={tokenUsage} />}
 
         {/* Strategy selector */}
-        <section className="rounded-2xl sm:rounded-3xl border bg-card p-3.5 sm:p-5">
-          <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-1 sm:gap-2 mb-3">
+        <section className="rounded-3xl border bg-card p-5">
+          <div className="flex items-baseline justify-between mb-3">
             <h2 className="text-sm font-medium">{t('strategies.title')}</h2>
             {routing?.weights && (
               <span className="text-xs text-muted-foreground tabular-nums">
@@ -374,26 +378,49 @@ export default function FallbackPage() {
               secondary hangs off that toggle so the card reads as one choice. */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border p-1">
-              {STRATEGIES.map(s => (
-                <Tooltip key={s.key} text={t(`strategies.${s.tKey}Blurb`)}>
-                  <button
-                    disabled={strategyMutation.isPending}
-                    onClick={() => strategyMutation.mutate({ strategy: s.key })}
-                    className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
-                      s.key === strategy
-                        ? 'bg-foreground text-background font-medium'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-muted'
-                    }`}
-                  >
-                    {t(`strategies.${s.tKey}`)}
-                  </button>
-                </Tooltip>
-              ))}
+              {STRATEGIES.map(s => {
+                const pillClass = `px-3 py-1.5 text-xs rounded-lg transition-colors ${
+                  s.key === strategy
+                    ? 'bg-foreground text-background font-medium'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                }`
+                // Decision with nothing able to decide (#1354): the pill opens a
+                // setup guide instead of switching to a strategy that would
+                // route everything as Balanced.
+                const needsSetup = s.key === 'decision' && strategy !== 'decision' && routing?.decision && !routing.decision.ready
+                // The guide explains itself, so it skips the hover blurb, which
+                // would otherwise sit on top of the guide's buttons.
+                if (needsSetup && routing?.decision) {
+                  return (
+                    <DecisionSetupGuide key={s.key} status={routing.decision} className={pillClass}>
+                      {t(`strategies.${s.tKey}`)}
+                    </DecisionSetupGuide>
+                  )
+                }
+                return (
+                  <Tooltip key={s.key} text={t(`strategies.${s.tKey}Blurb`)}>
+                    <button
+                      disabled={strategyMutation.isPending}
+                      onClick={() => strategyMutation.mutate({ strategy: s.key })}
+                      className={pillClass}
+                    >
+                      {t(`strategies.${s.tKey}`)}
+                    </button>
+                  </Tooltip>
+                )
+              })}
               {strategy === 'custom' && routing && (
                 <CustomWeightsPopover
                   saved={routing.customWeights}
                   saving={strategyMutation.isPending}
                   onSave={w => strategyMutation.mutate({ strategy: 'custom', weights: w })}
+                />
+              )}
+              {strategy === 'decision' && routing?.decision && (
+                <DecisionRoutingPopover
+                  status={routing.decision}
+                  saving={strategyMutation.isPending}
+                  onSave={settings => strategyMutation.mutate({ strategy: 'decision', ...settings })}
                 />
               )}
             </div>
@@ -495,6 +522,10 @@ export default function FallbackPage() {
                   Shown in every mode; the floor pre-filters the candidate chain
                   regardless of how models are ranked. */}
               <ReliabilityFloorControl />
+              {/* Provider-moment failure attribution (#1347, opt-in): 429s, 5xx,
+                  timeouts and transport drops steer the key without counting
+                  against the model's reliability. Off by default. */}
+              <ProviderMomentControl />
             </div>
           )}
 

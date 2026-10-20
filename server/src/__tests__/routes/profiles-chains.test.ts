@@ -66,9 +66,9 @@ function addCatalogModel(modelId: string): number {
 }
 
 describe('named fallback chains', () => {
-  beforeEach(async () => {
+  beforeEach(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    await initDb(':memory:');
+    initDb(':memory:');
     app = createApp();
     dashToken = mintDashboardToken();
   });
