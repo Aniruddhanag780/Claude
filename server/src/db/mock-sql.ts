@@ -24,7 +24,7 @@ export interface SqlResult {
 
 const NOW_RE = /(?:datetime|CURRENT_TIMESTAMP)\s*\(\s*'?now'?\s*\)|NOW\(\)|CURRENT_TIMESTAMP/i;
 
-function nowIso(): string {
+export function nowIso(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 19);
 }
 
@@ -752,7 +752,7 @@ export function execStatement(
       models: ['id', 'provider_id', 'platform', 'model_id', 'canonical_name', 'display_name', 'intelligence_rank', 'speed_rank', 'size_label', 'rpm_limit', 'rpd_limit', 'tpm_limit', 'tpd_limit', 'context_window', 'max_output_tokens', 'enabled', 'supports_streaming', 'supports_tools', 'supports_vision', 'supports_structured_output', 'supports_reasoning', 'priority', 'key_id', 'endpoint_scope', 'source'],
       api_keys: ['id', 'platform', 'label', 'encrypted_key', 'iv', 'auth_tag', 'group_label', 'base_url', 'status', 'enabled', 'model_scope_json', 'monthly_request_cap', 'monthly_token_cap', 'proxy_encrypted', 'proxy_iv', 'proxy_auth_tag', 'created_at', 'updated_at'],
       key_monthly_usage: ['key_id', 'month', 'requests', 'tokens'],
-      requests: ['id', 'platform', 'model_id', 'key_id', 'status', 'input_tokens', 'output_tokens', 'latency_ms', 'error', 'request_type', 'client_ip', 'client_user_agent', 'client_agent', 'created_at'],
+      requests: ['id', 'platform', 'model_id', 'key_id', 'status', 'input_tokens', 'output_tokens', 'latency_ms', 'error', 'request_type', 'client_ip', 'client_user_agent', 'client_agent', 'caller', 'created_at'],
     };
     const known = TABLE_COLUMNS[t] || [];
     const fromRows = rows[0] ? Object.keys(rows[0]) : [];
@@ -1144,7 +1144,11 @@ export function execStatement(
   const upd = s.match(/^UPDATE\s+([A-Za-z_][\w]*)\s+SET\s+([\s\S]+?)(?=\bWHERE\b|$)/i);
   if (upd) {
     const [, table, assignments] = upd;
-    const whereM = s.match(/\bWHERE\b([\s\S]+)$/i);
+    // A trailing RETURNING clause is part of the statement, not part of the
+    // predicate. PostgreSQL returns the updated rows; the mock has to read
+    // the same predicate, or `WHERE id = $6 RETURNING *` compares the id
+    // against the literal string "$6 RETURNING *" and matches nothing.
+    const whereM = s.match(/\bWHERE\b([\s\S]+?)(?:\bRETURNING\b|$)/i);
     const rows = tableRows(tables, table.toLowerCase());
     // The SET placeholders are bound before the WHERE ones (that is the order
     // they appear in the statement), so resolve them up front; the WHERE's own
@@ -1173,7 +1177,10 @@ export function execStatement(
   }
 
   // ── DELETE ────────────────────────────────────────────────────────────────
-  const del = s.match(/^DELETE\s+FROM\s+([A-Za-z_][\w]*)(?:\s+WHERE\b([\s\S]+))?$/i);
+  // The trailing RETURNING clause is not part of the predicate (see the
+  // UPDATE branch above): `DELETE ... WHERE id = $1 RETURNING id` deletes
+  // nothing if the predicate keeps the clause.
+  const del = s.match(/^DELETE\s+FROM\s+([A-Za-z_][\w]*)(?:\s+WHERE\b([\s\S]+?))?(?:\s+RETURNING\b[\s\S]*)?$/i);
   if (del) {
     const [, table, where] = del;
     const rows = tableRows(tables, table.toLowerCase());
