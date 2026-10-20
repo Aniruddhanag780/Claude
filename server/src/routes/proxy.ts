@@ -486,8 +486,18 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
 // disagree with what the caps enforce. Aggregated per PROVIDER key joined to
 // api_keys for the platform label; requests whose key was deleted have already
 // dropped out of the ledger's join and are reported under "removed".
+//
+// The ledger is install-wide (requests are not tagged with the client profile
+// that sent them), so only the unified key may read it. A client-profile key
+// (sk-cp-...) is handed to a downstream client and must not see what every
+// other client spent.
 proxyRouter.get('/usage', (req: Request, res: Response) => {
-  if (!requireInferenceAuth(req, res)) return;
+  const auth = requireInferenceAuth(req, res);
+  if (!auth) return;
+  if (auth.kind !== 'unified') {
+    res.status(403).json({ error: { message: 'Usage is only available to the unified API key', type: 'permission_error' } });
+    return;
+  }
 
   const month = new Date().toISOString().slice(0, 7);
   const db = getDb();

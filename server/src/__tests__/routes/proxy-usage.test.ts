@@ -4,6 +4,7 @@ import type { Server } from 'node:http';
 import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
+import { hashClientProfileKey } from '../../lib/system-prompt.js';
 
 // GET /v1/usage (#1568): OpenRouter (GET /api/v1/auth/key) and LiteLLM
 // (/key/info) let a key-holder see its own consumption; until now the only
@@ -14,6 +15,7 @@ import { encrypt } from '../../lib/crypto.js';
 let server: Server;
 let baseUrl: string;
 let token: string;
+const PROFILE_TOKEN = 'sk-cp-' + 'a'.repeat(48);
 
 beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
@@ -31,6 +33,9 @@ beforeAll(async () => {
   db.prepare(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms)
     VALUES ('groq', ?, ?, 'error', 9999, 9999, 1)`).run(model, keyId);
   token = getUnifiedApiKey();
+  const profileSecret = encrypt(PROFILE_TOKEN);
+  db.prepare(`INSERT INTO client_profiles (name, token_hash, encrypted_key, iv, auth_tag, enabled)
+    VALUES ('downstream', ?, ?, ?, ?, 1)`).run(hashClientProfileKey(PROFILE_TOKEN), profileSecret.encrypted, profileSecret.iv, profileSecret.authTag);
   server = createApp().listen(0, '127.0.0.1');
   await once(server, 'listening');
   baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -52,6 +57,13 @@ describe('GET /v1/usage', () => {
     expect(groq).toBeTruthy();
     expect(groq.requests).toBe(2);
     expect(groq.tokens).toBe(150);
+  });
+
+  it('refuses a client-profile key: the ledger is install-wide, not per client', async () => {
+    const res = await fetch(`${baseUrl}/v1/usage`, { headers: { Authorization: `Bearer ${PROFILE_TOKEN}` } });
+    expect(res.status).toBe(403);
+    const body = await res.json() as any;
+    expect(body.requests).toBeUndefined();
   });
 
   it('rejects a missing or bogus key like every other /v1 route', async () => {
