@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { execStatement } from './mock-sql.js';
+import { execStatement, nowIso } from './mock-sql.js';
 
 const { Pool } = pg;
 
@@ -916,6 +916,19 @@ function createInMemoryMockPool(storageKey?: string) {
                 provs.push(prov);
               }
               const creds = tables.get('credentials') || [];
+              // The mirror must carry the columns the real `credentials` table
+              // has that the readers rely on. A row without `created_at` makes
+              // GET /api/keys throw `RangeError: Invalid time value` on
+              // `new Date(row.created_at)` and answer 500 — a mock that lies
+              // about Postgres.
+              //
+              // Only the columns that are safe to add are listed: the mock's
+              // WHERE evaluation treats a missing column as "never matches",
+              // so adding a column whose value the query filters on (the
+              // monthly caps, the cooldown, the model scope, the last failure)
+              // CHANGES which rows a query returns. Those five stay absent for
+              // now — see the open mock-fidelity item in the handover notes.
+              const createdAt = record.created_at || nowIso();
               creds.push({
                 id: record.id,
                 provider_id: prov.id,
@@ -924,9 +937,17 @@ function createInMemoryMockPool(storageKey?: string) {
                 encrypted_key: record.encrypted_key,
                 iv: record.iv,
                 auth_tag: record.auth_tag,
+                credential_type: record.credential_type || 'api_key',
                 status: record.status || 'unknown',
                 circuit_state: record.status === 'invalid' ? 'DISABLED' : 'HEALTHY',
                 enabled: record.enabled !== 0 && record.enabled !== false && record.status !== 'invalid',
+                priority: record.priority ?? 0,
+                group_label: record.group_label ?? null,
+                success_count: record.success_count ?? 0,
+                failure_count: record.failure_count ?? 0,
+                last_used_at: record.last_used_at ?? null,
+                created_at: createdAt,
+                updated_at: record.updated_at || createdAt,
                 last_health_error: record.last_health_error !== undefined ? record.last_health_error : (record.status === 'invalid' ? 'Invalid credential' : null),
                 base_url: record.base_url !== undefined ? record.base_url : null,
                 last_checked_at: record.last_checked_at !== undefined ? record.last_checked_at : null,
