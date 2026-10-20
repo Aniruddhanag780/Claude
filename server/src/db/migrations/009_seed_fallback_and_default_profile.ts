@@ -2,14 +2,25 @@ import pg from 'pg';
 
 export async function up(client: pg.PoolClient | pg.Pool): Promise<void> {
   // 1. Populate fallback_config from models if fallback_config is empty
+  //
+  // `fallback_config.priority` is a CHAIN POSITION, not a quality score: the
+  // router walks the chain ordered by `priority ASC` and densely renumbers the
+  // survivors 1..N, and catalog-sync appends a newly seen model at
+  // `MAX(priority) + 1` — i.e. at the END of the chain. `models.priority` is
+  // the opposite scale (the fork's seed gives the flagship models 10 and the
+  // weaker ones 3), so copying it verbatim inverted the chain: the worst model
+  // was served first. Rank the models instead — highest quality first, dense
+  // positions 1..N.
   const fbCountRes = await client.query('SELECT COUNT(*) as cnt FROM fallback_config');
   const fbCount = Number(fbCountRes.rows[0]?.cnt ?? 0);
   if (fbCount === 0) {
-    const modelsRes = await client.query('SELECT id, priority FROM models');
+    const modelsRes = await client.query('SELECT id, priority FROM models ORDER BY priority DESC, id ASC');
+    let position = 0;
     for (const m of modelsRes.rows) {
+      position += 1;
       await client.query(
         'INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES ($1, $2, 1) ON CONFLICT (model_db_id) DO NOTHING',
-        [m.id, m.priority ?? 0],
+        [m.id, position],
       );
     }
   }

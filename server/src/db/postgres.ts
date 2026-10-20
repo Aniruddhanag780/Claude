@@ -303,12 +303,23 @@ function seedMockDatabase(tables: Map<string, any[]>) {
     tables.get('quirk_targets')!.push(...targetsData);
   }
 
-  if (tables.get('fallback_config')!.length === 0) {
+  // The chain position is a POSITION (1 = served first), not a quality score:
+  // the router walks the chain `ORDER BY priority ASC` and catalog-sync
+  // appends a newly seen model at `MAX(priority) + 1` — i.e. at the END.
+  // `models.priority` is the opposite scale (the seed gives the flagship
+  // models 10 and the weaker ones 3), so copying it verbatim served the worst
+  // model first. Rank the models instead: highest quality first, dense
+  // positions 1..N. Migration 009 does the same for a real database.
+  const chainOrder = () => {
     const rawModels = tables.get('models') || [];
-    const fb = rawModels.map((m, i) => ({
+    return [...rawModels].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.id - b.id);
+  };
+
+  if (tables.get('fallback_config')!.length === 0) {
+    const fb = chainOrder().map((m, i) => ({
       id: i + 1,
       model_db_id: m.id,
-      priority: m.priority ?? i + 1,
+      priority: i + 1,
       enabled: 1,
     }));
     tables.get('fallback_config')!.push(...fb);
@@ -327,12 +338,11 @@ function seedMockDatabase(tables: Map<string, any[]>) {
   }
 
   if (tables.get('profile_models')!.length === 0) {
-    const rawModels = tables.get('models') || [];
-    const pm = rawModels.map((m, i) => ({
+    const pm = chainOrder().map((m, i) => ({
       id: i + 1,
       profile_id: 1,
       model_db_id: m.id,
-      priority: m.priority ?? i + 1,
+      priority: i + 1,
       enabled: 1,
     }));
     tables.get('profile_models')!.push(...pm);
