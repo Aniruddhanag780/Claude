@@ -33,9 +33,14 @@ Sources: [decision API](https://docs.beatapi.io/decisions),
   convert image/video search into generation models.
 - The Free plan shares 1,000 requests/month across endpoints, without a card;
   live response headers confirmed the allowance and one request/second.
-- Key validation omits `query`. A valid key returns a missing-query HTTP 400
-  with quota headers, an invalid key returns 401. Both were live checked, and
-  the valid probe did not decrement quota. Unexpected responses are inconclusive.
+- Key validation is OFF for automated checks (#1599): the provider treats
+  repeated empty-query requests as abuse and revokes free subscriptions for
+  them, and a key sits in the pool for weeks while the health pass would run
+  ~12 probes an hour. SerpSearch keys are never probed; a key is promoted to
+  healthy by the first real search it serves. `validateKey` remains for
+  one-off manual checks only, where the empty-query probe (valid key: 400
+  missing-query with quota headers, no credit spent; invalid key: 401) is
+  still the cheapest test.
 - The adapter follows the existing no-hits fallback policy and result limit.
   It does not paginate automatically or consume extra credits to fill results.
 

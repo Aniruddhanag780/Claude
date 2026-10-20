@@ -7,10 +7,22 @@ export class SerpSearchProvider extends SearchOnlyProvider {
   readonly platform = 'serpsearch' as const;
   readonly name = 'SerpSearch';
 
+  // #1599: SerpSearch counts empty-query requests as abuse. The probe below
+  // (GET /search with no query) was the documented way to prove a key works
+  // without spending quota, but the provider now revokes free subscriptions
+  // for accumulated 400s — a user lost their account to our 5-minute health
+  // pass. No probe is safe here, so automated validation is off entirely:
+  // keys stay 'unknown' until they serve a real search and get promoted by
+  // markKeyHealthyFromRequest (same seam as LLMTR, #1459).
+  override get supportsKeyValidation(): boolean {
+    return false;
+  }
+
   async validateKey(apiKey: string): Promise<KeyValidationResult> {
-    // Authentication runs before query validation: a valid key gets 400 with
-    // quota headers, an invalid key gets 401. No query means no credit spent.
-    // Live checked against both cases; do not turn this into a real search.
+    // Kept for callers that accept the risk (none in the health pass: it
+    // short-circuits on supportsKeyValidation above). Authentication runs
+    // before query validation: a valid key gets 400 with quota headers, an
+    // invalid key gets 401. Do not turn this into a real search.
     const res = await this.fetchWithTimeout(`${SERPSEARCH_BASE_URL}/search`, {
       method: 'GET', redirect: 'error', headers: { Authorization: `Bearer ${apiKey}` },
     }, 10_000, { timeoutBounds: 'request' });

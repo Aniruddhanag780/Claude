@@ -40,6 +40,14 @@ describe.each([
     await expect(provider.validateKey('unit-test-key')).rejects.toMatchObject({ status, retryAfterMs: 60_000 });
   });
 
+  it('#1599: SerpSearch opts out of automated key validation; BeatAPI keeps it', () => {
+    // The empty-query probe that proves a SerpSearch key is the very request
+    // the provider counts as abuse and revokes accounts for. The health pass
+    // and cooldown probe must never call it.
+    expect(getProvider('serpsearch')!.supportsKeyValidation).toBe(false);
+    expect(getProvider('beatapi')!.supportsKeyValidation).toBe(true);
+  });
+
   it('rejects ordinary and streaming chat without making a request', async () => {
     const fetch = vi.spyOn(global, 'fetch');
     const base = getProvider(platform)!;
