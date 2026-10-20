@@ -325,9 +325,7 @@ function tryDb(): Db | null {
 
 function hasTable(db: Db): boolean {
   try {
-    return !!db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='server_logs'")
-      .get();
+    return !!db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='server_logs'");
   } catch {
     return false;
   }
@@ -339,20 +337,10 @@ function persist(entry: ServerLogEntry): void {
   try {
     const db = tryDb();
     if (!db) return;
-    db.prepare(`
+    db.run(`
       INSERT INTO server_logs (id, level, source, provider, model, event, request_id, message, created_at_ms)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      entry.id,
-      entry.level,
-      entry.source ?? null,
-      entry.provider ?? null,
-      entry.model ?? null,
-      entry.event ?? null,
-      entry.requestId ?? null,
-      entry.message,
-      entry.tsMs,
-    );
+    `, [entry.id, entry.level, entry.source ?? null, entry.provider ?? null, entry.model ?? null, entry.event ?? null, entry.requestId ?? null, entry.message, entry.tsMs]);
   } catch {
     // Best effort by design: the table may not exist yet (a boot line racing
     // the migration), the DB may be locked, the disk may be full. None of that
@@ -408,17 +396,17 @@ function seedNow(): void {
 
   try {
     const pending = ring.splice(0, ring.length);
-    const max = db.prepare('SELECT MAX(id) AS maxId FROM server_logs').get() as
+    const max = db.get('SELECT MAX(id) AS maxId FROM server_logs') as
       | { maxId: number | null }
       | undefined;
     lastId = Math.max(lastId, max?.maxId ?? 0);
 
-    const rows = db.prepare(`
+    const rows = db.all(`
       SELECT id, level, source, provider, model, event, request_id, message, created_at_ms
         FROM server_logs
        ORDER BY created_at_ms DESC, id DESC
        LIMIT ?
-    `).all(PRELOAD_LIMIT) as ServerLogRow[];
+    `, [PRELOAD_LIMIT]) as ServerLogRow[];
     // Read newest-first so LIMIT keeps the recent end; the ring is oldest-first.
     for (const row of rows.reverse()) push(rowToEntry(row));
 
@@ -525,7 +513,7 @@ export function clearLogs(): void {
   const db = tryDb();
   if (!db) return;
   try {
-    db.prepare('DELETE FROM server_logs').run();
+    db.run('DELETE FROM server_logs');
   } catch {
     // Same best-effort contract as persist().
   }

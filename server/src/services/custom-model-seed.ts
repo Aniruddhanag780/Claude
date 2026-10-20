@@ -58,11 +58,11 @@ interface CatalogRankRow {
  * router doesn't recognize are ignored when picking the median tier.
  */
 export function customModelSeed(db: Db): CustomModelSeed {
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT size_label, intelligence_rank, speed_rank
       FROM models
      WHERE platform != 'custom'
-  `).all() as CatalogRankRow[];
+  `) as CatalogRankRow[];
 
   if (rows.length === 0) return FALLBACK_CUSTOM_SEED;
 

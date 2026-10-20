@@ -63,7 +63,7 @@ function toJson(row: ProfileRow) {
 }
 
 function getProfile(id: number): ProfileRow | undefined {
-  return getDb().prepare('SELECT * FROM client_profiles WHERE id = ?').get(id) as ProfileRow | undefined;
+  return getDb().get('SELECT * FROM client_profiles WHERE id = ?', [id]) as ProfileRow | undefined;
 }
 
 function parseId(req: Request, res: Response): number | null {
@@ -80,7 +80,7 @@ function notFound(res: Response): void {
 }
 
 clientProfilesRouter.get('/', (_req: Request, res: Response) => {
-  const rows = getDb().prepare('SELECT * FROM client_profiles ORDER BY id').all() as ProfileRow[];
+  const rows = getDb().all('SELECT * FROM client_profiles ORDER BY id') as ProfileRow[];
   res.json(rows.map(toJson));
 });
 
@@ -93,10 +93,10 @@ clientProfilesRouter.post('/', (req: Request, res: Response) => {
   const key = mintClientProfileKey();
   const { encrypted, iv, authTag } = encrypt(key);
   const prompt = parsed.data.systemPrompt?.trim() || null;
-  const info = getDb().prepare(`
+  const info = getDb().run(`
     INSERT INTO client_profiles (name, token_hash, encrypted_key, iv, auth_tag, system_prompt)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(parsed.data.name, hashClientProfileKey(key), encrypted, iv, authTag, prompt);
+  `, [parsed.data.name, hashClientProfileKey(key), encrypted, iv, authTag, prompt]);
   const row = getProfile(Number(info.lastInsertRowid))!;
   // The only time the full key leaves the server (besides rotate).
   res.status(201).json({ ...toJson(row), key });
@@ -117,16 +117,11 @@ clientProfilesRouter.patch('/:id', (req: Request, res: Response) => {
   const nextPrompt = systemPrompt === undefined
     ? row.system_prompt
     : (systemPrompt?.trim() || null);
-  getDb().prepare(`
+  getDb().run(`
     UPDATE client_profiles
     SET name = ?, system_prompt = ?, enabled = ?, updated_at = datetime('now')
     WHERE id = ?
-  `).run(
-    name ?? row.name,
-    nextPrompt,
-    enabled === undefined ? row.enabled : (enabled ? 1 : 0),
-    id,
-  );
+  `, [name ?? row.name, nextPrompt, enabled === undefined ? row.enabled : (enabled ? 1 : 0), id]);
   res.json(toJson(getProfile(id)!));
 });
 
@@ -138,18 +133,18 @@ clientProfilesRouter.post('/:id/rotate', (req: Request, res: Response) => {
 
   const key = mintClientProfileKey();
   const { encrypted, iv, authTag } = encrypt(key);
-  getDb().prepare(`
+  getDb().run(`
     UPDATE client_profiles
     SET token_hash = ?, encrypted_key = ?, iv = ?, auth_tag = ?, updated_at = datetime('now')
     WHERE id = ?
-  `).run(hashClientProfileKey(key), encrypted, iv, authTag, id);
+  `, [hashClientProfileKey(key), encrypted, iv, authTag, id]);
   res.json({ ...toJson(getProfile(id)!), key });
 });
 
 clientProfilesRouter.delete('/:id', (req: Request, res: Response) => {
   const id = parseId(req, res);
   if (id === null) return;
-  const info = getDb().prepare('DELETE FROM client_profiles WHERE id = ?').run(id);
+  const info = getDb().run('DELETE FROM client_profiles WHERE id = ?', [id]);
   if (info.changes === 0) return notFound(res);
   res.json({ success: true });
 });

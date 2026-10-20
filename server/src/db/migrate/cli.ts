@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import type { Db } from '../types.js';
-import { connectDb } from '../index.js';
+import { closeDb, connectDb } from '../index.js';
 import { getMigrationStatuses, runMigrations } from './runner.js';
 
 type Command = 'up' | 'down' | 'fresh' | 'status' | 'create';
@@ -22,24 +22,30 @@ async function main(): Promise<void> {
     return;
   }
 
-  const db = connectDb();
+  const db = await connectDb();
 
-  switch (command) {
-    case 'up':
-      await runMigrations(db, 'up');
-      return;
-    case 'down':
-      await runMigrations(db, 'down');
-      return;
-    case 'fresh':
-      await runFresh(db);
-      return;
-    case 'status':
-      printStatus(db);
-      return;
-    default:
-      console.error('Usage: tsx src/db/migrate/cli.ts <up|down|fresh|status|create>');
-      process.exit(1);
+  try {
+    switch (command) {
+      case 'up':
+        await runMigrations(db, 'up');
+        return;
+      case 'down':
+        await runMigrations(db, 'down');
+        return;
+      case 'fresh':
+        await runFresh(db);
+        return;
+      case 'status':
+        await printStatus(db);
+        return;
+      default:
+        console.error('Usage: tsx src/db/migrate/cli.ts <up|down|fresh|status|create>');
+        process.exit(1);
+    }
+  } finally {
+    // Release the pool so the CLI process can exit instead of hanging on open
+    // idle connections.
+    await closeDb();
   }
 }
 
@@ -49,12 +55,12 @@ async function runFresh(db: Db): Promise<void> {
     process.exit(1);
   }
 
-  dropAllUserTables(db);
+  await dropAllUserTables(db);
   await runMigrations(db, 'up');
 }
 
-function printStatus(db: Db): void {
-  const statuses = getMigrationStatuses(db);
+async function printStatus(db: Db): Promise<void> {
+  const statuses = await getMigrationStatuses(db);
   console.table(statuses.map(status => ({
     filename: status.filename,
     status: status.status,
@@ -183,26 +189,24 @@ function toMigrationBindingName(filename: string): string {
   return `migration${filename.replace(/\.ts$/, '').replace(/[^a-zA-Z0-9_]/g, '_')}`;
 }
 
-function dropAllUserTables(db: Db): void {
-  const tables = db.prepare(`
-    SELECT name
-      FROM sqlite_master
-     WHERE type = 'table'
-       AND name NOT LIKE 'sqlite_%'
-     ORDER BY name ASC
-  `).all() as { name: string }[];
+async function dropAllUserTables(db: Db): Promise<void> {
+  const tables = await db.all<{ table_name: string }>(`
+    SELECT table_name
+      FROM information_schema.tables
+     WHERE table_schema = 'public'
+       AND table_type = 'BASE TABLE'
+     ORDER BY table_name ASC
+  `);
 
-  db.pragma('foreign_keys = OFF');
-  try {
-    const dropTables = db.transaction(() => {
-      for (const { name } of tables) {
-        db.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(name)}`);
-      }
-    });
-    dropTables();
-  } finally {
-    db.pragma('foreign_keys = ON');
-  }
+  // CASCADE resolves foreign-key dependencies in any order. PostgreSQL has no
+  // per-session PRAGMA foreign_keys toggle; CASCADE is the equivalent
+  // "drop everything regardless of references" primitive. Dev-only (`fresh` is
+  // blocked in production above).
+  await db.transaction(async (tx) => {
+    for (const { table_name } of tables) {
+      await tx.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(table_name)} CASCADE`);
+    }
+  });
 }
 
 function quoteIdentifier(identifier: string): string {

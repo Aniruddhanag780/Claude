@@ -83,13 +83,13 @@ export interface RecentQuotaActivity {
 export function getRecentQuotaActivity(now: number): RecentQuotaActivity[] {
   const sqliteUtc = (ms: number) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
   const since = sqliteUtc(now - RATE_OBSERVATION_WINDOW_MINUTES * 60_000);
-  const rows = getDb().prepare(`
+  const rows = getDb().all(`
     SELECT platform, key_id AS keyId, model_id AS modelId, COUNT(*) AS count
       FROM requests
      WHERE created_at >= ? AND datetime(created_at) >= ? AND datetime(created_at) <= ?
        AND status = 'success'
      GROUP BY platform, key_id, model_id
-  `).all(since, since, sqliteUtc(now)) as { platform: Platform; keyId: number | null; modelId: string; count: number }[];
+  `, [since, since, sqliteUtc(now)]) as { platform: Platform; keyId: number | null; modelId: string; count: number }[];
   return rows.map(row => ({ platform: row.platform, keyId: row.keyId,
     pool: inferPoolForPlatform(row.platform, row.modelId), count: Number(row.count) }));
 }

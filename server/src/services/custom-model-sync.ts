@@ -85,7 +85,7 @@ export async function runCustomModelSync(db: Db): Promise<CustomModelSyncResult>
 
       const scope = endpointScopeForBaseUrl(endpoint.baseUrl);
       const registeredIds = new Set(
-        (db.prepare("SELECT model_id FROM models WHERE platform = 'custom' AND endpoint_scope = ?").all(scope) as { model_id: string }[])
+        (db.all("SELECT model_id FROM models WHERE platform = 'custom' AND endpoint_scope = ?", [scope]) as { model_id: string }[])
           .map(row => row.model_id),
       );
 

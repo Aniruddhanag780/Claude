@@ -53,10 +53,10 @@ export function invalidateTtfbBudgetCache(): void {
 }
 
 function readConfig(db: Db): Config {
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT key, value FROM settings
     WHERE key IN ('slow_endpoint_buffer_ms', 'ttfb_budget_window_ms', 'ttfb_budget_half_life_ms', 'ttfb_budget_min_samples')
-  `).all() as { key: string; value: string }[];
+  `) as { key: string; value: string }[];
   const settings = new Map(rows.map(row => [row.key, row.value]));
   const duration = (key: string, fallback: number, allowZero = false): number => {
     for (const raw of [settings.get(key), process.env[key.toUpperCase()]]) {
@@ -106,12 +106,12 @@ function statsFor(db: Db, config: Config, now: number): Map<string, EndpointTtfb
   // enforce the precise sliding window after parsing all timestamps as UTC.
   const earliest = new Date(now - config.windowMs - 24 * 60 * 60 * 1000);
   const since = Number.isFinite(earliest.getTime()) ? earliest.toISOString().slice(0, 10) : '';
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT r.platform, r.ttfb_ms, r.created_at, k.base_url
     FROM requests r
     LEFT JOIN api_keys k ON k.id = r.key_id AND k.platform = 'custom'
     WHERE r.created_at >= ? AND r.status = 'success' AND r.ttfb_ms IS NOT NULL
-  `).all(since) as { platform: string; ttfb_ms: number; created_at: string; base_url: string | null }[];
+  `, [since]) as { platform: string; ttfb_ms: number; created_at: string; base_url: string | null }[];
 
   const buckets = new Map<string, Sample[]>();
   for (const row of rows) {

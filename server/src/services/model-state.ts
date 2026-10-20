@@ -91,7 +91,7 @@ function modelRowValue(row: Record<string, unknown> | undefined, key: keyof Mode
 }
 
 function cachedCatalogDefaults(db: Db, platform: string, modelId: string): StoredOverrides {
-  const row = db.prepare("SELECT value FROM settings WHERE key = 'catalog_applied_json'").get() as { value: string } | undefined;
+  const row = db.get("SELECT value FROM settings WHERE key = 'catalog_applied_json'") as { value: string } | undefined;
   if (!row) return {};
   try {
     const catalog = JSON.parse(row.value) as { models?: Parameters<typeof applyCatalog>[1]['models'] };
@@ -112,18 +112,16 @@ function cachedCatalogDefaults(db: Db, platform: string, modelId: string): Store
 
 /** Called after catalog metadata is written, before local overrides are applied. */
 export function refreshModelOverrideBaselines(db: Db, platform: string, modelId: string): void {
-  const existing = db.prepare('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?')
-    .get(platform, modelId) as { overrides_json: string } | undefined;
+  const existing = db.get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]) as { overrides_json: string } | undefined;
   if (!existing) return;
   const { overrides } = parseOverridesBlob(existing.overrides_json);
-  const row = db.prepare('SELECT * FROM models WHERE platform = ? AND model_id = ?').get(platform, modelId) as Record<string, unknown> | undefined;
+  const row = db.get('SELECT * FROM models WHERE platform = ? AND model_id = ?', [platform, modelId]) as Record<string, unknown> | undefined;
   const baselines: StoredOverrides = {};
   for (const key of Object.keys(cleanPatch(overrides)) as Array<keyof ModelOverridePatch>) {
     const value = modelRowValue(row, key);
     if (value !== undefined) baselines[key] = value as never;
   }
-  db.prepare('UPDATE model_overrides SET overrides_json = ? WHERE platform = ? AND model_id = ?')
-    .run(JSON.stringify({ ...overrides, [CATALOG_BASELINE_KEY]: baselines }), platform, modelId);
+  db.run('UPDATE model_overrides SET overrides_json = ? WHERE platform = ? AND model_id = ?', [JSON.stringify({ ...overrides, [CATALOG_BASELINE_KEY]: baselines }), platform, modelId]);
 }
 
 /**
@@ -170,9 +168,7 @@ export function getCatalogModelTombstone(
   platform: string,
   modelId: string,
 ): CatalogModelTombstone | undefined {
-  const row = db
-    .prepare('SELECT source, reason, created_at FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?')
-    .get(kind, platform, modelId) as { source: string; reason: string | null; created_at: string } | undefined;
+  const row = db.get('SELECT source, reason, created_at FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?', [kind, platform, modelId]) as { source: string; reason: string | null; created_at: string } | undefined;
   if (!row) return undefined;
   return {
     source: row.source === 'upstream_eol' ? 'upstream_eol' : 'user',
@@ -204,17 +200,17 @@ export function recordCatalogModelTombstone(
   options: { source?: CatalogTombstoneSource; reason?: string | null } = {},
 ): void {
   const source: CatalogTombstoneSource = options.source ?? 'user';
-  db.prepare(`
+  db.run(`
     INSERT INTO catalog_model_tombstones (kind, platform, model_id, source, reason)
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(kind, platform, model_id)
     DO UPDATE SET created_at = datetime('now'), source = excluded.source, reason = excluded.reason
-  `).run(kind, platform, modelId, source, options.reason ?? null);
+  `, [kind, platform, modelId, source, options.reason ?? null]);
   // A user deletion drops their local metadata edits with the row. An upstream
   // retirement keeps the row, so it keeps the overrides too — they must survive
   // if the model is reinstated.
   if (kind === 'chat' && source === 'user') {
-    db.prepare('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?').run(platform, modelId);
+    db.run('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]);
   }
 }
 
@@ -239,8 +235,8 @@ export function retireCatalogModelUpstream(
   const existing = getCatalogModelTombstone(db, 'chat', platform, modelId);
   if (existing) return false;
   recordCatalogModelTombstone(db, 'chat', platform, modelId, { source: 'upstream_eol', reason });
-  db.prepare('UPDATE fallback_config SET enabled = 0 WHERE model_db_id = ?').run(modelDbId);
-  db.prepare('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?').run(modelDbId);
+  db.run('UPDATE fallback_config SET enabled = 0 WHERE model_db_id = ?', [modelDbId]);
+  db.run('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?', [modelDbId]);
   return true;
 }
 
@@ -256,12 +252,10 @@ export function reinstateUpstreamRetiredCatalogModel(
 ): boolean {
   if (getCatalogModelTombstone(db, 'chat', platform, modelId)?.source !== 'upstream_eol') return false;
   clearCatalogModelTombstone(db, 'chat', platform, modelId);
-  const row = db
-    .prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
-    .get(platform, modelId) as { id: number } | undefined;
+  const row = db.get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [platform, modelId]) as { id: number } | undefined;
   if (row) {
-    db.prepare('UPDATE fallback_config SET enabled = 1 WHERE model_db_id = ?').run(row.id);
-    db.prepare('UPDATE profile_models SET enabled = 1 WHERE model_db_id = ?').run(row.id);
+    db.run('UPDATE fallback_config SET enabled = 1 WHERE model_db_id = ?', [row.id]);
+    db.run('UPDATE profile_models SET enabled = 1 WHERE model_db_id = ?', [row.id]);
   }
   return true;
 }
@@ -272,8 +266,7 @@ export function clearCatalogModelTombstone(
   platform: string,
   modelId: string,
 ): void {
-  db.prepare('DELETE FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?')
-    .run(kind, platform, modelId);
+  db.run('DELETE FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?', [kind, platform, modelId]);
 }
 
 export function upsertModelOverrides(
@@ -285,9 +278,7 @@ export function upsertModelOverrides(
 ): StoredOverrides {
   const cleaned = cleanPatch(patch);
   if (Object.keys(cleaned).length === 0) return {};
-  const existing = db
-    .prepare('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?')
-    .get(platform, modelId) as { overrides_json: string } | undefined;
+  const existing = db.get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]) as { overrides_json: string } | undefined;
   const { overrides: stored, baselines } = parseOverridesBlob(existing?.overrides_json);
 
   const catalogDefaults = options.baselineRow ? cachedCatalogDefaults(db, platform, modelId) : {};
@@ -316,16 +307,16 @@ export function upsertModelOverrides(
   if (Object.keys(merged).length === 0) {
     // Nothing left to pin: drop the row so has_overrides goes false and the
     // dashboard's badge clears.
-    db.prepare('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?').run(platform, modelId);
+    db.run('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]);
     return {};
   }
   const blob = { ...merged, [CATALOG_BASELINE_KEY]: mergedBaselines };
-  db.prepare(`
+  db.run(`
     INSERT INTO model_overrides (platform, model_id, overrides_json, updated_at)
     VALUES (?, ?, ?, datetime('now'))
     ON CONFLICT(platform, model_id)
     DO UPDATE SET overrides_json = excluded.overrides_json, updated_at = excluded.updated_at
-  `).run(platform, modelId, JSON.stringify(blob));
+  `, [platform, modelId, JSON.stringify(blob)]);
   return merged;
 }
 
@@ -334,9 +325,7 @@ export function getModelOverrides(
   platform: string,
   modelId: string,
 ): StoredOverrides {
-  const row = db
-    .prepare('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?')
-    .get(platform, modelId) as { overrides_json: string } | undefined;
+  const row = db.get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]) as { overrides_json: string } | undefined;
   return parseOverrides(row?.overrides_json);
 }
 
@@ -354,8 +343,7 @@ export function modelsWithOverriddenField(
   db: Db,
   field: keyof ModelOverridePatch,
 ): Set<string> {
-  const rows = db.prepare('SELECT platform, model_id, overrides_json FROM model_overrides')
-    .all() as { platform: string; model_id: string; overrides_json: string }[];
+  const rows = db.all('SELECT platform, model_id, overrides_json FROM model_overrides') as { platform: string; model_id: string; overrides_json: string }[];
   const pinned = new Set<string>();
   for (const row of rows) {
     const overrides = parseOverrides(row.overrides_json);
@@ -380,12 +368,12 @@ export function applyModelOverrides(
     values.push(toDbValue(key, overrides[key]));
   }
   values.push(platform, modelId);
-  db.prepare(`UPDATE models SET ${assignments.join(', ')} WHERE platform = ? AND model_id = ?`).run(...values);
+  db.run( `UPDATE models SET ${assignments.join(', ')} WHERE platform = ? AND model_id = ?`, [...values]);
   return true;
 }
 
 export function applyAllModelOverrides(db: Db): number {
-  const rows = db.prepare('SELECT platform, model_id FROM model_overrides').all() as { platform: string; model_id: string }[];
+  const rows = db.all('SELECT platform, model_id FROM model_overrides') as { platform: string; model_id: string }[];
   let applied = 0;
   for (const row of rows) {
     if (applyModelOverrides(db, row.platform, row.model_id)) applied++;
@@ -397,31 +385,28 @@ export function applyAllModelOverrides(db: Db): number {
 // its model and keeps it (see retireCatalogModelUpstream), so deleting here
 // would throw away both the row and the reason the dashboard shows for it.
 export function deleteTombstonedCatalogModels(db: Db): number {
-  const chatRows = db.prepare(`
+  const chatRows = db.all(`
     SELECT m.id, m.platform, m.model_id
       FROM models m
       JOIN catalog_model_tombstones t
         ON t.kind = 'chat' AND t.platform = m.platform AND t.model_id = m.model_id
      WHERE t.source = 'user' AND m.platform != 'custom' AND m.key_id IS NULL AND m.source != 'user'
-  `).all() as { id: number; platform: string; model_id: string }[];
-  const mediaRows = db.prepare(`
+  `) as { id: number; platform: string; model_id: string }[];
+  const mediaRows = db.all(`
     SELECT mm.id
       FROM media_models mm
       JOIN catalog_model_tombstones t
         ON t.kind = 'media' AND t.platform = mm.platform AND t.model_id = mm.model_id
      WHERE t.source = 'user'
-  `).all() as { id: number }[];
+  `) as { id: number }[];
 
-  const deleteChatFallback = db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?');
-  const deleteChat = db.prepare('DELETE FROM models WHERE id = ?');
-  const deleteMedia = db.prepare('DELETE FROM media_models WHERE id = ?');
 
   for (const row of chatRows) {
-    deleteChatFallback.run(row.id);
-    deleteChat.run(row.id);
+    db.run('DELETE FROM fallback_config WHERE model_db_id = ?', [row.id]);
+    db.run('DELETE FROM models WHERE id = ?', [row.id]);
   }
   for (const row of mediaRows) {
-    deleteMedia.run(row.id);
+    db.run('DELETE FROM media_models WHERE id = ?', [row.id]);
   }
 
   return chatRows.length + mediaRows.length;

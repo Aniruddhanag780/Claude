@@ -16,11 +16,11 @@ export interface UrlTokenRow {
 }
 
 export function listUrlTokens(): UrlTokenRow[] {
-  const rows = getDb().prepare(`
+  const rows = getDb().all(`
     SELECT id, label, token_prefix, created_at, last_used_at, revoked_at
     FROM url_tokens
     ORDER BY id DESC
-  `).all() as Array<{
+  `) as Array<{
     id: number;
     label: string;
     token_prefix: string;
@@ -41,19 +41,19 @@ export function listUrlTokens(): UrlTokenRow[] {
 export function mintUrlToken(label: string): UrlTokenRow & { token: string } {
   const token = `flmurl_${crypto.randomBytes(24).toString('base64url')}`;
   const prefix = `${token.slice(0, 12)}…`;
-  const result = getDb().prepare(`
+  const result = getDb().run(`
     INSERT INTO url_tokens (token_hash, label, token_prefix)
     VALUES (?, ?, ?)
-  `).run(hashToken(token), label.trim(), prefix);
+  `, [hashToken(token), label.trim(), prefix]);
   const row = listUrlTokens().find(entry => entry.id === Number(result.lastInsertRowid))!;
   return { ...row, token };
 }
 
 export function revokeUrlToken(id: number): boolean {
-  return getDb().prepare(`
+  return getDb().run(`
     UPDATE url_tokens SET revoked_at = datetime('now')
     WHERE id = ? AND revoked_at IS NULL
-  `).run(id).changes > 0;
+  `, [id]).changes > 0;
 }
 
 export function validateUrlToken(token: string): boolean {
@@ -64,13 +64,11 @@ export function validateUrlToken(token: string): boolean {
     return false;
   }
   const hash = hashToken(token);
-  const row = getDb().prepare(`
+  const row = getDb().get(`
     SELECT id FROM url_tokens
     WHERE token_hash = ? AND revoked_at IS NULL
-  `).get(hash) as { id: number } | undefined;
+  `, [hash]) as { id: number } | undefined;
   if (!row) return false;
-  getDb().prepare(
-    "UPDATE url_tokens SET last_used_at = datetime('now') WHERE id = ?",
-  ).run(row.id);
+  getDb().run("UPDATE url_tokens SET last_used_at = datetime('now') WHERE id = ?", [row.id]);
   return true;
 }

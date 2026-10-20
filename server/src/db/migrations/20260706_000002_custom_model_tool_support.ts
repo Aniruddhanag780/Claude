@@ -13,10 +13,10 @@ import type { Db } from '../types.js';
  * tool-bearing requests with no recourse. New registrations default to
  * tools = 1 in the route handler, so this only touches rows created earlier.
  */
-export function up(db: Db): void {
-  db.prepare("UPDATE models SET supports_tools = 1 WHERE platform = 'custom'").run();
+export async function up(db: Db): Promise<void> {
+  await db.run("UPDATE models SET supports_tools = 1 WHERE platform = 'custom'");
 }
 
-export function down(db: Db): void {
-  db.prepare("UPDATE models SET supports_tools = 0 WHERE platform = 'custom'").run();
+export async function down(db: Db): Promise<void> {
+  await db.run("UPDATE models SET supports_tools = 0 WHERE platform = 'custom'");
 }

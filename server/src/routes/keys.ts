@@ -205,10 +205,10 @@ function insertImportedKey(platform: (typeof PLATFORMS)[number], keyName: string
 
   const db = getDb();
   const { encrypted, iv, authTag } = encrypt(keyValue.trim());
-  db.prepare(`
+  db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
     VALUES (?, ?, ?, ?, ?, 'unknown', 1)
-  `).run(platform, keyName, encrypted, iv, authTag);
+  `, [platform, keyName, encrypted, iv, authTag]);
 }
 
 // Count enabled catalog models for a platform. Used to warn when a key is
@@ -240,11 +240,11 @@ export function isExportableKey(row: { platform: string; baseUrl: string | null;
 // (#1327).
 function enabledModelCount(platform: string): number {
   const db = getDb();
-  const row = db.prepare(`
+  const row = db.get(`
     SELECT (SELECT COUNT(*) FROM models           WHERE platform = ? AND enabled = 1)
          + (SELECT COUNT(*) FROM embedding_models WHERE platform = ? AND enabled = 1)
          + (SELECT COUNT(*) FROM media_models     WHERE platform = ? AND enabled = 1) AS c
-  `).get(platform, platform, platform) as { c: number };
+  `, [platform, platform, platform]) as { c: number };
   return row.c;
 }
 
@@ -310,14 +310,14 @@ function noModelsNotice(platform: string): string | undefined {
 // "check off".
 keysRouter.get('/providers', (_req: Request, res: Response) => {
   const db = getDb();
-  const countRows = db.prepare(`
+  const countRows = db.all(`
     SELECT
       platform,
       COUNT(*) AS total_keys,
       SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS enabled_keys
     FROM api_keys
     GROUP BY platform
-  `).all() as Array<{ platform: string; total_keys: number; enabled_keys: number }>;
+  `) as Array<{ platform: string; total_keys: number; enabled_keys: number }>;
   const countsByPlatform = new Map(countRows.map(r => [r.platform, r]));
 
   const providers = getAllProviders()
@@ -354,7 +354,7 @@ keysRouter.get('/providers', (_req: Request, res: Response) => {
 // List all keys (masked)
 keysRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
-  const rows = db.prepare('SELECT * FROM api_keys ORDER BY created_at DESC').all() as any[];
+  const rows = db.all('SELECT * FROM api_keys ORDER BY created_at DESC') as any[];
   const modelCounts = new Map<string, number>();
   const modelCountFor = (platform: string): number => {
     if (!modelCounts.has(platform)) modelCounts.set(platform, enabledModelCount(platform));
@@ -362,21 +362,21 @@ keysRouter.get('/', (_req: Request, res: Response) => {
   };
 
   const customModels = [
-    ...db.prepare(`
+    ...db.all(`
       SELECT key_id, id, 'chat' AS kind, model_id, display_name, NULL AS family
         FROM models
        WHERE platform = 'custom' AND key_id IS NOT NULL
-    `).all() as any[],
-    ...db.prepare(`
+    `) as any[],
+    ...db.all(`
       SELECT key_id, id, 'embedding' AS kind, model_id, display_name, family
         FROM embedding_models
        WHERE platform = 'custom' AND key_id IS NOT NULL
-    `).all() as any[],
-    ...db.prepare(`
+    `) as any[],
+    ...db.all(`
       SELECT key_id, id, modality AS kind, model_id, display_name, NULL AS family
         FROM media_models
        WHERE platform = 'custom' AND key_id IS NOT NULL
-    `).all() as any[],
+    `) as any[],
   ];
   // Models are grouped by ENDPOINT, not by key row: an endpoint can hold
   // several credentials (#619) while each model binds to just one of them, and
@@ -510,7 +510,7 @@ keysRouter.delete('/:id/cooldowns', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const exists = db.prepare('SELECT 1 FROM api_keys WHERE id = ?').get(id);
+  const exists = db.get('SELECT 1 FROM api_keys WHERE id = ?', [id]);
   if (!exists) {
     res.status(404).json({ error: 'Key not found' });
     return;
@@ -565,7 +565,7 @@ keysRouter.get('/export', (req: Request, res: Response) => {
     whereClause = "WHERE status = 'healthy'";
   }
 
-  const rows = db.prepare(`SELECT * FROM api_keys ${whereClause} ORDER BY platform, created_at ASC`).all() as any[];
+  const rows = db.all(`SELECT * FROM api_keys ${whereClause} ORDER BY platform, created_at ASC`) as any[];
 
   // Decrypt and filter — only export keys with a real value
   const decryptedKeys = rows
@@ -684,8 +684,7 @@ keysRouter.post('/:id/reveal', (req: Request, res: Response) => {
     return;
   }
 
-  const row = getDb().prepare('SELECT encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?')
-    .get(id) as { encrypted_key: string; iv: string; auth_tag: string } | undefined;
+  const row = getDb().get('SELECT encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?', [id]) as { encrypted_key: string; iv: string; auth_tag: string } | undefined;
   if (!row) {
     res.status(404).json({ error: { message: 'Key not found' } });
     return;
@@ -725,8 +724,7 @@ keysRouter.post('/', (req: Request, res: Response) => {
   const db = getDb();
 
   if (isKeyless) {
-    const rows = db.prepare('SELECT id, encrypted_key, iv, auth_tag FROM api_keys WHERE platform = ? ORDER BY id')
-      .all(platform) as { id: number; encrypted_key: string; iv: string; auth_tag: string }[];
+    const rows = db.all('SELECT id, encrypted_key, iv, auth_tag FROM api_keys WHERE platform = ? ORDER BY id', [platform]) as { id: number; encrypted_key: string; iv: string; auth_tag: string }[];
     const plaintext = (r: typeof rows[number]): string | null => {
       try { return decrypt(r.encrypted_key, r.iv, r.auth_tag); } catch { return null; }
     };
@@ -747,7 +745,7 @@ keysRouter.post('/', (req: Request, res: Response) => {
       // piling up duplicates each time the user clicks "Enable".
       const existing = sentinel ?? rows[0];
       if (existing) {
-        db.prepare("UPDATE api_keys SET enabled = 1, status = 'unknown' WHERE id = ?").run(existing.id);
+        db.run("UPDATE api_keys SET enabled = 1, status = 'unknown' WHERE id = ?", [existing.id]);
         respond(existing.id, maskKey(plaintext(existing) ?? keyToStore));
         return;
       }
@@ -763,7 +761,7 @@ keysRouter.post('/', (req: Request, res: Response) => {
         updates.push('proxy_encrypted = ?', 'proxy_iv = ?', 'proxy_auth_tag = ?');
         values.push(proxy.encrypted, proxy.iv, proxy.authTag);
       }
-      db.prepare(`UPDATE api_keys SET ${updates.join(', ')} WHERE id = ?`).run(...values, sentinel.id);
+      db.run(`UPDATE api_keys SET ${updates.join(', ')} WHERE id = ?`, [...values, sentinel.id]);
       clearCooldownsForKey(sentinel.id);
       respond(sentinel.id, maskKey(rawKey));
       return;
@@ -774,10 +772,10 @@ keysRouter.post('/', (req: Request, res: Response) => {
   // #590: the proxy URL is encrypted like the key itself — it usually embeds
   // `user:pass@` credentials. Absent/'' stores NULLs = no override.
   const proxy = encryptProxyUrl(proxyUrl);
-  const result = db.prepare(`
+  const result = db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, proxy_encrypted, proxy_iv, proxy_auth_tag)
     VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?, ?, ?)
-  `).run(platform, label ?? '', encrypted, iv, authTag, proxy.encrypted, proxy.iv, proxy.authTag);
+  `, [platform, label ?? '', encrypted, iv, authTag, proxy.encrypted, proxy.iv, proxy.authTag]);
 
   // #1348: fetch the provider's models in the background when the catalog
   // carries none for it. No-op for every other platform.
@@ -872,8 +870,7 @@ function resolveEndpointRef(ref: { keyId?: number; baseUrl?: string }): CustomEn
   const requestedBaseUrl = ref.baseUrl === undefined ? undefined : normalizeBaseUrl(ref.baseUrl);
 
   if (ref.keyId !== undefined) {
-    const row = db.prepare('SELECT id, platform, base_url, encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?')
-      .get(ref.keyId) as { id: number; platform: string; base_url: string | null; encrypted_key: string; iv: string; auth_tag: string } | undefined;
+    const row = db.get('SELECT id, platform, base_url, encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?', [ref.keyId]) as { id: number; platform: string; base_url: string | null; encrypted_key: string; iv: string; auth_tag: string } | undefined;
     if (!row || row.platform !== 'custom' || !row.base_url) {
       throw Object.assign(new Error('keyId does not name a custom endpoint'), { status: 400 });
     }
@@ -893,10 +890,10 @@ function resolveEndpointRef(ref: { keyId?: number; baseUrl?: string }): CustomEn
 
   // Any key of this base_url serves the whole endpoint (#619), so the first one
   // is as good a representative as any.
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT id, encrypted_key, iv, auth_tag FROM api_keys
      WHERE platform = 'custom' AND base_url = ? ORDER BY id
-  `).all(requestedBaseUrl) as Array<{ id: number; encrypted_key: string; iv: string; auth_tag: string }>;
+  `, [requestedBaseUrl]) as Array<{ id: number; encrypted_key: string; iv: string; auth_tag: string }>;
   for (const row of rows) {
     try {
       return { baseUrl: requestedBaseUrl, keyId: row.id, storedKey: decrypt(row.encrypted_key, row.iv, row.auth_tag) };
@@ -964,9 +961,7 @@ async function registerImportedModels(
 
   for (const m of embeds) {
     try {
-      const existing = db.prepare(
-        "SELECT dimensions FROM embedding_models WHERE platform = 'custom' AND model_id = ?",
-      ).get(m.id) as { dimensions: number } | undefined;
+      const existing = db.get("SELECT dimensions FROM embedding_models WHERE platform = 'custom' AND model_id = ?", [m.id]) as { dimensions: number } | undefined;
       const dimensions = existing?.dimensions ?? await probeEmbeddingDimensions(baseUrl, apiKey, m.id);
       registerCustomEmbeddingModel(db, {
         keyId,
@@ -1055,9 +1050,10 @@ keysRouter.post('/custom/discover-models', async (req: Request, res: Response) =
     if (endpoint.keyId != null) {
       const poolIds = [...customEndpointKeyIds(db, endpoint.keyId)];
       const placeholders = poolIds.map(() => '?').join(', ');
-      const rows = db.prepare(
+      const rows = db.all(
         `SELECT model_id FROM models WHERE platform = 'custom' AND key_id IN (${placeholders})`,
-      ).all(...poolIds) as { model_id: string }[];
+        [...poolIds],
+      ) as { model_id: string }[];
       for (const row of rows) registeredIds.add(row.model_id);
     }
 
@@ -1100,10 +1096,10 @@ interface BuiltinKeyRow {
 }
 
 function builtinKeyRow(keyId: number): BuiltinKeyRow | undefined {
-  const row = getDb().prepare(`
+  const row = getDb().get(`
     SELECT id, platform, encrypted_key, iv, auth_tag, proxy_encrypted, proxy_iv, proxy_auth_tag
       FROM api_keys WHERE id = ?
-  `).get(keyId) as BuiltinKeyRow | undefined;
+  `, [keyId]) as BuiltinKeyRow | undefined;
   return row && row.platform !== 'custom' ? row : undefined;
 }
 
@@ -1214,9 +1210,10 @@ keysRouter.post('/custom/probe', async (req: Request, res: Response) => {
     const db = getDb();
     poolIds = [...customEndpointKeyIds(db, endpoint.keyId)];
     const placeholders = poolIds.map(() => '?').join(', ');
-    const row = db.prepare(
+    const row = db.get(
       `SELECT model_id FROM models WHERE platform = 'custom' AND key_id IN (${placeholders}) ORDER BY id LIMIT 1`,
-    ).get(...poolIds) as { model_id: string } | undefined;
+      [...poolIds],
+    ) as { model_id: string } | undefined;
     registeredModelId = row?.model_id ?? null;
   }
 
@@ -1226,10 +1223,10 @@ keysRouter.post('/custom/probe', async (req: Request, res: Response) => {
     // Only a successful probe records a sample. The row mirrors what the proxy
     // writes on a real request so the decay-weighted stats cache picks it up.
     if (endpoint.keyId != null) {
-      getDb().prepare(`
+      getDb().run(`
         INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, ttfb_ms, request_type)
         VALUES ('custom', ?, ?, 'success', ?, ?, ?, ?, 'chat')
-      `).run(probe.modelId, endpoint.keyId, probe.inputTokens, probe.outputTokens, probe.latencyMs, probe.latencyMs);
+      `, [probe.modelId, endpoint.keyId, probe.inputTokens, probe.outputTokens, probe.latencyMs, probe.latencyMs]);
 
       // A real completion just succeeded, which is stronger evidence than any
       // health ping — lift whatever cooldown was still holding the key back.
@@ -1248,10 +1245,11 @@ keysRouter.post('/custom/probe', async (req: Request, res: Response) => {
     // that were never probed.
     if (probe.toolCalls && poolIds.length > 0) {
       const placeholders = poolIds.map(() => '?').join(', ');
-      getDb().prepare(
+      getDb().run(
         `UPDATE models SET supports_tools = 1
           WHERE platform = 'custom' AND model_id = ? AND key_id IN (${placeholders})`,
-      ).run(probe.modelId, ...poolIds);
+        [probe.modelId, ...poolIds],
+      );
     }
 
     // Response stays { modelId, latencyMs } for backward compat; capability
@@ -1407,9 +1405,7 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
   const embeddingsRegistered: Array<{ model: string }> = [];
   for (const e of embedEntries) {
     try {
-      const existing = db.prepare(
-        "SELECT dimensions FROM embedding_models WHERE platform = 'custom' AND model_id = ?",
-      ).get(e.modelId) as { dimensions: number } | undefined;
+      const existing = db.get("SELECT dimensions FROM embedding_models WHERE platform = 'custom' AND model_id = ?", [e.modelId]) as { dimensions: number } | undefined;
       const dimensions = existing?.dimensions ?? await probeEmbeddingDimensions(baseUrl, providedKey ?? storedKey, e.modelId);
       registerCustomEmbeddingModel(db, {
         keyId,
@@ -1575,7 +1571,7 @@ keysRouter.post('/preview', (req: Request, res: Response, next: NextFunction) =>
 
       // Build a set of existing decrypted key values for duplicate detection
       const db = getDb();
-      const existingRows = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_keys').all() as any[];
+      const existingRows = db.all('SELECT encrypted_key, iv, auth_tag FROM api_keys') as any[];
       const existingKeys = new Set<string>();
       for (const row of existingRows) {
         try {
@@ -1628,7 +1624,7 @@ keysRouter.post('/import-selected', async (req: Request, res: Response) => {
 
   // Build a set of existing decrypted key values for duplicate detection
   const db = getDb();
-  const existingRows = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_keys').all() as any[];
+  const existingRows = db.all('SELECT encrypted_key, iv, auth_tag FROM api_keys') as any[];
   const existingKeys = new Set<string>();
   for (const row of existingRows) {
     try {
@@ -1715,7 +1711,7 @@ keysRouter.delete('/:id', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = db.prepare('SELECT platform, base_url FROM api_keys WHERE id = ?').get(id) as { platform: string; base_url: string | null } | undefined;
+  const row = db.get('SELECT platform, base_url FROM api_keys WHERE id = ?', [id]) as { platform: string; base_url: string | null } | undefined;
   if (!row) {
     res.status(404).json({ error: { message: 'Key not found' } });
     return;
@@ -1727,43 +1723,43 @@ keysRouter.delete('/:id', (req: Request, res: Response) => {
   const remove = db.transaction(() => {
     if (sibling != null) {
       for (const table of ['models', 'embedding_models', 'media_models']) {
-        db.prepare(`UPDATE ${table} SET key_id = ? WHERE platform = 'custom' AND key_id = ?`).run(sibling, id);
+        db.run(`UPDATE ${table} SET key_id = ? WHERE platform = 'custom' AND key_id = ?`, [sibling, id]);
       }
-      db.prepare('DELETE FROM api_keys WHERE id = ?').run(id);
+      db.run('DELETE FROM api_keys WHERE id = ?', [id]);
       return;
     }
 
-    db.prepare('DELETE FROM api_keys WHERE id = ?').run(id);
+    db.run('DELETE FROM api_keys WHERE id = ?', [id]);
     // Custom models exist only because POST /custom registered them alongside
     // their endpoint key (#117) — they can't route without it. Cascade away
     // the models bound to THIS endpoint (#212); other custom providers keep
     // theirs. Legacy rows (key_id NULL) are swept once no custom keys remain,
     // so they never linger in the fallback chain forever (#189).
     if (row.platform === 'custom') {
-      const defaultEmbedding = db.prepare("SELECT value FROM settings WHERE key = 'embeddings_default_family'").get() as { value: string } | undefined;
+      const defaultEmbedding = db.get("SELECT value FROM settings WHERE key = 'embeddings_default_family'") as { value: string } | undefined;
       // #926: the scheduled custom-model sync only knows a model by "is it in
       // the table yet". Without a tombstone, a key the operator deleted to get
       // rid of its models would have them all re-registered by the next pass.
       const scope = endpointScopeForBaseUrl(row.base_url);
-      const doomed = db.prepare("SELECT model_id FROM models WHERE platform = 'custom' AND key_id = ?").all(id) as { model_id: string }[];
+      const doomed = db.all("SELECT model_id FROM models WHERE platform = 'custom' AND key_id = ?", [id]) as { model_id: string }[];
       for (const m of doomed) recordCustomModelTombstone(db, scope, m.model_id);
-      db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom' AND key_id = ?)").run(id);
-      db.prepare("DELETE FROM models WHERE platform = 'custom' AND key_id = ?").run(id);
-      db.prepare("DELETE FROM embedding_models WHERE platform = 'custom' AND key_id = ?").run(id);
-      db.prepare("DELETE FROM media_models WHERE platform = 'custom' AND key_id = ?").run(id);
-      const remaining = db.prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'").get() as { n: number };
+      db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom' AND key_id = ?)", [id]);
+      db.run("DELETE FROM models WHERE platform = 'custom' AND key_id = ?", [id]);
+      db.run("DELETE FROM embedding_models WHERE platform = 'custom' AND key_id = ?", [id]);
+      db.run("DELETE FROM media_models WHERE platform = 'custom' AND key_id = ?", [id]);
+      const remaining = db.get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'") as { n: number };
       if (remaining.n === 0) {
-        db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')").run();
-        db.prepare("DELETE FROM models WHERE platform = 'custom'").run();
-        db.prepare("DELETE FROM embedding_models WHERE platform = 'custom'").run();
-        db.prepare("DELETE FROM media_models WHERE platform = 'custom'").run();
+        db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')");
+        db.run("DELETE FROM models WHERE platform = 'custom'");
+        db.run("DELETE FROM embedding_models WHERE platform = 'custom'");
+        db.run("DELETE FROM media_models WHERE platform = 'custom'");
       }
       if (defaultEmbedding) {
-        const stillExists = db.prepare('SELECT 1 FROM embedding_models WHERE family = ? LIMIT 1').get(defaultEmbedding.value);
+        const stillExists = db.get('SELECT 1 FROM embedding_models WHERE family = ? LIMIT 1', [defaultEmbedding.value]);
         if (!stillExists) {
-          const replacement = db.prepare('SELECT family FROM embedding_models ORDER BY family, priority LIMIT 1').get() as { family: string } | undefined;
+          const replacement = db.get('SELECT family FROM embedding_models ORDER BY family, priority LIMIT 1') as { family: string } | undefined;
           if (replacement) {
-            db.prepare("UPDATE settings SET value = ? WHERE key = 'embeddings_default_family'").run(replacement.family);
+            db.run("UPDATE settings SET value = ? WHERE key = 'embeddings_default_family'", [replacement.family]);
           }
         }
       }
@@ -1773,10 +1769,10 @@ keysRouter.delete('/:id', (req: Request, res: Response) => {
     // the legacy sweep); this covers key_id-pinned rows on standard
     // platforms, which the catalog prune (key_id IS NULL only) never touches.
     // Shared catalog rows (key_id NULL) are untouched.
-    db.prepare('DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE key_id = ?)').run(id);
-    db.prepare('DELETE FROM models WHERE key_id = ?').run(id);
-    db.prepare('DELETE FROM embedding_models WHERE key_id = ?').run(id);
-    db.prepare('DELETE FROM media_models WHERE key_id = ?').run(id);
+    db.run('DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE key_id = ?)', [id]);
+    db.run('DELETE FROM models WHERE key_id = ?', [id]);
+    db.run('DELETE FROM embedding_models WHERE key_id = ?', [id]);
+    db.run('DELETE FROM media_models WHERE key_id = ?', [id]);
   });
   remove();
 
@@ -1809,10 +1805,10 @@ keysRouter.patch('/platform/:platform', (req: Request, res: Response) => {
   const db = getDb();
   const groupLabel = group === undefined ? undefined : normalizeGroupLabel(group);
   const result = groupLabel === undefined
-    ? db.prepare('UPDATE api_keys SET enabled = ? WHERE platform = ?').run(enabled ? 1 : 0, platform)
+    ? db.run('UPDATE api_keys SET enabled = ? WHERE platform = ?', [enabled ? 1 : 0, platform])
     : groupLabel === null
-      ? db.prepare("UPDATE api_keys SET enabled = ? WHERE platform = 'custom' AND group_label IS NULL").run(enabled ? 1 : 0)
-      : db.prepare("UPDATE api_keys SET enabled = ? WHERE platform = 'custom' AND group_label = ?").run(enabled ? 1 : 0, groupLabel);
+      ? db.run("UPDATE api_keys SET enabled = ? WHERE platform = 'custom' AND group_label IS NULL", [enabled ? 1 : 0])
+      : db.run("UPDATE api_keys SET enabled = ? WHERE platform = 'custom' AND group_label = ?", [enabled ? 1 : 0, groupLabel]);
 
   res.json({ success: true, enabled, updatedKeys: result.changes });
 });
@@ -1838,8 +1834,7 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
 
   if (key !== undefined) {
     const db = getDb();
-    const stored = db.prepare('SELECT platform, encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?')
-      .get(id) as { platform: string; encrypted_key: string; iv: string; auth_tag: string } | undefined;
+    const stored = db.get('SELECT platform, encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?', [id]) as { platform: string; encrypted_key: string; iv: string; auth_tag: string } | undefined;
     if (!stored) {
       res.status(404).json({ error: { message: 'Key not found' } });
       return;
@@ -1900,7 +1895,7 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
   // endpoint's whole key pool rather than this one row.
   const db = getDb();
   if (groupLabel !== undefined) {
-    const row = db.prepare('SELECT platform FROM api_keys WHERE id = ?').get(id) as { platform: string } | undefined;
+    const row = db.get('SELECT platform FROM api_keys WHERE id = ?', [id]) as { platform: string } | undefined;
     if (!row) {
       res.status(404).json({ error: { message: 'Key not found' } });
       return;
@@ -1924,7 +1919,7 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
   const result = db.transaction(() => {
     const changes = updates.length === 0
       ? 1
-      : db.prepare(`UPDATE api_keys SET ${updates.join(', ')} WHERE id = ?`).run(...values).changes;
+      : db.run(`UPDATE api_keys SET ${updates.join(', ')} WHERE id = ?`, [...values]).changes;
     if (changes > 0 && groupLabel !== undefined) setCustomEndpointGroup(db, id, normalizeGroupLabel(groupLabel));
     return { changes };
   })();

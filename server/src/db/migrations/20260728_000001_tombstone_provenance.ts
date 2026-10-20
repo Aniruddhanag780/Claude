@@ -6,8 +6,8 @@
 
 import type { Db } from '../types.js';
 
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
+  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
   return columns.some((candidate) => candidate.name === column);
 }
 
@@ -19,23 +19,23 @@ function hasColumn(db: Db, table: string, column: string): boolean {
  * the dashboard can say why. `source` keeps the two apart ('user' is the
  * backfill for every pre-existing row); `reason` is the redacted provider text.
  */
-export function up(db: Db): void {
-  if (!hasColumn(db, 'catalog_model_tombstones', 'source')) {
-    db.prepare("ALTER TABLE catalog_model_tombstones ADD COLUMN source TEXT NOT NULL DEFAULT 'user'").run();
+export async function up(db: Db): Promise<void> {
+  if (!await hasColumn(db, 'catalog_model_tombstones', 'source')) {
+    await db.run("ALTER TABLE catalog_model_tombstones ADD COLUMN source TEXT NOT NULL DEFAULT 'user'");
   }
-  if (!hasColumn(db, 'catalog_model_tombstones', 'reason')) {
-    db.prepare('ALTER TABLE catalog_model_tombstones ADD COLUMN reason TEXT').run();
+  if (!await hasColumn(db, 'catalog_model_tombstones', 'reason')) {
+    await db.run('ALTER TABLE catalog_model_tombstones ADD COLUMN reason TEXT');
   }
 }
 
-export function down(db: Db): void {
+export async function down(db: Db): Promise<void> {
   // Upstream-retirement tombstones have no meaning without their source column,
   // and leaving them behind would silently delete live models on the next sync.
-  db.prepare("DELETE FROM catalog_model_tombstones WHERE source = 'upstream_eol'").run();
-  if (hasColumn(db, 'catalog_model_tombstones', 'reason')) {
-    db.prepare('ALTER TABLE catalog_model_tombstones DROP COLUMN reason').run();
+  await db.run("DELETE FROM catalog_model_tombstones WHERE source = 'upstream_eol'");
+  if (await hasColumn(db, 'catalog_model_tombstones', 'reason')) {
+    await db.run('ALTER TABLE catalog_model_tombstones DROP COLUMN reason');
   }
-  if (hasColumn(db, 'catalog_model_tombstones', 'source')) {
-    db.prepare('ALTER TABLE catalog_model_tombstones DROP COLUMN source').run();
+  if (await hasColumn(db, 'catalog_model_tombstones', 'source')) {
+    await db.run('ALTER TABLE catalog_model_tombstones DROP COLUMN source');
   }
 }

@@ -26,17 +26,16 @@ import type { Db } from '../types.js';
 
 const SETTING_KEY = 'enable_mcp';
 
-export function up(db: Db): void {
-  const existing = db.prepare('SELECT value FROM settings WHERE key = ?').get(SETTING_KEY);
+export async function up(db: Db): Promise<void> {
+  const existing = await db.get('SELECT value FROM settings WHERE key = ?', [SETTING_KEY]);
   if (existing) return;
 
-  const row = db.prepare('SELECT COUNT(*) AS count FROM api_keys').get() as { count: number };
+  const row = await db.get('SELECT COUNT(*) AS count FROM api_keys') as { count: number };
   const isExistingInstall = row.count > 0;
 
-  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)')
-    .run(SETTING_KEY, isExistingInstall ? '1' : '0');
+  await db.run('INSERT INTO settings (key, value) VALUES (?, ?)', [SETTING_KEY, isExistingInstall ? '1' : '0']);
 }
 
-export function down(db: Db): void {
-  db.prepare('DELETE FROM settings WHERE key = ?').run(SETTING_KEY);
+export async function down(db: Db): Promise<void> {
+  await db.run('DELETE FROM settings WHERE key = ?', [SETTING_KEY]);
 }

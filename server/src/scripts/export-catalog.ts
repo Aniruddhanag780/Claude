@@ -72,15 +72,11 @@ function main() {
   initDb(dbPath);
   const db = getDb();
 
-  const models = db
-    .prepare(
-      `SELECT platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
+  const models = db.all(`SELECT platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
               rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
               enabled, supports_vision, supports_tools
          FROM models
-        ORDER BY intelligence_rank ASC, platform ASC, model_id ASC`,
-    )
-    .all() as ModelRow[];
+        ORDER BY intelligence_rank ASC, platform ASC, model_id ASC`) as ModelRow[];
 
   const quirksByModel = resolveQuirksByModel(db);
   const quirkDefs = listQuirkDefinitions(db);

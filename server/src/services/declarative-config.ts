@@ -196,36 +196,35 @@ function upsertApiKey(db: Db, input: z.infer<typeof keySchema>): number {
 
   if (isCustom) {
     if (!baseUrl) throw new Error('baseUrl is required for custom keys');
-    const existing = db.prepare("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ?").get(baseUrl) as { id: number } | undefined;
+    const existing = db.get("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ?", [baseUrl]) as { id: number } | undefined;
     if (existing) {
-      db.prepare(`
+      db.run(`
         UPDATE api_keys
            SET label = ?, encrypted_key = ?, iv = ?, auth_tag = ?, enabled = ?, status = 'unknown'
          WHERE id = ?
-      `).run(label, key.encrypted, key.iv, key.authTag, enabled, existing.id);
+      `, [label, key.encrypted, key.iv, key.authTag, enabled, existing.id]);
       return existing.id;
     }
-    const inserted = db.prepare(`
+    const inserted = db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
       VALUES ('custom', ?, ?, ?, ?, 'unknown', ?, ?)
-    `).run(label, key.encrypted, key.iv, key.authTag, enabled, baseUrl);
+    `, [label, key.encrypted, key.iv, key.authTag, enabled, baseUrl]);
     return Number(inserted.lastInsertRowid);
   }
 
-  const existing = db.prepare('SELECT id FROM api_keys WHERE platform = ? AND label = ? AND base_url IS NULL LIMIT 1')
-    .get(platform, label) as { id: number } | undefined;
+  const existing = db.get('SELECT id FROM api_keys WHERE platform = ? AND label = ? AND base_url IS NULL LIMIT 1', [platform, label]) as { id: number } | undefined;
   if (existing) {
-    db.prepare(`
+    db.run(`
       UPDATE api_keys
          SET encrypted_key = ?, iv = ?, auth_tag = ?, enabled = ?, status = 'unknown'
        WHERE id = ?
-    `).run(key.encrypted, key.iv, key.authTag, enabled, existing.id);
+    `, [key.encrypted, key.iv, key.authTag, enabled, existing.id]);
     return existing.id;
   }
-  const inserted = db.prepare(`
+  const inserted = db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
     VALUES (?, ?, ?, ?, ?, 'unknown', ?)
-  `).run(platform, label, key.encrypted, key.iv, key.authTag, enabled);
+  `, [platform, label, key.encrypted, key.iv, key.authTag, enabled]);
   return Number(inserted.lastInsertRowid);
 }
 
@@ -236,16 +235,15 @@ function normalizeModelEntry(entry: z.infer<typeof modelEntrySchema>): Normalize
 }
 
 function ensureFallbackRow(db: Db, modelDbId: number, enabled = true, updateExisting = true): void {
-  const existing = db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(modelDbId);
+  const existing = db.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [modelDbId]);
   if (existing) {
     if (updateExisting) {
-      db.prepare('UPDATE fallback_config SET enabled = ? WHERE model_db_id = ?').run(enabled ? 1 : 0, modelDbId);
+      db.run('UPDATE fallback_config SET enabled = ? WHERE model_db_id = ?', [enabled ? 1 : 0, modelDbId]);
     }
     return;
   }
-  const max = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config').get() as { m: number };
-  db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, ?)')
-    .run(modelDbId, max.m + 1, enabled ? 1 : 0);
+  const max = db.get('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config') as { m: number };
+  db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, ?)', [modelDbId, max.m + 1, enabled ? 1 : 0]);
   // A chain row alone is not enough to be routable: when a profile is active the
   // router reads profile_models, so a declaratively-added model would be present
   // in the dashboard yet never selected. routes/keys.ts does the same after its
@@ -272,7 +270,7 @@ function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSche
   let registered = 0;
   for (const entry of input.models) {
     const model = normalizeModelEntry(entry);
-    db.prepare(`
+    db.run(`
       INSERT INTO models
         (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
@@ -290,22 +288,8 @@ function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSche
         supports_tools = excluded.supports_tools,
         key_id = excluded.key_id,
         enabled = 1
-    `).run(
-      model.modelId,
-      model.displayName,
-      model.intelligenceRank ?? seed.intelligenceRank,
-      model.speedRank ?? seed.speedRank,
-      model.sizeLabel ?? seed.sizeLabel,
-      model.monthlyTokenBudget ?? '',
-      model.contextWindow ?? null,
-      model.supportsVision ? 1 : 0,
-      model.supportsTools ? 1 : 0,
-      keyId,
-      endpointScope,
-    );
-    const row = db.prepare(
-      "SELECT id FROM models WHERE platform = 'custom' AND model_id = ? AND endpoint_scope = ?",
-    ).get(model.modelId, endpointScope) as { id: number };
+    `, [model.modelId, model.displayName, model.intelligenceRank ?? seed.intelligenceRank, model.speedRank ?? seed.speedRank, model.sizeLabel ?? seed.sizeLabel, model.monthlyTokenBudget ?? '', model.contextWindow ?? null, model.supportsVision ? 1 : 0, model.supportsTools ? 1 : 0, keyId, endpointScope]);
+    const row = db.get("SELECT id FROM models WHERE platform = 'custom' AND model_id = ? AND endpoint_scope = ?", [model.modelId, endpointScope]) as { id: number };
     ensureFallbackRow(db, row.id, model.fallbackEnabled !== false);
     registered++;
   }
@@ -349,9 +333,7 @@ function resolveDeclaredModel(
   modelId: string,
   endpoint: string | undefined,
 ): DeclaredModelRow | undefined {
-  const rows = db.prepare(
-    'SELECT id, platform, model_id, key_id, source, endpoint_scope FROM models WHERE platform = ? AND model_id = ? ORDER BY id',
-  ).all(platform, modelId) as DeclaredModelRow[];
+  const rows = db.all('SELECT id, platform, model_id, key_id, source, endpoint_scope FROM models WHERE platform = ? AND model_id = ? ORDER BY id', [platform, modelId]) as DeclaredModelRow[];
 
   if (endpoint) {
     const named = rows.filter(r => r.endpoint_scope && endpointRefMatches(endpoint, r.endpoint_scope));
@@ -386,30 +368,14 @@ function upsertModel(db: Db, input: z.infer<typeof modelSchema>): void {
     // update or prune it (see applyCatalog). Patching an EXISTING catalog row
     // below does NOT flip ownership — the row's existence is still catalog-
     // managed and the edit is recorded as an override instead.
-    db.prepare(`
+    db.run(`
       INSERT INTO models
         (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
          enabled, supports_vision, supports_tools, source)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'user')
-    `).run(
-      platform,
-      modelId,
-      input.displayName ?? modelId,
-      input.intelligenceRank ?? 50,
-      input.speedRank ?? 50,
-      input.sizeLabel ?? 'User',
-      input.rpmLimit ?? null,
-      input.rpdLimit ?? null,
-      input.tpmLimit ?? null,
-      input.tpdLimit ?? null,
-      input.monthlyTokenBudget ?? '',
-      input.contextWindow ?? null,
-      input.enabled === false ? 0 : 1,
-      input.supportsVision ? 1 : 0,
-      input.supportsTools ? 1 : 0,
-    );
-    const created = db.prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?').get(platform, modelId) as { id: number };
+    `, [platform, modelId, input.displayName ?? modelId, input.intelligenceRank ?? 50, input.speedRank ?? 50, input.sizeLabel ?? 'User', input.rpmLimit ?? null, input.rpdLimit ?? null, input.tpmLimit ?? null, input.tpdLimit ?? null, input.monthlyTokenBudget ?? '', input.contextWindow ?? null, input.enabled === false ? 0 : 1, input.supportsVision ? 1 : 0, input.supportsTools ? 1 : 0]);
+    const created = db.get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [platform, modelId]) as { id: number };
     ensureFallbackRow(db, created.id, input.fallbackEnabled ?? input.enabled !== false);
     return;
   }
@@ -442,7 +408,7 @@ function upsertModel(db: Db, input: z.infer<typeof modelSchema>): void {
   }
   if (assignments.length > 0) {
     values.push(existing.id);
-    db.prepare(`UPDATE models SET ${assignments.join(', ')} WHERE id = ?`).run(...values);
+    db.run( `UPDATE models SET ${assignments.join(', ')} WHERE id = ?`, [...values]);
   }
   if (isCatalogManagedModel(existing) && Object.keys(patch).length > 0) {
     upsertModelOverrides(db, platform, modelId, patch);
@@ -451,13 +417,12 @@ function upsertModel(db: Db, input: z.infer<typeof modelSchema>): void {
 }
 
 function applyFallback(db: Db, entries: z.infer<typeof fallbackEntrySchema>[]): number {
-  const update = db.prepare('UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?');
   let changed = 0;
   entries.forEach((entry, i) => {
     const row = resolveDeclaredModel(db, entry.platform, entry.modelId, entry.endpoint);
     if (!row) return;
     ensureFallbackRow(db, row.id, entry.enabled !== false);
-    update.run(entry.priority ?? i + 1, entry.enabled === false ? 0 : 1, row.id);
+    db.run('UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?', [entry.priority ?? i + 1, entry.enabled === false ? 0 : 1, row.id]);
     changed++;
   });
   return changed;

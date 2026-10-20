@@ -378,7 +378,7 @@ function drainPendingWrites(): void {
 
 function scheduleRowDelete(cacheKey: string): void {
   schedulePersist(() => {
-    getDb().prepare('DELETE FROM response_cache WHERE cache_key = ?').run(cacheKey);
+    getDb().run('DELETE FROM response_cache WHERE cache_key = ?', [cacheKey]);
   });
 }
 
@@ -397,8 +397,7 @@ function scheduleHitCountFlush(): void {
     const batch = new Map(dirtyHitCounts);
     dirtyHitCounts.clear();
     schedulePersist(() => {
-      const stmt = getDb().prepare('UPDATE response_cache SET hit_count = ?, last_hit_at_ms = ? WHERE cache_key = ?');
-      for (const [cacheKey, hit] of batch) stmt.run(hit.hitCount, hit.lastHitAtMs, cacheKey);
+      for (const [cacheKey, hit] of batch) getDb().run('UPDATE response_cache SET hit_count = ?, last_hit_at_ms = ? WHERE cache_key = ?', [hit.hitCount, hit.lastHitAtMs, cacheKey]);
     });
   }, HIT_FLUSH_DELAY_MS);
   hitFlushTimer.unref();
@@ -527,8 +526,7 @@ export function storeCachedResponse(cacheKey: string, input: StoreInput, now = D
   if (!entry) return; // cap of 0: the entry was evicted by the loop above
   const expiresAtMs = now + cacheTtlMs();
   schedulePersist(() => {
-    getDb().prepare(
-      `INSERT INTO response_cache
+    getDb().run(`INSERT INTO response_cache
          (cache_key, body_json, platform, model_id, key_id, prompt_tokens, completion_tokens, hit_count, created_at_ms, last_hit_at_ms, expires_at_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(cache_key) DO UPDATE SET
@@ -541,20 +539,7 @@ export function storeCachedResponse(cacheKey: string, input: StoreInput, now = D
          hit_count = excluded.hit_count,
          created_at_ms = excluded.created_at_ms,
          last_hit_at_ms = excluded.last_hit_at_ms,
-         expires_at_ms = excluded.expires_at_ms`,
-    ).run(
-      cacheKey,
-      bodyJson,
-      input.platform,
-      input.modelId,
-      input.keyId,
-      input.promptTokens,
-      input.completionTokens,
-      entry.hitCount,
-      now,
-      entry.lastHitAtMs,
-      expiresAtMs,
-    );
+         expires_at_ms = excluded.expires_at_ms`, [cacheKey, bodyJson, input.platform, input.modelId, input.keyId, input.promptTokens, input.completionTokens, entry.hitCount, now, entry.lastHitAtMs, expiresAtMs]);
   });
 }
 
@@ -571,15 +556,13 @@ export function loadCacheFromDb(now = Date.now()): void {
     // Purge expired rows lazily on startup so the table doesn't accumulate
     // dead entries between restarts. Unconditional: rows written while the
     // cache was on must still age out after it is switched off.
-    db.prepare('DELETE FROM response_cache WHERE expires_at_ms <= ?').run(now);
+    db.run('DELETE FROM response_cache WHERE expires_at_ms <= ?', [now]);
     // Hydration only when the operator actually wants the cache (and its
     // on-disk half). Off by default, so this is inert on an untouched install.
     if (!cachePersistenceEnabled()) return;
-    const rows = db.prepare(
-      `SELECT cache_key, body_json, platform, model_id, key_id, prompt_tokens, completion_tokens, hit_count, created_at_ms, last_hit_at_ms
+    const rows = db.all(`SELECT cache_key, body_json, platform, model_id, key_id, prompt_tokens, completion_tokens, hit_count, created_at_ms, last_hit_at_ms
          FROM response_cache
-        ORDER BY created_at_ms ASC`,
-    ).all() as Array<{
+        ORDER BY created_at_ms ASC`) as Array<{
       cache_key: string;
       body_json: string;
       platform: string;
@@ -790,7 +773,7 @@ export function clearCache(): number {
   lookupHits = 0;
   lookupMisses = 0;
   try {
-    getDb().prepare('DELETE FROM response_cache').run();
+    getDb().run('DELETE FROM response_cache');
   } catch {
     // best-effort: no DB (or no table yet) means there is nothing persisted
   }

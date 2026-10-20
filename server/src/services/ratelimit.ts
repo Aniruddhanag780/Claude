@@ -214,16 +214,16 @@ function recordUsage(
   now: number,
 ): boolean {
   return withDb(db => {
-    db.prepare(`
+    db.run(`
       INSERT INTO rate_limit_usage (platform, model_id, key_id, kind, tokens, created_at_ms)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(platform, modelId, keyId, kind, tokens, now);
+    `, [platform, modelId, keyId, kind, tokens, now]);
     // `now < lastUsagePruneMs` covers a clock step backwards (NTP correction,
     // a suspended host resuming) — without it a jump forward would wedge the
     // prune off until real time caught up again.
     if (now - lastUsagePruneMs >= USAGE_PRUNE_INTERVAL_MS || now < lastUsagePruneMs) {
       lastUsagePruneMs = now;
-      db.prepare('DELETE FROM rate_limit_usage WHERE created_at_ms <= ?').run(now - DAY);
+      db.run('DELETE FROM rate_limit_usage WHERE created_at_ms <= ?', [now - DAY]);
     }
     return true;
   }) ?? false;
@@ -237,7 +237,7 @@ function countPersistedRequests(
   now: number,
 ): number | undefined {
   return withDb(db => {
-    const row = db.prepare(`
+    const row = db.get(`
       SELECT COUNT(*) AS used
         FROM rate_limit_usage
        WHERE platform = ?
@@ -245,7 +245,7 @@ function countPersistedRequests(
          AND key_id = ?
          AND kind = 'request'
          AND created_at_ms > ?
-    `).get(platform, modelId, keyId, now - windowMs) as { used: number };
+    `, [platform, modelId, keyId, now - windowMs]) as { used: number };
     return row.used;
   });
 }
@@ -258,7 +258,7 @@ function sumPersistedTokens(
   now: number,
 ): number | undefined {
   return withDb(db => {
-    const row = db.prepare(`
+    const row = db.get(`
       SELECT COALESCE(SUM(tokens), 0) AS used
         FROM rate_limit_usage
        WHERE platform = ?
@@ -266,7 +266,7 @@ function sumPersistedTokens(
          AND key_id = ?
          AND kind = 'tokens'
          AND created_at_ms > ?
-    `).get(platform, modelId, keyId, now - windowMs) as { used: number };
+    `, [platform, modelId, keyId, now - windowMs]) as { used: number };
     return row.used;
   });
 }
@@ -411,7 +411,7 @@ function buildWindowUsageSnapshot(now: number): WindowUsageSnapshot | null {
     // gates above enforce: a sliding minute for rpm/tpm, a sliding day for
     // rpd/tpd. Rows older than a day are pruned on write, but the WHERE keeps
     // this correct even when a prune has not run yet.
-    const rows = db.prepare(`
+    const rows = db.all(`
       SELECT platform, model_id, key_id,
              SUM(CASE WHEN kind = 'request' AND created_at_ms > ? THEN 1 ELSE 0 END) AS rpm_used,
              SUM(CASE WHEN kind = 'request' THEN 1 ELSE 0 END) AS rpd_used,
@@ -420,7 +420,7 @@ function buildWindowUsageSnapshot(now: number): WindowUsageSnapshot | null {
         FROM rate_limit_usage
        WHERE created_at_ms > ?
        GROUP BY platform, model_id, key_id
-    `).all(now - MINUTE, now - MINUTE, now - DAY) as Array<{
+    `, [now - MINUTE, now - MINUTE, now - DAY]) as Array<{
       platform: string; model_id: string; key_id: number;
       rpm_used: number; rpd_used: number; tpm_used: number; tpd_used: number;
     }>;
@@ -436,9 +436,7 @@ function buildWindowUsageSnapshot(now: number): WindowUsageSnapshot | null {
     // healthy/unknown, and the model scope must admit the model. The custom
     // endpoint check needs base_url for every row, disabled ones included, so
     // that map is built from the unfiltered read.
-    const keyRows = db.prepare(
-      'SELECT id, platform, base_url, model_scope_json, enabled, status FROM api_keys'
-    ).all() as Array<{
+    const keyRows = db.all('SELECT id, platform, base_url, model_scope_json, enabled, status FROM api_keys') as Array<{
       id: number; platform: string; base_url: string | null;
       model_scope_json: string | null; enabled: number; status: string;
     }>;
@@ -628,14 +626,14 @@ function countPersistedProviderRequests(
   now: number,
 ): number | undefined {
   return withDb(db => {
-    const row = db.prepare(`
+    const row = db.get(`
       SELECT COUNT(*) AS used
         FROM rate_limit_usage
        WHERE platform = ?
          AND key_id = ?
          AND kind = 'request'
          AND created_at_ms > ?
-    `).get(platform, keyId, now - windowMs) as { used: number };
+    `, [platform, keyId, now - windowMs]) as { used: number };
     return row.used;
   });
 }
@@ -712,12 +710,12 @@ function multiplierFromQuotaRow(row: ModelQuotaRow | undefined, dailyCap: number
 function getProviderTokenMultiplier(platform: string, modelId: string, dailyCap: number): number {
   if (platform !== 'navy') return 1;
   return withDb(db => {
-    const row = db.prepare(`
+    const row = db.get(`
       SELECT tpd_limit, monthly_token_budget
         FROM models
        WHERE platform = ? AND model_id = ?
        LIMIT 1
-    `).get(platform, modelId) as ModelQuotaRow | undefined;
+    `, [platform, modelId]) as ModelQuotaRow | undefined;
     return multiplierFromQuotaRow(row, dailyCap);
   }) ?? 1;
 }
@@ -740,7 +738,7 @@ function sumPersistedProviderTokens(
   if (dailyCap === null) return 0;
 
   return withDb(db => {
-    const rows = db.prepare(`
+    const rows = db.all(`
       SELECT rlu.model_id, COALESCE(SUM(rlu.tokens), 0) AS used,
              m.tpd_limit, m.monthly_token_budget
         FROM rate_limit_usage rlu
@@ -750,7 +748,7 @@ function sumPersistedProviderTokens(
          AND rlu.kind = 'tokens'
          AND rlu.created_at_ms > ?
        GROUP BY rlu.model_id
-    `).all(platform, keyId, now - windowMs) as (ModelQuotaRow & { model_id: string; used: number })[];
+    `, [platform, keyId, now - windowMs]) as (ModelQuotaRow & { model_id: string; used: number })[];
 
     return rows.reduce((sum, row) => {
       const multiplier = platform === 'navy' ? multiplierFromQuotaRow(row, dailyCap) : 1;
@@ -912,7 +910,7 @@ export function getCooldownCeilingMs(): number | null {
 /** null clears the ceiling (back to the uncapped ladder). */
 export function setCooldownCeilingMs(value: number | null): void {
   if (value === null) {
-    getDb().prepare('DELETE FROM settings WHERE key = ?').run(COOLDOWN_CEILING_KEY);
+    getDb().run('DELETE FROM settings WHERE key = ?', [COOLDOWN_CEILING_KEY]);
     return;
   }
   if (!Number.isInteger(value) || value < MIN_COOLDOWN_CEILING_MS || value > MAX_COOLDOWN_CEILING_MS) {
@@ -1063,8 +1061,7 @@ export function isLocalEndpointKey(keyId: number): boolean {
   const cached = keyLocality.get(keyId);
   if (cached !== undefined) return cached;
   const baseUrl = withDb(db => {
-    const row = db.prepare('SELECT base_url FROM api_keys WHERE id = ?')
-      .get(keyId) as { base_url: string | null } | undefined;
+    const row = db.get('SELECT base_url FROM api_keys WHERE id = ?', [keyId]) as { base_url: string | null } | undefined;
     return row?.base_url ?? '';
   });
   if (baseUrl === undefined) return false; // DB not ready — don't cache
@@ -1173,13 +1170,13 @@ function persistedCooldownExpiry(
   keyId: number,
 ): number | null | undefined {
   return withDb(db => {
-    const row = db.prepare(`
+    const row = db.get(`
       SELECT expires_at_ms
         FROM rate_limit_cooldowns
        WHERE platform = ?
          AND model_id = ?
          AND key_id = ?
-    `).get(platform, modelId, keyId) as { expires_at_ms: number } | undefined;
+    `, [platform, modelId, keyId]) as { expires_at_ms: number } | undefined;
     return row?.expires_at_ms ?? null;
   });
 }
@@ -1193,25 +1190,25 @@ function persistCooldown(
   setAtMs: number,
 ) {
   withDb(db => {
-    db.prepare(`
+    db.run(`
       INSERT INTO rate_limit_cooldowns (platform, model_id, key_id, expires_at_ms, source, set_at_ms)
       VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(platform, model_id, key_id)
       DO UPDATE SET expires_at_ms = excluded.expires_at_ms,
                     source = excluded.source,
                     set_at_ms = excluded.set_at_ms
-    `).run(platform, modelId, keyId, expiresAtMs, source, setAtMs);
+    `, [platform, modelId, keyId, expiresAtMs, source, setAtMs]);
   });
 }
 
 function clearPersistedCooldown(platform: string, modelId: string, keyId: number) {
   withDb(db => {
-    db.prepare(`
+    db.run(`
       DELETE FROM rate_limit_cooldowns
        WHERE platform = ?
          AND model_id = ?
          AND key_id = ?
-    `).run(platform, modelId, keyId);
+    `, [platform, modelId, keyId]);
   });
 }
 
@@ -1226,7 +1223,7 @@ function clearPersistedCooldown(platform: string, modelId: string, keyId: number
  */
 export function cleanupExpiredCooldowns(now = Date.now()): number {
   const cleared = withDb(db => {
-    const result = db.prepare('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms <= ?').run(now);
+    const result = db.run('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms <= ?', [now]);
     return Number(result.changes ?? 0);
   }) ?? 0;
 
@@ -1300,13 +1297,13 @@ export function getActiveCooldownsForKeys(
   if (unique.length === 0) return grouped;
 
   const placeholders = unique.map(() => '?').join(', ');
-  const rows = withDb(db => db.prepare(`
+  const rows = withDb(db => db.all( `
     SELECT platform, model_id, key_id, expires_at_ms
       FROM rate_limit_cooldowns
      WHERE expires_at_ms > ?
        AND key_id IN (${placeholders})
      ORDER BY expires_at_ms ASC
-  `).all(now, ...unique) as { platform: string; model_id: string; key_id: number; expires_at_ms: number }[]) ?? [];
+  `, [now, ...unique]) as { platform: string; model_id: string; key_id: number; expires_at_ms: number }[]) ?? [];
 
   for (const row of rows) {
     const list = grouped.get(row.key_id) ?? [];
@@ -1332,7 +1329,7 @@ export function clearCooldownsForKey(keyId: number): number {
   if (!Number.isInteger(keyId)) return 0;
 
   const cleared = withDb(db => {
-    const result = db.prepare('DELETE FROM rate_limit_cooldowns WHERE key_id = ?').run(keyId);
+    const result = db.run('DELETE FROM rate_limit_cooldowns WHERE key_id = ?', [keyId]);
     return Number(result.changes ?? 0);
   }) ?? 0;
 
@@ -1361,9 +1358,9 @@ export function clearCooldownsForKey(keyId: number): number {
  */
 export function clearAllCooldowns(now = Date.now()): number {
   const cleared = withDb(db => {
-    const result = db.prepare('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms > ?').run(now);
+    const result = db.run('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms > ?', [now]);
     // Expired rows are dead weight either way; sweep them in the same pass.
-    db.prepare('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms <= ?').run(now);
+    db.run('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms <= ?', [now]);
     return Number(result.changes ?? 0);
   }) ?? 0;
   let memoryCleared = 0;
@@ -1394,13 +1391,13 @@ export interface ProbeableCooldown {
  * and when the DB is unavailable the right amount of probing is none.
  */
 export function getProbeableCooldowns(now = Date.now()): ProbeableCooldown[] {
-  const rows = withDb(db => db.prepare(`
+  const rows = withDb(db => db.all(`
     SELECT platform, model_id, key_id, expires_at_ms, set_at_ms
       FROM rate_limit_cooldowns
      WHERE expires_at_ms > ?
        AND source = 'heuristic'
      ORDER BY expires_at_ms ASC
-  `).all(now) as { platform: string; model_id: string; key_id: number; expires_at_ms: number; set_at_ms: number | null }[]) ?? [];
+  `, [now]) as { platform: string; model_id: string; key_id: number; expires_at_ms: number; set_at_ms: number | null }[]) ?? [];
 
   return rows.map(row => ({
     platform: row.platform,
@@ -1430,11 +1427,11 @@ export function clearCooldownEarly(platform: string, modelId: string, keyId: num
  */
 export function getSoonestCooldownExpiry(now = Date.now()): number | null {
   return withDb(db => {
-    const row = db.prepare(`
+    const row = db.get(`
       SELECT MIN(expires_at_ms) AS soonest
         FROM rate_limit_cooldowns
        WHERE expires_at_ms > ?
-    `).get(now) as { soonest: number | null } | undefined;
+    `, [now]) as { soonest: number | null } | undefined;
     return row?.soonest ?? null;
   }) ?? null;
 }
@@ -1512,9 +1509,7 @@ export function learnLimitFromError(modelDbId: number, err: { message?: string }
   if (!parsed) return null;
   const col = LIMIT_COLUMN[parsed.kind];
   const result = withDb(db =>
-    db.prepare(
-      `UPDATE models SET ${col} = ? WHERE id = ? AND (${col} IS NULL OR ${col} > ?)`,
-    ).run(parsed.limit, modelDbId, parsed.limit),
+    db.run(`UPDATE models SET ${col} = ? WHERE id = ? AND (${col} IS NULL OR ${col} > ?)`, [parsed.limit, modelDbId, parsed.limit]),
   );
   return result && result.changes > 0 ? parsed : null;
 }
@@ -1568,9 +1563,7 @@ export function learnContextWindowFromError(modelDbId: number, err: { message?: 
   const window = parseProviderContextWindow(err?.message);
   if (window == null) return null;
   const result = withDb(db =>
-    db.prepare(
-      'UPDATE models SET context_window = ? WHERE id = ? AND (context_window IS NULL OR context_window > ?)',
-    ).run(window, modelDbId, window),
+    db.run('UPDATE models SET context_window = ? WHERE id = ? AND (context_window IS NULL OR context_window > ?)', [window, modelDbId, window]),
   );
   return result && result.changes > 0 ? window : null;
 }

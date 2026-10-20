@@ -13,7 +13,7 @@ export const healthRouter = Router();
 healthRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
 
-  const platforms = db.prepare(`
+  const platforms = db.all(`
     SELECT
       platform,
       COUNT(*) as total_keys,
@@ -25,13 +25,13 @@ healthRouter.get('/', (_req: Request, res: Response) => {
       SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled_keys
     FROM api_keys
     GROUP BY platform
-  `).all() as any[];
+  `) as any[];
 
-  const keys = db.prepare(`
+  const keys = db.all(`
     SELECT id, platform, label, status, enabled, created_at, last_checked_at, last_healthy_at, last_health_error
     FROM api_keys
     ORDER BY platform, created_at DESC
-  `).all() as any[];
+  `) as any[];
 
   res.json({
     platforms: platforms.map(p => ({
@@ -94,7 +94,7 @@ healthRouter.post('/quota/:keyId', async (req: Request, res: Response) => {
     return;
   }
   const db = getDb();
-  const row = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(keyId) as any;
+  const row = db.get('SELECT * FROM api_keys WHERE id = ?', [keyId]) as any;
   if (!row) {
     res.status(404).json({ error: { message: 'Key not found' } });
     return;

@@ -13,30 +13,30 @@
 
 import type { Db } from '../types.js';
 
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
+  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
   return columns.some((candidate) => candidate.name === column);
 }
 
-export function up(db: Db): void {
-  if (!hasColumn(db, 'rate_limit_cooldowns', 'source')) {
+export async function up(db: Db): Promise<void> {
+  if (!await hasColumn(db, 'rate_limit_cooldowns', 'source')) {
     // Pre-existing rows default to 'heuristic' (probe-eligible): before this
     // migration every cooldown kind was mixed together, and a spurious probe on
     // an old authoritative row costs one cheap validate call at worst.
-    db.prepare("ALTER TABLE rate_limit_cooldowns ADD COLUMN source TEXT NOT NULL DEFAULT 'heuristic'").run();
+    await db.run("ALTER TABLE rate_limit_cooldowns ADD COLUMN source TEXT NOT NULL DEFAULT 'heuristic'");
   }
-  if (!hasColumn(db, 'rate_limit_cooldowns', 'set_at_ms')) {
+  if (!await hasColumn(db, 'rate_limit_cooldowns', 'set_at_ms')) {
     // Nullable: rows written before this migration have an unknown start time,
     // which the prober treats as "old enough to probe".
-    db.prepare('ALTER TABLE rate_limit_cooldowns ADD COLUMN set_at_ms INTEGER').run();
+    await db.run('ALTER TABLE rate_limit_cooldowns ADD COLUMN set_at_ms INTEGER');
   }
 }
 
-export function down(db: Db): void {
-  if (hasColumn(db, 'rate_limit_cooldowns', 'source')) {
-    db.prepare('ALTER TABLE rate_limit_cooldowns DROP COLUMN source').run();
+export async function down(db: Db): Promise<void> {
+  if (await hasColumn(db, 'rate_limit_cooldowns', 'source')) {
+    await db.run('ALTER TABLE rate_limit_cooldowns DROP COLUMN source');
   }
-  if (hasColumn(db, 'rate_limit_cooldowns', 'set_at_ms')) {
-    db.prepare('ALTER TABLE rate_limit_cooldowns DROP COLUMN set_at_ms').run();
+  if (await hasColumn(db, 'rate_limit_cooldowns', 'set_at_ms')) {
+    await db.run('ALTER TABLE rate_limit_cooldowns DROP COLUMN set_at_ms');
   }
 }

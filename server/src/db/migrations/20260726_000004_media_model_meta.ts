@@ -20,19 +20,19 @@
 
 import type { Db } from '../types.js';
 
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
+  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
   return columns.some((candidate) => candidate.name === column);
 }
 
-export function up(db: Db): void {
-  if (!hasColumn(db, 'media_models', 'meta_json')) {
-    db.prepare('ALTER TABLE media_models ADD COLUMN meta_json TEXT').run();
+export async function up(db: Db): Promise<void> {
+  if (!await hasColumn(db, 'media_models', 'meta_json')) {
+    await db.run('ALTER TABLE media_models ADD COLUMN meta_json TEXT');
   }
 }
 
-export function down(db: Db): void {
-  if (hasColumn(db, 'media_models', 'meta_json')) {
-    db.prepare('ALTER TABLE media_models DROP COLUMN meta_json').run();
+export async function down(db: Db): Promise<void> {
+  if (await hasColumn(db, 'media_models', 'meta_json')) {
+    await db.run('ALTER TABLE media_models DROP COLUMN meta_json');
   }
 }

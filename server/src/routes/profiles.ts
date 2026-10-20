@@ -65,18 +65,18 @@ function getId(req: Request): number {
  */
 profilesRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
-  const profiles = db.prepare(`
+  const profiles = db.all(`
     SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at
     FROM profiles
     ORDER BY (CASE WHEN type = 'default' THEN 1 ELSE 0 END) DESC, is_favorite DESC, sort_order ASC, id ASC
-  `).all();
+  `);
   res.json(profiles);
 });
 
 // GET /api/profiles/active — get the currently active profile id
 profilesRouter.get('/active', (_req: Request, res: Response) => {
   const db = getDb();
-  const row = db.prepare(`SELECT value FROM settings WHERE key = 'active_profile_id'`).get() as { value: string } | undefined;
+  const row = db.get(`SELECT value FROM settings WHERE key = 'active_profile_id'`) as { value: string } | undefined;
   const activeProfileId = row ? (parseInt(row.value) || null) : null;
   res.json({ activeProfileId });
 });
@@ -87,21 +87,21 @@ profilesRouter.post('/active', (req: Request, res: Response) => {
   const profileId = req.body?.profileId;
 
   if (profileId === null || profileId === undefined) {
-    db.prepare(`DELETE FROM settings WHERE key = 'active_profile_id'`).run();
+    db.run(`DELETE FROM settings WHERE key = 'active_profile_id'`);
     res.json({ activeProfileId: null });
     return;
   }
 
-  const profile = db.prepare('SELECT id FROM profiles WHERE id = ?').get(Number(profileId)) as any;
+  const profile = db.get('SELECT id FROM profiles WHERE id = ?', [Number(profileId)]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
   }
 
-  db.prepare(`
+  db.run(`
     INSERT INTO settings (key, value) VALUES ('active_profile_id', ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `).run(String(profileId));
+  `, [String(profileId)]);
   res.json({ activeProfileId: Number(profileId) });
 });
 
@@ -109,13 +109,13 @@ profilesRouter.post('/active', (req: Request, res: Response) => {
 profilesRouter.get('/:id/models', (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.prepare('SELECT id FROM profiles WHERE id = ?').get(profileId) as any;
+  const profile = db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
   }
 
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT pm.model_db_id, pm.priority, pm.enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
@@ -125,7 +125,7 @@ profilesRouter.get('/:id/models', (req: Request, res: Response) => {
     JOIN models m ON m.id = pm.model_db_id
     WHERE pm.profile_id = ? AND m.enabled = 1
     ORDER BY pm.priority ASC
-  `).all(profileId);
+  `, [profileId]);
 
   // Normalize SQLite 0/1 integers to proper booleans for TypeScript client
   res.json(rows.map((r: any) => ({ ...r, enabled: r.enabled === 1 })));
@@ -147,27 +147,25 @@ profilesRouter.post('/', (req: Request, res: Response) => {
   const { name, emoji, color, sourceProfileId, empty } = parsed.data;
 
   // Check for case-insensitive duplicate profile names
-  const duplicate = db.prepare('SELECT id FROM profiles WHERE LOWER(name) = LOWER(?)').get(name) as any;
+  const duplicate = db.get('SELECT id FROM profiles WHERE LOWER(name) = LOWER(?)', [name]) as any;
   if (duplicate) {
     res.status(409).json({ error: { message: `Profile with name '${name}' already exists` } });
     return;
   }
 
-  const maxOrder = (db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS mx FROM profiles').get() as { mx: number }).mx;
+  const maxOrder = (db.get('SELECT COALESCE(MAX(sort_order), 0) AS mx FROM profiles') as { mx: number }).mx;
 
   let layoutConfig: string | null = null;
   let autoSort: string | null = null;
   if (sourceProfileId) {
-    const source = db.prepare('SELECT layout_config, auto_sort FROM profiles WHERE id = ?').get(sourceProfileId) as any;
+    const source = db.get('SELECT layout_config, auto_sort FROM profiles WHERE id = ?', [sourceProfileId]) as any;
     if (source) {
       layoutConfig = source.layout_config;
       autoSort = source.auto_sort;
     }
   }
 
-  const result = db.prepare(
-    'INSERT INTO profiles (name, emoji, color, type, sort_order, layout_config, auto_sort, auto_include_new_models) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(name, emoji, color, 'custom', maxOrder + 1, layoutConfig, autoSort, empty ? 0 : 1);
+  const result = db.run('INSERT INTO profiles (name, emoji, color, type, sort_order, layout_config, auto_sort, auto_include_new_models) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [name, emoji, color, 'custom', maxOrder + 1, layoutConfig, autoSort, empty ? 0 : 1]);
 
   const profileId = result.lastInsertRowid as number;
 
@@ -175,39 +173,39 @@ profilesRouter.post('/', (req: Request, res: Response) => {
   // requests, and copying a source chain in would defeat the point of it.
   if (!empty) {
     const source = sourceProfileId
-      ? db.prepare('SELECT id FROM profiles WHERE id = ?').get(sourceProfileId) as any
+      ? db.get('SELECT id FROM profiles WHERE id = ?', [sourceProfileId]) as any
       : null;
     if (source) {
-      db.prepare(`
+      db.run(`
         INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
         SELECT ?, model_db_id, priority, enabled
         FROM profile_models
         WHERE profile_id = ?
         ORDER BY priority ASC
-      `).run(profileId, sourceProfileId);
+      `, [profileId, sourceProfileId]);
     } else {
       copyFromDefault(db, profileId);
     }
   }
 
-  const created = db.prepare('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?').get(profileId);
+  const created = db.get('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?', [profileId]);
   res.status(201).json(created);
 });
 
 function copyFromDefault(db: any, profileId: number) {
-  db.prepare(`
+  db.run(`
     INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
     SELECT ?, model_db_id, priority, enabled
     FROM fallback_config
     ORDER BY priority ASC
-  `).run(profileId);
+  `, [profileId]);
 }
 
 // PUT /api/profiles/:id — update profile metadata
 profilesRouter.put('/:id', (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.prepare('SELECT id, name, type FROM profiles WHERE id = ?').get(profileId) as any;
+  const profile = db.get('SELECT id, name, type FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
@@ -232,7 +230,7 @@ profilesRouter.put('/:id', (req: Request, res: Response) => {
 
   // Check for case-insensitive duplicate profile names when editing name
   if (parsed.data.name !== undefined) {
-    const duplicate = db.prepare('SELECT id FROM profiles WHERE LOWER(name) = LOWER(?) AND id != ?').get(parsed.data.name, profileId) as any;
+    const duplicate = db.get('SELECT id FROM profiles WHERE LOWER(name) = LOWER(?) AND id != ?', [parsed.data.name, profileId]) as any;
     if (duplicate) {
       res.status(409).json({ error: { message: `Profile with name '${parsed.data.name}' already exists` } });
       return;
@@ -259,7 +257,7 @@ profilesRouter.put('/:id', (req: Request, res: Response) => {
 
   if (updates.length > 0) {
     values.push(profileId);
-    db.prepare(`UPDATE profiles SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    db.run(`UPDATE profiles SET ${updates.join(', ')} WHERE id = ?`, [...values]);
   }
 
   // If auto_sort was updated to a preset, automatically physically sort the models in DB
@@ -267,7 +265,7 @@ profilesRouter.put('/:id', (req: Request, res: Response) => {
     sortProfileModels(db, profileId, parsed.data.auto_sort);
   }
 
-  const updated = db.prepare('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?').get(profileId);
+  const updated = db.get('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?', [profileId]);
   res.json(updated);
 });
 
@@ -281,7 +279,7 @@ const reorderSchema = z.array(z.object({
 profilesRouter.put('/:id/reorder', (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.prepare('SELECT id FROM profiles WHERE id = ?').get(profileId) as any;
+  const profile = db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
@@ -294,10 +292,9 @@ profilesRouter.put('/:id/reorder', (req: Request, res: Response) => {
   }
 
   const transaction = db.transaction(() => {
-    db.prepare('DELETE FROM profile_models WHERE profile_id = ?').run(profileId);
-    const insert = db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)');
+    db.run('DELETE FROM profile_models WHERE profile_id = ?', [profileId]);
     for (const entry of parsed.data) {
-      insert.run(profileId, entry.modelDbId, entry.priority, entry.enabled ? 1 : 0);
+      db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profileId, entry.modelDbId, entry.priority, entry.enabled ? 1 : 0]);
     }
   });
   transaction();
@@ -309,7 +306,7 @@ profilesRouter.put('/:id/reorder', (req: Request, res: Response) => {
 profilesRouter.post('/:id/reset', (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.prepare('SELECT id FROM profiles WHERE id = ?').get(profileId) as any;
+  const profile = db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
@@ -327,20 +324,20 @@ profilesRouter.post('/:id/reset', (req: Request, res: Response) => {
 
   const transaction = db.transaction(() => {
     // Reset layout_config and auto_sort
-    db.prepare('UPDATE profiles SET layout_config = ?, auto_sort = NULL WHERE id = ?').run(baselineLayout, profileId);
+    db.run('UPDATE profiles SET layout_config = ?, auto_sort = NULL WHERE id = ?', [baselineLayout, profileId]);
     
     // Copy models priority/enabled from fallback_config
-    db.prepare('DELETE FROM profile_models WHERE profile_id = ?').run(profileId);
-    db.prepare(`
+    db.run('DELETE FROM profile_models WHERE profile_id = ?', [profileId]);
+    db.run(`
       INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
       SELECT ?, model_db_id, priority, enabled
       FROM fallback_config
       ORDER BY priority ASC
-    `).run(profileId);
+    `, [profileId]);
   });
   transaction();
 
-  const updated = db.prepare('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?').get(profileId);
+  const updated = db.get('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?', [profileId]);
   res.json(updated);
 });
 
@@ -348,7 +345,7 @@ profilesRouter.post('/:id/reset', (req: Request, res: Response) => {
 profilesRouter.delete('/:id', (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.prepare('SELECT id, type FROM profiles WHERE id = ?').get(profileId) as any;
+  const profile = db.get('SELECT id, type FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
@@ -357,23 +354,23 @@ profilesRouter.delete('/:id', (req: Request, res: Response) => {
     res.status(400).json({ error: { message: 'Cannot delete the default profile' } });
     return;
   }
-  const count = db.prepare('SELECT COUNT(*) as cnt FROM profiles').get() as { cnt: number };
+  const count = db.get('SELECT COUNT(*) as cnt FROM profiles') as { cnt: number };
   if (count.cnt <= 1) {
     res.status(400).json({ error: { message: 'Cannot delete the last profile' } });
     return;
   }
 
   // If the deleted profile is the currently active one, switch to Default
-  const activeRow = db.prepare(`SELECT value FROM settings WHERE key = 'active_profile_id'`).get() as { value: string } | undefined;
+  const activeRow = db.get(`SELECT value FROM settings WHERE key = 'active_profile_id'`) as { value: string } | undefined;
   const activeId = activeRow ? parseInt(activeRow.value) : null;
 
-  db.prepare('DELETE FROM profiles WHERE id = ?').run(profileId);
+  db.run('DELETE FROM profiles WHERE id = ?', [profileId]);
 
   if (activeId === profileId) {
-    const defaultProf = db.prepare("SELECT id FROM profiles WHERE type = 'default' OR type = 'builtin' ORDER BY id ASC LIMIT 1").get() as { id: number } | undefined;
-    const fallbackId = defaultProf?.id ?? (db.prepare('SELECT id FROM profiles ORDER BY sort_order ASC LIMIT 1').get() as { id: number })?.id;
+    const defaultProf = db.get("SELECT id FROM profiles WHERE type = 'default' OR type = 'builtin' ORDER BY id ASC LIMIT 1") as { id: number } | undefined;
+    const fallbackId = defaultProf?.id ?? (db.get('SELECT id FROM profiles ORDER BY sort_order ASC LIMIT 1') as { id: number })?.id;
     if (fallbackId) {
-      db.prepare(`INSERT INTO settings (key, value) VALUES ('active_profile_id', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(fallbackId));
+      db.run(`INSERT INTO settings (key, value) VALUES ('active_profile_id', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, [String(fallbackId)]);
     }
   }
 
@@ -390,7 +387,7 @@ function sortProfileModels(db: any, profileId: number, preset: string) {
   let models: { id: number }[] = [];
 
   if (preset === 'budget') {
-    const allModels = db.prepare(`SELECT id, monthly_token_budget, tpd_limit FROM models`).all() as any[];
+    const allModels = db.all(`SELECT id, monthly_token_budget, tpd_limit FROM models`) as any[];
     allModels.sort((a, b) => monthlyBudgetScore(b) - monthlyBudgetScore(a));
     models = allModels.map(m => ({ id: m.id }));
   } else {
@@ -398,22 +395,21 @@ function sortProfileModels(db: any, profileId: number, preset: string) {
     if (!orderBy) {
       throw new Error(`Unknown preset: ${preset}. Use: intelligence, speed, budget`);
     }
-    models = db.prepare(`SELECT m.id FROM models m ORDER BY ${orderBy}`).all() as { id: number }[];
+    models = db.all(`SELECT m.id FROM models m ORDER BY ${orderBy}`) as { id: number }[];
   }
 
   // Preserve existing enabled flags so sorting doesn't reset disabled models
-  const existing = db.prepare(`
+  const existing = db.all(`
     SELECT model_db_id, enabled FROM profile_models WHERE profile_id = ?
-  `).all(profileId) as { model_db_id: number; enabled: number }[];
+  `, [profileId]) as { model_db_id: number; enabled: number }[];
   const enabledMap = new Map(existing.map(e => [e.model_db_id, e.enabled]));
 
   const transaction = db.transaction(() => {
-    db.prepare('DELETE FROM profile_models WHERE profile_id = ?').run(profileId);
-    const insert = db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)');
+    db.run('DELETE FROM profile_models WHERE profile_id = ?', [profileId]);
     for (let i = 0; i < models.length; i++) {
       // Use existing enabled state if available, default to 1 for newly added models
       const enabled = enabledMap.has(models[i].id) ? enabledMap.get(models[i].id) : 1;
-      insert.run(profileId, models[i].id, i + 1, enabled);
+      db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profileId, models[i].id, i + 1, enabled]);
     }
   });
   transaction();
@@ -422,7 +418,7 @@ function sortProfileModels(db: any, profileId: number, preset: string) {
 profilesRouter.post('/:id/sort/:preset', (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.prepare('SELECT id FROM profiles WHERE id = ?').get(profileId) as any;
+  const profile = db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
@@ -440,7 +436,7 @@ profilesRouter.post('/:id/sort/:preset', (req: Request, res: Response) => {
 
 // Initialize built-in profiles if they don't exist
 export function seedProfiles(db: any): void {
-  const count = db.prepare("SELECT COUNT(*) as cnt FROM profiles WHERE type = 'default' OR type = 'builtin'").get() as { cnt: number };
+  const count = db.get("SELECT COUNT(*) as cnt FROM profiles WHERE type = 'default' OR type = 'builtin'") as { cnt: number };
   if (count.cnt > 0) return;
 
   const builtins: Array<{
@@ -463,15 +459,13 @@ export function seedProfiles(db: any): void {
       }
     ];
 
-  const insertProfile = db.prepare('INSERT INTO profiles (name, emoji, color, type, sort_order) VALUES (?, ?, ?, ?, ?)');
-  const insertModel = db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)');
 
   const seed = db.transaction(() => {
     for (const builtin of builtins) {
-      const result = insertProfile.run(builtin.name, builtin.emoji, builtin.color, builtin.profileType, -1);
+      const result = db.run('INSERT INTO profiles (name, emoji, color, type, sort_order) VALUES (?, ?, ?, ?, ?)', [builtin.name, builtin.emoji, builtin.color, builtin.profileType, -1]);
       const profileId = result.lastInsertRowid as number;
 
-      const models = db.prepare('SELECT id, LOWER(display_name) as name FROM models ORDER BY id ASC').all() as { id: number; name: string }[];
+      const models = db.all('SELECT id, LOWER(display_name) as name FROM models ORDER BY id ASC') as { id: number; name: string }[];
 
       const scored = models.map(m => {
         let score = 0;
@@ -490,14 +484,14 @@ export function seedProfiles(db: any): void {
       });
 
       for (let i = 0; i < scored.length; i++) {
-        insertModel.run(profileId, scored[i].id, i + 1, 1);
+        db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profileId, scored[i].id, i + 1, 1]);
       }
 
       // Set the default active profile
-      db.prepare(`
+      db.run(`
         INSERT INTO settings (key, value) VALUES ('active_profile_id', ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run(String(profileId));
+      `, [String(profileId)]);
     }
   });
   seed();

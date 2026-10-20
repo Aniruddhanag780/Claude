@@ -97,11 +97,9 @@ export function lookupIdempotencyReplay(
 ): IdempotencyClaimResult {
   try {
     const db = getDb();
-    const row = db.prepare(
-      `SELECT request_fingerprint, response_status, response_body
+    const row = db.get(`SELECT request_fingerprint, response_status, response_body
          FROM idempotency_claims
-        WHERE key_hash = ? AND expires_at_ms > ?`,
-    ).get(keyHash, now) as
+        WHERE key_hash = ? AND expires_at_ms > ?`, [keyHash, now]) as
       | { request_fingerprint: string; response_status: number; response_body: string }
       | undefined;
     if (!row) return { kind: 'miss' };
@@ -135,10 +133,8 @@ export function storeIdempotencyResult(
   try {
     const db = getDb();
     const ttl = idempotencyTtlMs();
-    db.prepare('DELETE FROM idempotency_claims WHERE key_hash = ? AND expires_at_ms <= ?')
-      .run(keyHash, now);
-    db.prepare(
-      `INSERT INTO idempotency_claims
+    db.run('DELETE FROM idempotency_claims WHERE key_hash = ? AND expires_at_ms <= ?', [keyHash, now]);
+    db.run(`INSERT INTO idempotency_claims
          (key_hash, request_fingerprint, response_status, response_body, execution_id, created_at_ms, expires_at_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(key_hash) DO UPDATE SET
@@ -147,16 +143,7 @@ export function storeIdempotencyResult(
          response_body = excluded.response_body,
          execution_id = excluded.execution_id,
          created_at_ms = excluded.created_at_ms,
-         expires_at_ms = excluded.expires_at_ms`,
-    ).run(
-      keyHash,
-      fingerprint,
-      status,
-      JSON.stringify(body),
-      executionId ?? null,
-      now,
-      now + ttl,
-    );
+         expires_at_ms = excluded.expires_at_ms`, [keyHash, fingerprint, status, JSON.stringify(body), executionId ?? null, now, now + ttl]);
   } catch {
     // DB unavailable: idempotency is best-effort; the response already went out.
   }
@@ -168,7 +155,7 @@ export function storeIdempotencyResult(
  */
 export function clearIdempotencyResult(keyHash: string): void {
   try {
-    getDb().prepare('DELETE FROM idempotency_claims WHERE key_hash = ?').run(keyHash);
+    getDb().run('DELETE FROM idempotency_claims WHERE key_hash = ?', [keyHash]);
   } catch {
     // best-effort
   }

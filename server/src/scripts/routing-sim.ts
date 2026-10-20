@@ -38,25 +38,24 @@ const PROFILES: Profile[] = [
 function seed() {
   const db = getDb();
   db.exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
-  const insModel = db.prepare(`
-    INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, enabled)
-    VALUES (?, ?, ?, ?, 1, ?, 100000, 1000000, 100000000, 1000000000, ?, 1)
-  `);
-  const insFb = db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)');
-  const insHist = db.prepare(`
-    INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
-    VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?)
-  `);
 
   PROFILES.forEach((p, i) => {
-    insModel.run(p.platform, p.modelId, p.name, p.intelligenceRank, p.sizeLabel, p.budget);
-    const id = (db.prepare('SELECT id FROM models WHERE platform=? AND model_id=?').get(p.platform, p.modelId) as { id: number }).id;
-    insFb.run(id, i + 1);
+    db.run(`
+    INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, enabled)
+    VALUES (?, ?, ?, ?, 1, ?, 100000, 1000000, 100000000, 1000000000, ?, 1)
+  `, [p.platform, p.modelId, p.name, p.intelligenceRank, p.sizeLabel, p.budget]);
+    const id = (db.get('SELECT id FROM models WHERE platform=? AND model_id=?', [p.platform, p.modelId]) as { id: number }).id;
+    db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)', [id, i + 1]);
     const { encrypted, iv, authTag } = encrypt(`key-${p.platform}`);
-    db.prepare(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES (?, 'sim', ?, ?, ?, 'healthy', 1)`)
-      .run(p.platform, encrypted, iv, authTag);
-    for (let s = 0; s < p.successes; s++) insHist.run(p.platform, p.modelId, 'success', p.outTokens, p.latencyMs, null, p.ttfbMs);
-    for (let f = 0; f < p.failures; f++) insHist.run(p.platform, p.modelId, 'error', 0, p.latencyMs, 'sim-fail', p.ttfbMs);
+    db.run(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES (?, 'sim', ?, ?, ?, 'healthy', 1)`, [p.platform, encrypted, iv, authTag]);
+    for (let s = 0; s < p.successes; s++) db.run(`
+    INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
+    VALUES (?, ?, 1, 'error', 0, 0, 1000, 'outage', NULL)
+  `, [p.platform, p.modelId, 'success', p.outTokens, p.latencyMs, null, p.ttfbMs]);
+    for (let f = 0; f < p.failures; f++) db.run(`
+    INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
+    VALUES (?, ?, 1, 'error', 0, 0, 1000, 'outage', NULL)
+  `, [p.platform, p.modelId, 'error', 0, p.latencyMs, 'sim-fail', p.ttfbMs]);
   });
 }
 
@@ -134,11 +133,10 @@ function main() {
   const fav = [...before.entries()].sort((a, b) => b[1] - a[1])[0][0];
   const favProfile = PROFILES.find(p => p.name === fav)!;
   const db = getDb();
-  const insHist = db.prepare(`
+  for (let i = 0; i < 300; i++) db.run(`
     INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
     VALUES (?, ?, 1, 'error', 0, 0, 1000, 'outage', NULL)
-  `);
-  for (let i = 0; i < 300; i++) insHist.run(favProfile.platform, favProfile.modelId);
+  `, [favProfile.platform, favProfile.modelId]);
   console.log(`\n  → Injected 300 fresh failures into "${fav}" (simulated outage)…`);
   refreshStatsCache(getDb(), true);
   printScores();

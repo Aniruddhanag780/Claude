@@ -19,26 +19,26 @@ import type { Db } from '../types.js';
 
 const SETTING_KEY = 'migration_llmtr_reenabled_key_ids';
 
-export function up(db: Db): void {
-  const ids = (db.prepare(`
+export async function up(db: Db): Promise<void> {
+  const ids = (await db.all(`
     SELECT id FROM api_keys WHERE platform = 'llmtr' AND enabled = 0 AND status = 'invalid'
-  `).all() as { id: number }[]).map(r => r.id);
+  `) as { id: number }[]).map(r => r.id);
 
-  const reenable = db.prepare(`
+  const reenable = `
     UPDATE api_keys SET enabled = 1, status = 'unknown', last_health_error = NULL WHERE id = ?
-  `);
-  for (const id of ids) reenable.run(id);
+  `;
+  for (const id of ids) await db.run(reenable, [id]);
 
-  db.prepare(`
+  await db.run(`
     INSERT INTO settings (key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `).run(SETTING_KEY, JSON.stringify(ids));
+  `, [SETTING_KEY, JSON.stringify(ids)]);
 }
 
-export function down(db: Db): void {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(SETTING_KEY) as { value: string } | undefined;
+export async function down(db: Db): Promise<void> {
+  const row = await db.get('SELECT value FROM settings WHERE key = ?', [SETTING_KEY]) as { value: string } | undefined;
   const ids: number[] = row ? JSON.parse(row.value) : [];
-  const disable = db.prepare("UPDATE api_keys SET enabled = 0, status = 'invalid' WHERE id = ? AND platform = 'llmtr'");
-  for (const id of ids) disable.run(id);
-  db.prepare('DELETE FROM settings WHERE key = ?').run(SETTING_KEY);
+  const disable = "UPDATE api_keys SET enabled = 0, status = 'invalid' WHERE id = ? AND platform = 'llmtr'";
+  for (const id of ids) await db.run(disable, [id]);
+  await db.run('DELETE FROM settings WHERE key = ?', [SETTING_KEY]);
 }

@@ -20,25 +20,25 @@
 
 import type { Db } from '../types.js';
 
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
+  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
   return columns.some((candidate) => candidate.name === column);
 }
 
-export function up(db: Db): void {
-  if (!hasColumn(db, 'models', 'source')) {
-    db.prepare("ALTER TABLE models ADD COLUMN source TEXT NOT NULL DEFAULT 'catalog'").run();
+export async function up(db: Db): Promise<void> {
+  if (!await hasColumn(db, 'models', 'source')) {
+    await db.run("ALTER TABLE models ADD COLUMN source TEXT NOT NULL DEFAULT 'catalog'");
   }
 
   // Backfill pre-existing rows, strongest signal first: everything the old
   // prune guard already treated as user-owned is user-owned.
-  db.prepare(`
+  await db.run(`
     UPDATE models
        SET source = 'user'
      WHERE platform = 'custom'
         OR key_id IS NOT NULL
         OR size_label IN ('User', 'Custom')
-  `).run();
+  `);
 
   // Then consult the currently-applied catalog (the signed document cached by
   // catalog-sync in settings.catalog_applied_json). A surviving row that the
@@ -49,9 +49,7 @@ export function up(db: Db): void {
   // remaining row came from the bundled baseline, so the 'catalog' default
   // stands.
   try {
-    const setting = db
-      .prepare("SELECT value FROM settings WHERE key = 'catalog_applied_json'")
-      .get() as { value: string } | undefined;
+    const setting = await db.get("SELECT value FROM settings WHERE key = 'catalog_applied_json'") as { value: string } | undefined;
     if (!setting) return;
     const parsed = JSON.parse(setting.value) as { models?: unknown };
     if (!parsed || !Array.isArray(parsed.models)) return;
@@ -61,12 +59,10 @@ export function up(db: Db): void {
         inCatalog.add(`${m.platform}:${m.modelId}`);
       }
     }
-    const rows = db
-      .prepare("SELECT id, platform, model_id FROM models WHERE source = 'catalog'")
-      .all() as { id: number; platform: string; model_id: string }[];
-    const markUser = db.prepare("UPDATE models SET source = 'user' WHERE id = ?");
+    const rows = await db.all("SELECT id, platform, model_id FROM models WHERE source = 'catalog'") as { id: number; platform: string; model_id: string }[];
+    const markUser = "UPDATE models SET source = 'user' WHERE id = ?";
     for (const row of rows) {
-      if (!inCatalog.has(`${row.platform}:${row.model_id}`)) markUser.run(row.id);
+      if (!inCatalog.has(`${row.platform}:${row.model_id}`)) await db.run(markUser, [row.id]);
     }
   } catch {
     // A corrupt cached catalog must not block the migration; rows keep the
@@ -75,8 +71,8 @@ export function up(db: Db): void {
   }
 }
 
-export function down(db: Db): void {
-  if (hasColumn(db, 'models', 'source')) {
-    db.prepare('ALTER TABLE models DROP COLUMN source').run();
+export async function down(db: Db): Promise<void> {
+  if (await hasColumn(db, 'models', 'source')) {
+    await db.run('ALTER TABLE models DROP COLUMN source');
   }
 }

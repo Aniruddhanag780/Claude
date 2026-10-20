@@ -20,14 +20,10 @@ export const embeddingsRouter = Router();
 embeddingsRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
   const keyCounts = new Map(
-    (db.prepare(
-      "SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform",
-    ).all() as { platform: string; n: number }[]).map(r => [r.platform, r.n]),
+    (db.all("SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; n: number }[]).map(r => [r.platform, r.n]),
   );
   const customKeyIds = new Set(
-    (db.prepare(
-      "SELECT id FROM api_keys WHERE platform = 'custom' AND enabled = 1 AND status IN ('healthy', 'unknown')",
-    ).all() as { id: number }[]).map(r => r.id),
+    (db.all("SELECT id FROM api_keys WHERE platform = 'custom' AND enabled = 1 AND status IN ('healthy', 'unknown')") as { id: number }[]).map(r => r.id),
   );
 
   const byFamily = new Map<string, EmbeddingModelRow[]>();
@@ -105,12 +101,12 @@ embeddingsRouter.post('/custom', async (req: Request, res: Response) => {
   const label = parsed.data.label?.trim() || undefined;
   const quotaLabel = parsed.data.quotaLabel?.trim() || 'custom endpoint';
 
-  const existingKey = db.prepare(`
+  const existingKey = db.get(`
     SELECT id, encrypted_key, iv, auth_tag
       FROM api_keys
      WHERE platform = 'custom' AND base_url = ?
      LIMIT 1
-  `).get(baseUrl) as { id: number; encrypted_key: string; iv: string; auth_tag: string } | undefined;
+  `, [baseUrl]) as { id: number; encrypted_key: string; iv: string; auth_tag: string } | undefined;
   const probeKey = providedKey ?? decryptExistingKey(existingKey) ?? 'no-key';
 
   let dimensions: number;
@@ -155,8 +151,7 @@ embeddingsRouter.post('/custom', async (req: Request, res: Response) => {
     }
     throw err;
   }
-  const storedName = (db.prepare('SELECT display_name FROM embedding_models WHERE id = ?')
-    .get(result.modelDbId) as { display_name: string }).display_name;
+  const storedName = (db.get('SELECT display_name FROM embedding_models WHERE id = ?', [result.modelDbId]) as { display_name: string }).display_name;
   res.status(201).json({
     success: true,
     keyId: result.keyId,
@@ -189,7 +184,7 @@ embeddingsRouter.put('/', (req: Request, res: Response) => {
   const db = getDb();
 
   if (parsed.data.defaultFamily) {
-    const exists = db.prepare('SELECT 1 FROM embedding_models WHERE family = ?').get(parsed.data.defaultFamily);
+    const exists = db.get('SELECT 1 FROM embedding_models WHERE family = ?', [parsed.data.defaultFamily]);
     if (!exists) {
       res.status(400).json({ error: { message: `Unknown family '${parsed.data.defaultFamily}'` } });
       return;
@@ -198,9 +193,8 @@ embeddingsRouter.put('/', (req: Request, res: Response) => {
   }
 
   if (parsed.data.providers) {
-    const update = db.prepare('UPDATE embedding_models SET priority = ?, enabled = ? WHERE id = ?');
     const apply = db.transaction((rows: { id: number; priority: number; enabled: boolean }[]) => {
-      for (const r of rows) update.run(r.priority, r.enabled ? 1 : 0, r.id);
+      for (const r of rows) db.run('UPDATE embedding_models SET priority = ?, enabled = ? WHERE id = ?', [r.priority, r.enabled ? 1 : 0, r.id]);
     });
     apply(parsed.data.providers);
   }
@@ -216,19 +210,19 @@ embeddingsRouter.delete('/custom/:id', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = db.prepare("SELECT family, key_id FROM embedding_models WHERE id = ? AND platform = 'custom'").get(id) as { family: string; key_id: number | null } | undefined;
+  const row = db.get("SELECT family, key_id FROM embedding_models WHERE id = ? AND platform = 'custom'", [id]) as { family: string; key_id: number | null } | undefined;
   if (!row) {
     res.status(404).json({ error: { message: `Unknown custom embedding model ${id}` } });
     return;
   }
 
   const remove = db.transaction(() => {
-    db.prepare("DELETE FROM embedding_models WHERE id = ? AND platform = 'custom'").run(id);
+    db.run("DELETE FROM embedding_models WHERE id = ? AND platform = 'custom'", [id]);
     deleteUnusedCustomEndpointKey(db, row.key_id);
   });
   remove();
   if (getDefaultFamily() === row.family) {
-    const replacement = db.prepare('SELECT family FROM embedding_models ORDER BY family, priority LIMIT 1').get() as { family: string } | undefined;
+    const replacement = db.get('SELECT family FROM embedding_models ORDER BY family, priority LIMIT 1') as { family: string } | undefined;
     if (replacement) setSetting('embeddings_default_family', replacement.family);
   }
   res.json({ success: true });
@@ -245,7 +239,7 @@ embeddingsRouter.delete('/custom/:id', (req: Request, res: Response) => {
 // label verbatim, rather than inventing a ceiling to draw a percentage against.
 embeddingsRouter.get('/usage', (_req: Request, res: Response) => {
   const db = getDb();
-  const usage = db.prepare(`
+  const usage = db.all(`
     SELECT em.family,
            COALESCE(SUM(CASE WHEN r.created_at >= datetime('now', 'start of day') THEN 1 ELSE 0 END), 0) AS requests_today,
            COALESCE(SUM(CASE WHEN r.created_at >= datetime('now', 'start of month') THEN r.input_tokens ELSE 0 END), 0) AS tokens_month
@@ -257,16 +251,16 @@ embeddingsRouter.get('/usage', (_req: Request, res: Response) => {
      AND r.model_id = em.model_id
      AND r.created_at >= datetime('now', 'start of month')
     GROUP BY em.family
-  `).all() as { family: string; requests_today: number; tokens_month: number }[];
+  `) as { family: string; requests_today: number; tokens_month: number }[];
 
   // One representative provider per family for the legend: the highest-priority
   // enabled row, so the label matches whoever actually serves the family first.
-  const meta = db.prepare(`
+  const meta = db.all(`
     SELECT family, platform, quota_label
     FROM embedding_models
     WHERE enabled = 1
     ORDER BY priority ASC
-  `).all() as { family: string; platform: string; quota_label: string | null }[];
+  `) as { family: string; platform: string; quota_label: string | null }[];
   const metaByFamily = new Map<string, { platform: string; quota_label: string | null }>();
   for (const m of meta) if (!metaByFamily.has(m.family)) metaByFamily.set(m.family, m);
 

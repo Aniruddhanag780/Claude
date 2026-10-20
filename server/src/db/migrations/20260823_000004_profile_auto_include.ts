@@ -1,7 +1,7 @@
 import type { Db } from '../types.js';
 
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
+  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
   return columns.some((candidate) => candidate.name === column);
 }
 
@@ -15,14 +15,14 @@ function hasColumn(db: Db, table: string, column: string): boolean {
  *  1 (the default, and what every existing chain gets) keeps the old behaviour.
  *  A chain created with `empty: true` starts at 0, so it only ever holds what
  *  the user put in it. */
-export function up(db: Db): void {
-  if (!hasColumn(db, 'profiles', 'auto_include_new_models')) {
-    db.prepare('ALTER TABLE profiles ADD COLUMN auto_include_new_models INTEGER NOT NULL DEFAULT 1').run();
+export async function up(db: Db): Promise<void> {
+  if (!await hasColumn(db, 'profiles', 'auto_include_new_models')) {
+    await db.run('ALTER TABLE profiles ADD COLUMN auto_include_new_models INTEGER NOT NULL DEFAULT 1');
   }
 }
 
-export function down(db: Db): void {
-  if (hasColumn(db, 'profiles', 'auto_include_new_models')) {
-    db.prepare('ALTER TABLE profiles DROP COLUMN auto_include_new_models').run();
+export async function down(db: Db): Promise<void> {
+  if (await hasColumn(db, 'profiles', 'auto_include_new_models')) {
+    await db.run('ALTER TABLE profiles DROP COLUMN auto_include_new_models');
   }
 }

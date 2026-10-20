@@ -32,12 +32,12 @@ export interface ResolvedEndpointKey {
 }
 
 function endpointKeyRows(db: Db, baseUrl: string): StoredKeyRow[] {
-  return db.prepare(`
+  return db.all(`
     SELECT id, encrypted_key, iv, auth_tag
       FROM api_keys
      WHERE platform = 'custom' AND base_url = ?
      ORDER BY id
-  `).all(baseUrl) as StoredKeyRow[];
+  `, [baseUrl]) as StoredKeyRow[];
 }
 
 function plaintextOf(row: StoredKeyRow): string | null {
@@ -49,8 +49,7 @@ function plaintextOf(row: StoredKeyRow): string | null {
 }
 
 function touch(db: Db, id: number, label: string | undefined): void {
-  db.prepare("UPDATE api_keys SET label = COALESCE(?, label), status = 'unknown', enabled = 1 WHERE id = ?")
-    .run(label ?? null, id);
+  db.run("UPDATE api_keys SET label = COALESCE(?, label), status = 'unknown', enabled = 1 WHERE id = ?", [label ?? null, id]);
 }
 
 /**
@@ -72,10 +71,10 @@ function insertKey(db: Db, baseUrl: string, secret: string, label: string | unde
   const { encrypted, iv, authTag } = encrypt(secret);
   // A second credential joins the endpoint's group (#1176): the group names the
   // endpoint, not the row, so a new key must not land back in the "Custom" pile.
-  const r = db.prepare(`
+  const r = db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url, group_label)
     VALUES ('custom', ?, ?, ?, ?, 'unknown', 1, ?, ?)
-  `).run(label ?? defaultCustomEndpointLabel(baseUrl), encrypted, iv, authTag, baseUrl, customEndpointGroup(db, baseUrl));
+  `, [label ?? defaultCustomEndpointLabel(baseUrl), encrypted, iv, authTag, baseUrl, customEndpointGroup(db, baseUrl)]);
   return { keyId: Number(r.lastInsertRowid), storedKey: secret, created: true };
 }
 
@@ -97,11 +96,11 @@ export function normalizeGroupLabel(raw: string | null | undefined): string | nu
 
 /** The group an endpoint's keys carry, or null when it has none. */
 export function customEndpointGroup(db: Db, baseUrl: string): string | null {
-  const row = db.prepare(`
+  const row = db.get(`
     SELECT group_label FROM api_keys
      WHERE platform = 'custom' AND base_url = ? AND group_label IS NOT NULL
      ORDER BY id LIMIT 1
-  `).get(baseUrl) as { group_label: string } | undefined;
+  `, [baseUrl]) as { group_label: string } | undefined;
   return row?.group_label ?? null;
 }
 
@@ -112,8 +111,7 @@ export function customEndpointGroup(db: Db, baseUrl: string): string | null {
 export function setCustomEndpointGroup(db: Db, keyId: number, label: string | null): number {
   const ids = [...customEndpointKeyIds(db, keyId)];
   const placeholders = ids.map(() => '?').join(', ');
-  return db.prepare(`UPDATE api_keys SET group_label = ? WHERE platform = 'custom' AND id IN (${placeholders})`)
-    .run(label, ...ids).changes;
+  return db.run( `UPDATE api_keys SET group_label = ? WHERE platform = 'custom' AND id IN (${placeholders})`, [label, ...ids]).changes;
 }
 
 /**
@@ -161,12 +159,12 @@ export function resolveCustomEndpointKey(
   if (stored.length > 0 && stored.every(s => s.secret === NO_KEY)) {
     const target = stored[0]!.row;
     const { encrypted, iv, authTag } = encrypt(providedKey);
-    db.prepare(`
+    db.run(`
       UPDATE api_keys
          SET label = COALESCE(?, label), encrypted_key = ?, iv = ?, auth_tag = ?,
              status = 'unknown', enabled = 1
        WHERE id = ?
-    `).run(label ?? null, encrypted, iv, authTag, target.id);
+    `, [label ?? null, encrypted, iv, authTag, target.id]);
     return { keyId: target.id, storedKey: providedKey, created: false };
   }
 
@@ -186,11 +184,10 @@ export function endpointHasCredential(db: Db, baseUrl: string, secret: string): 
  * key itself when the row is gone or carries no base_url.
  */
 export function customEndpointKeyIds(db: Db, keyId: number): Set<number> {
-  const row = db.prepare("SELECT base_url FROM api_keys WHERE id = ?").get(keyId) as
+  const row = db.get("SELECT base_url FROM api_keys WHERE id = ?", [keyId]) as
     { base_url: string | null } | undefined;
   if (!row?.base_url) return new Set([keyId]);
-  const siblings = db.prepare("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ?")
-    .all(row.base_url) as { id: number }[];
+  const siblings = db.all("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ?", [row.base_url]) as { id: number }[];
   return new Set(siblings.map(s => s.id));
 }
 
@@ -201,11 +198,11 @@ export function customEndpointKeyIds(db: Db, keyId: number): Set<number> {
  */
 export function siblingEndpointKeyId(db: Db, keyId: number, baseUrl: string | null): number | null {
   if (!baseUrl) return null;
-  const row = db.prepare(`
+  const row = db.get(`
     SELECT id FROM api_keys
      WHERE platform = 'custom' AND base_url = ? AND id != ?
      ORDER BY id LIMIT 1
-  `).get(baseUrl, keyId) as { id: number } | undefined;
+  `, [baseUrl, keyId]) as { id: number } | undefined;
   return row?.id ?? null;
 }
 
@@ -228,12 +225,12 @@ export interface CustomEndpointCredential {
  * model rows behind the operator's back.
  */
 export function listCustomEndpoints(db: Db): CustomEndpointCredential[] {
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT base_url, id, encrypted_key, iv, auth_tag
       FROM api_keys
      WHERE platform = 'custom' AND base_url IS NOT NULL AND enabled = 1
      ORDER BY base_url, id
-  `).all() as Array<{
+  `) as Array<{
     base_url: string;
     id: number;
     encrypted_key: string;

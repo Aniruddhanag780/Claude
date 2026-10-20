@@ -51,9 +51,7 @@ function activeReservations(): Set<Reservation> {
 }
 
 export function getMonthlyBudgetCaps(keyId: number): MonthlyBudgetCaps {
-  const row = getDb().prepare(
-    'SELECT monthly_request_cap, monthly_token_cap FROM api_keys WHERE id = ?',
-  ).get(keyId) as { monthly_request_cap: number; monthly_token_cap: number } | undefined;
+  const row = getDb().get('SELECT monthly_request_cap, monthly_token_cap FROM api_keys WHERE id = ?', [keyId]) as { monthly_request_cap: number; monthly_token_cap: number } | undefined;
   if (!row) return { requestCap: 0, tokenCap: 0 };
   return { requestCap: row.monthly_request_cap, tokenCap: row.monthly_token_cap };
 }
@@ -73,14 +71,14 @@ export function setMonthlyBudgetCaps(
     values.push(patch.tokenCap);
   }
   if (sets.length === 0) return false;
-  const result = getDb().prepare(`UPDATE api_keys SET ${sets.join(', ')} WHERE id = ?`).run(...values, keyId);
+  const result = getDb().run( `UPDATE api_keys SET ${sets.join(', ')} WHERE id = ?`, [...values, keyId]);
   return result.changes > 0;
 }
 
 export function getMonthlyUsage(keyId: number, now = Date.now()): MonthlyUsage {
-  const row = getDb().prepare(`
+  const row = getDb().get(`
     SELECT requests, tokens FROM key_monthly_usage WHERE key_id = ? AND month = ?
-  `).get(keyId, new Date(now).toISOString().slice(0, 7)) as MonthlyUsage | undefined;
+  `, [keyId, new Date(now).toISOString().slice(0, 7)]) as MonthlyUsage | undefined;
   return { requests: Number(row?.requests ?? 0), tokens: Number(row?.tokens ?? 0) };
 }
 

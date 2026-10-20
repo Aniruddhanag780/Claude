@@ -72,9 +72,7 @@ export function resolveGeminiModel(model?: string): string {
   if (family) {
     const target = getGeminiModelMap()[family];
     if (!target || target === 'auto') return 'auto';
-    const exists = getDb().prepare(
-      'SELECT 1 FROM models WHERE model_id = ? AND enabled = 1',
-    ).get(target);
+    const exists = getDb().get('SELECT 1 FROM models WHERE model_id = ? AND enabled = 1', [target]);
     return exists ? target : 'auto';
   }
   return raw || 'auto';

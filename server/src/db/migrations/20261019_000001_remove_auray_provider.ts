@@ -20,18 +20,18 @@ type Row = Record<string, unknown>;
 const TABLES = ['api_keys', 'models', 'embedding_models', 'media_models', 'model_overrides', 'fallback_config', 'profile_models'] as const;
 type Table = (typeof TABLES)[number];
 
-function tableExists(db: Db, table: string): boolean {
-  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !== undefined;
+async function tableExists(db: Db, table: string): Promise<boolean> {
+  return await db.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", [table]) !== undefined;
 }
 
-function selectRows(db: Db, table: Table): Row[] {
-  if (!tableExists(db, table)) return [];
+async function selectRows(db: Db, table: Table): Promise<Row[]> {
+  if (!await tableExists(db, table)) return [];
   if (table === 'fallback_config' || table === 'profile_models') {
-    return db.prepare(`
+    return await db.all(`
       SELECT * FROM ${table} WHERE model_db_id IN (SELECT id FROM models WHERE platform = ?)
-    `).all(PLATFORM) as Row[];
+    `, [PLATFORM]) as Row[];
   }
-  return db.prepare(`SELECT * FROM ${table} WHERE platform = ?`).all(PLATFORM) as Row[];
+  return await db.all(`SELECT * FROM ${table} WHERE platform = ?`, [PLATFORM]) as Row[];
 }
 
 // Encrypted key columns may be BLOBs; JSON keeps them as tagged base64.
@@ -54,38 +54,37 @@ function decode(row: Row): Row {
   return out;
 }
 
-export function up(db: Db): void {
+export async function up(db: Db): Promise<void> {
   const removed: Partial<Record<Table, Row[]>> = {};
-  for (const table of TABLES) removed[table] = selectRows(db, table).map(encode);
+  for (const table of TABLES) removed[table] = (await selectRows(db, table)).map(encode);
 
   // Children first: chain and profile rows reference models(id).
   for (const table of ['fallback_config', 'profile_models'] as const) {
-    if (!tableExists(db, table)) continue;
-    db.prepare(`
+    if (!await tableExists(db, table)) continue;
+    await db.run(`
       DELETE FROM ${table} WHERE model_db_id IN (SELECT id FROM models WHERE platform = ?)
-    `).run(PLATFORM);
+    `, [PLATFORM]);
   }
   for (const table of ['models', 'embedding_models', 'media_models', 'model_overrides', 'api_keys'] as const) {
-    if (!tableExists(db, table)) continue;
-    db.prepare(`DELETE FROM ${table} WHERE platform = ?`).run(PLATFORM);
+    if (!await tableExists(db, table)) continue;
+    await db.run(`DELETE FROM ${table} WHERE platform = ?`, [PLATFORM]);
   }
 
-  db.prepare(`
+  await db.run(`
     INSERT INTO settings (key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `).run(SETTING_KEY, JSON.stringify(removed));
+  `, [SETTING_KEY, JSON.stringify(removed)]);
 }
 
-export function down(db: Db): void {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(SETTING_KEY) as { value: string } | undefined;
+export async function down(db: Db): Promise<void> {
+  const row = await db.get('SELECT value FROM settings WHERE key = ?', [SETTING_KEY]) as { value: string } | undefined;
   const removed: Partial<Record<Table, Row[]>> = row ? JSON.parse(row.value) : {};
   for (const table of TABLES) {
     for (const raw of removed[table] ?? []) {
       const r = decode(raw);
       const cols = Object.keys(r);
-      db.prepare(`INSERT OR IGNORE INTO ${table} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
-        .run(...cols.map(c => r[c]));
+      await db.run(`INSERT OR IGNORE INTO ${table} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`, cols.map(c => r[c]));
     }
   }
-  db.prepare('DELETE FROM settings WHERE key = ?').run(SETTING_KEY);
+  await db.run('DELETE FROM settings WHERE key = ?', [SETTING_KEY]);
 }

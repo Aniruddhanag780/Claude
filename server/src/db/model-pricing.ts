@@ -196,23 +196,19 @@ export const FALLBACK_OUTPUT_PER_M = 0.80;
  * known model. Runs on every boot — it's ~100 UPDATEs in one transaction
  * and keeps prices current when this map is updated in a release.
  */
-export function applyModelPricing(db: Db): void {
-  const columns = db.prepare('PRAGMA table_info(models)').all() as { name: string }[];
-  if (!columns.some(c => c.name === 'paid_input_per_m')) {
-    db.prepare('ALTER TABLE models ADD COLUMN paid_input_per_m REAL').run();
-  }
-  if (!columns.some(c => c.name === 'paid_output_per_m')) {
-    db.prepare('ALTER TABLE models ADD COLUMN paid_output_per_m REAL').run();
-  }
+export async function applyModelPricing(db: Db): Promise<void> {
+  // PostgreSQL: ADD COLUMN IF NOT EXISTS is idempotent, so the SQLite
+  // PRAGMA-table_info guard is unnecessary. SQLite REAL maps to DOUBLE PRECISION.
+  await db.exec('ALTER TABLE models ADD COLUMN IF NOT EXISTS paid_input_per_m DOUBLE PRECISION');
+  await db.exec('ALTER TABLE models ADD COLUMN IF NOT EXISTS paid_output_per_m DOUBLE PRECISION');
 
-  const update = db.prepare(`
-    UPDATE models SET paid_input_per_m = ?, paid_output_per_m = ?
-    WHERE platform = ? AND model_id = ?
-  `);
-  const applyAll = db.transaction(() => {
+  await db.transaction(async (tx) => {
     for (const [platform, modelId, input, output] of MODEL_PRICING) {
-      update.run(input, output, platform, modelId);
+      await tx.run(
+        `UPDATE models SET paid_input_per_m = ?, paid_output_per_m = ?
+         WHERE platform = ? AND model_id = ?`,
+        [input, output, platform, modelId],
+      );
     }
   });
-  applyAll();
 }

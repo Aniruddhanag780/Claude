@@ -386,7 +386,7 @@ export function recordQuotaObservation(input: QuotaObservationInput): ProviderQu
   const updatedAt = nowSql;
 
   db.transaction(() => {
-    db.prepare(`
+    db.run(`
       INSERT INTO provider_quota_state (
         platform, key_id, quota_pool_key, metric, limit_value, remaining_value,
         reset_at, reset_strategy, source, confidence, notes, observed_at, updated_at
@@ -406,21 +406,15 @@ export function recordQuotaObservation(input: QuotaObservationInput): ProviderQu
       WHERE excluded.remaining_value IS NOT NULL
         AND (provider_quota_state.remaining_value IS NULL
           OR julianday(excluded.observed_at) >= julianday(provider_quota_state.observed_at))
-    `).run(
-      platform, keyId, quotaPoolKey, metric, limitValue, remainingValue, resetAt, resetStrategy, source, confidence, notes, nowSql, updatedAt,
-    );
+    `, [platform, keyId, quotaPoolKey, metric, limitValue, remainingValue, resetAt, resetStrategy, source, confidence, notes, nowSql, updatedAt]);
 
-    db.prepare(`
+    db.run(`
       INSERT INTO provider_quota_observations (
         id, platform, key_id, provider_account_id, model_id, quota_pool_key, metric,
         status_code, limit_value, remaining_value, reset_at, retry_after_ms,
         reset_strategy, source, confidence, notes, raw_json, endpoint, observed_at, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id, platform, keyId, providerAccountId, modelId, quotaPoolKey, metric,
-      statusCode, limitValue, remainingValue, resetAt, retryAfterMs,
-      resetStrategy, source, confidence, notes, rawJson, endpoint, nowSql, nowSql,
-    );
+    `, [id, platform, keyId, providerAccountId, modelId, quotaPoolKey, metric, statusCode, limitValue, remainingValue, resetAt, retryAfterMs, resetStrategy, source, confidence, notes, rawJson, endpoint, nowSql, nowSql]);
   })();
 
   // The row just moved, so the memoised headroom for this platform is wrong —
@@ -499,7 +493,7 @@ export function getKeyQuotaHeadroom(platform: Platform): Map<number, number> {
   const cached = headroomCache.get(platform);
   if (cached && cached.db === db && now - cached.at < HEADROOM_TTL_MS) return cached.map;
 
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT key_id AS keyId,
            limit_value AS limitValue,
            remaining_value AS remainingValue,
@@ -511,7 +505,7 @@ export function getKeyQuotaHeadroom(platform: Platform): Map<number, number> {
        AND limit_value IS NOT NULL
        AND limit_value > 0
        AND remaining_value IS NOT NULL
-  `).all(platform, HEADROOM_MIN_CONFIDENCE) as {
+  `, [platform, HEADROOM_MIN_CONFIDENCE]) as {
     keyId: number; limitValue: number; remainingValue: number; expired: number;
   }[];
 
@@ -550,7 +544,7 @@ export function getQuotaStateForKeys(options: { normalizeExpired?: boolean } = {
   // (platform, key_id, quota_pool_key, metric, observed_at DESC, created_at
   // DESC) and stops at the first entry. The window-function form it replaces
   // ranked the entire table, raw_json included, on every dashboard poll.
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT
       pqs.platform,
       pqs.key_id AS keyId,
@@ -589,7 +583,7 @@ export function getQuotaStateForKeys(options: { normalizeExpired?: boolean } = {
          LIMIT 1
       )
     ORDER BY pqs.platform ASC, pqs.key_id ASC, pqs.quota_pool_key ASC, pqs.metric ASC
-  `).all() as QuotaObservationView[];
+  `) as QuotaObservationView[];
   if (options.normalizeExpired === false) return rows;
   // Legacy callers can still display replenished headroom, but never overwrite
   // the actual observation: the outlook must retain its age and reported value.

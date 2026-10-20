@@ -238,7 +238,7 @@ fallbackRouter.get('/', (req: Request, res: Response) => {
   if (requestedRaw !== undefined) {
     const requested = Number.parseInt(String(requestedRaw), 10);
     if (!Number.isInteger(requested) || requested <= 0
-      || !db.prepare('SELECT 1 FROM profiles WHERE id = ?').get(requested)) {
+      || !db.get('SELECT 1 FROM profiles WHERE id = ?', [requested])) {
       res.status(404).json({ error: { message: `no such profile: ${String(requestedRaw)}` } });
       return;
     }
@@ -249,17 +249,17 @@ fallbackRouter.get('/', (req: Request, res: Response) => {
   // through to the global table there is what made two different empty chains
   // show (and save) the same configuration (#1021).
   const rows = activeProfileId != null
-    ? orderProfileRows(db.prepare(PROFILE_CHAIN_SQL).all(activeProfileId) as any[])
-    : db.prepare(GLOBAL_CHAIN_SQL).all() as any[];
+    ? orderProfileRows(db.all(PROFILE_CHAIN_SQL[activeProfileId]) as any[])
+    : db.all(GLOBAL_CHAIN_SQL) as any[];
 
   // Count usable keys per platform — enabled AND healthy/unknown status. Unified
   // with /token-usage and the routing scorer (#456) so budget pooling is computed
   // from the same key set everywhere (a disabled or invalid key adds no capacity).
-  const keyCounts = db.prepare(`
+  const keyCounts = db.all(`
     SELECT platform, COUNT(*) as count
     FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown')
     GROUP BY platform
-  `).all() as { platform: string; count: number }[];
+  `) as { platform: string; count: number }[];
   const keyCountMap = new Map(keyCounts.map(k => [k.platform, k.count]));
 
   // Get current dynamic penalties
@@ -351,7 +351,7 @@ const updateSchema = z.array(z.object({
  * nothing).
  */
 function knownModelIds(db: ReturnType<typeof getDb>): Set<number> {
-  return new Set((db.prepare('SELECT id FROM models').all() as { id: number }[]).map(m => m.id));
+  return new Set((db.all('SELECT id FROM models') as { id: number }[]).map(m => m.id));
 }
 
 // Update fallback chain (full replace)
@@ -373,23 +373,20 @@ fallbackRouter.put('/', (req: Request, res: Response) => {
   const writeAll = activeProfileId != null
     ? (() => {
         const known = knownModelIds(db);
-        const upsert = db.prepare(`
-          INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
-          VALUES (?, ?, ?, ?)
-          ON CONFLICT(profile_id, model_db_id)
-          DO UPDATE SET priority = excluded.priority, enabled = excluded.enabled
-        `);
         return db.transaction(() => {
           for (const entry of parsed.data) {
             if (!known.has(entry.modelDbId)) continue;
-            upsert.run(activeProfileId, entry.modelDbId, entry.priority, entry.enabled ? 1 : 0);
+            db.run(`
+          INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
+          VALUES (?, ?, ?, 0)
+          ON CONFLICT(profile_id, model_db_id) DO UPDATE SET priority = excluded.priority
+        `, [activeProfileId, entry.modelDbId, entry.priority, entry.enabled ? 1 : 0]);
           }
         });
       })()
     : (() => {
-        const update = db.prepare('UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?');
         return db.transaction(() => {
-          for (const entry of parsed.data) update.run(entry.priority, entry.enabled ? 1 : 0, entry.modelDbId);
+          for (const entry of parsed.data) db.run('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?', [entry.priority, entry.enabled ? 1 : 0, entry.modelDbId]);
         });
       })();
   writeAll();
@@ -419,7 +416,7 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
   const activeProfileId = getActiveProfileId(db);
 
   if (preset === 'budget') {
-    const allModels = db.prepare(`SELECT id, monthly_token_budget, tpd_limit FROM models`).all() as any[];
+    const allModels = db.all(`SELECT id, monthly_token_budget, tpd_limit FROM models`) as any[];
     allModels.sort((a, b) => monthlyBudgetScore(b) - monthlyBudgetScore(a));
     models = allModels.map(m => ({ id: m.id }));
   } else {
@@ -428,7 +425,7 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
       res.status(400).json({ error: { message: `Unknown preset: ${preset}. Use: intelligence, speed, budget` } });
       return;
     }
-    models = db.prepare(`SELECT m.id FROM models m ORDER BY ${orderBy}`).all() as { id: number }[];
+    models = db.all(`SELECT m.id FROM models m ORDER BY ${orderBy}`) as { id: number }[];
   }
 
   // Same upsert story as the PUT above: a preset sorts the list the dashboard
@@ -438,19 +435,17 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
   // already in the chain keeps whatever flag it had.
   const reorder = activeProfileId != null
     ? (() => {
-        const upsert = db.prepare(`
+        return db.transaction(() => {
+          for (let i = 0; i < models.length; i++) db.run(`
           INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
           VALUES (?, ?, ?, 0)
           ON CONFLICT(profile_id, model_db_id) DO UPDATE SET priority = excluded.priority
-        `);
-        return db.transaction(() => {
-          for (let i = 0; i < models.length; i++) upsert.run(activeProfileId, models[i].id, i + 1);
+        `, [activeProfileId, models[i].id, i + 1]);
         });
       })()
     : (() => {
-        const update = db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?');
         return db.transaction(() => {
-          for (let i = 0; i < models.length; i++) update.run(i + 1, models[i].id);
+          for (let i = 0; i < models.length; i++) db.run('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?', [i + 1, models[i].id]);
         });
       })();
   reorder();
@@ -463,20 +458,20 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
   const db = getDb();
 
   // Get platforms that have enabled keys
-  const platforms = db.prepare(`
+  const platforms = db.all(`
     SELECT DISTINCT ak.platform
     FROM api_keys ak
     WHERE ak.enabled = 1
-  `).all() as { platform: string }[];
+  `) as { platform: string }[];
   const platformSet = new Set(platforms.map(p => p.platform));
 
   // Check if there is an active profile
-  const settingRow = db.prepare(`SELECT value FROM settings WHERE key = 'active_profile_id'`).get() as { value: string } | undefined;
+  const settingRow = db.get(`SELECT value FROM settings WHERE key = 'active_profile_id'`) as { value: string } | undefined;
   const activeProfileId = settingRow ? (parseInt(settingRow.value) || null) : null;
 
   // Verify active profile still exists
   const activeProfile = activeProfileId
-    ? db.prepare('SELECT id FROM profiles WHERE id = ?').get(activeProfileId) as any
+    ? db.get('SELECT id FROM profiles WHERE id = ?', [activeProfileId]) as any
     : null;
 
   // Ordered by intelligence (rank 1 = smartest), not chain priority: the
@@ -487,7 +482,7 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
 
   if (activeProfile) {
     // Profile mode: use profile_models chain (all models in profile, checked against enabled)
-    rawModels = db.prepare(`
+    rawModels = db.all(`
       SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.monthly_token_budget,
              pm.priority, pm.enabled, m.intelligence_rank,
              m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit
@@ -495,10 +490,10 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
       JOIN models m ON m.id = pm.model_db_id
       WHERE pm.profile_id = ? AND m.enabled = 1
       ORDER BY m.intelligence_rank ASC, pm.priority ASC
-    `).all(activeProfileId) as any[];
+    `, [activeProfileId]) as any[];
   } else {
     // Default mode: use fallback_config (only include enabled models)
-    rawModels = db.prepare(`
+    rawModels = db.all(`
       SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.monthly_token_budget,
              fc.priority, fc.enabled, m.intelligence_rank,
              m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit
@@ -506,21 +501,21 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
       JOIN models m ON m.id = fc.model_db_id
       WHERE m.enabled = 1
       ORDER BY m.intelligence_rank ASC, fc.priority ASC
-    `).all() as any[];
+    `) as any[];
   }
 
   // Build per-model breakdown (only platforms with keys), preserving enabled state
-  const usageRows = db.prepare(`
+  const usageRows = db.all(`
     SELECT platform, model_id, COALESCE(SUM(input_tokens + output_tokens), 0) AS used
     FROM requests
     WHERE created_at >= datetime('now', 'start of month')
       AND request_type = 'chat'
     GROUP BY platform, model_id
-  `).all() as { platform: string; model_id: string; used: number }[];
+  `) as { platform: string; model_id: string; used: number }[];
   const usageByModel = new Map(usageRows.map(r => [`${r.platform}:${r.model_id}`, r.used]));
 
   const keyCountMap = new Map(
-    (db.prepare("SELECT platform, COUNT(*) as count FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform").all() as { platform: string; count: number }[])
+    (db.all("SELECT platform, COUNT(*) as count FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; count: number }[])
       .map(k => [k.platform, k.count])
   );
 
@@ -603,11 +598,11 @@ fallbackRouter.get('/rate-limit-usage', (_req: Request, res: Response) => {
   const db = getDb();
   const now = Date.now();
 
-  const models = db.prepare(`
+  const models = db.all(`
     SELECT id AS model_db_id, platform, model_id, key_id, rpm_limit, rpd_limit, tpm_limit
       FROM models
      WHERE enabled = 1
-  `).all() as Array<{
+  `) as Array<{
     model_db_id: number;
     platform: string;
     model_id: string;
@@ -620,9 +615,9 @@ fallbackRouter.get('/rate-limit-usage', (_req: Request, res: Response) => {
   // Every key row once: the routable pool needs enabled+healthy rows, while the
   // custom-endpoint pool is keyed on base_url and has to resolve a model's own
   // key_id even when that row is disabled.
-  const allKeys = db.prepare(`
+  const allKeys = db.all(`
     SELECT id, platform, base_url, model_scope_json, enabled, status FROM api_keys
-  `).all() as Array<{
+  `) as Array<{
     id: number;
     platform: string;
     base_url: string | null;
@@ -644,7 +639,7 @@ fallbackRouter.get('/rate-limit-usage', (_req: Request, res: Response) => {
   // ratelimit service enforces: a sliding minute for RPM/TPM, a sliding day for
   // RPD. Rows older than a day are pruned on write, but the WHERE keeps this
   // correct even if a prune has not run yet.
-  const usageRows = db.prepare(`
+  const usageRows = db.all(`
     SELECT platform, model_id, key_id,
            SUM(CASE WHEN kind = 'request' AND created_at_ms > ? THEN 1 ELSE 0 END) AS rpm_used,
            SUM(CASE WHEN kind = 'request' THEN 1 ELSE 0 END) AS rpd_used,
@@ -652,7 +647,7 @@ fallbackRouter.get('/rate-limit-usage', (_req: Request, res: Response) => {
       FROM rate_limit_usage
      WHERE created_at_ms > ?
      GROUP BY platform, model_id, key_id
-  `).all(now - RATE_LIMIT_MINUTE_MS, now - RATE_LIMIT_MINUTE_MS, now - RATE_LIMIT_DAY_MS) as Array<{
+  `, [now - RATE_LIMIT_MINUTE_MS, now - RATE_LIMIT_MINUTE_MS, now - RATE_LIMIT_DAY_MS]) as Array<{
     platform: string; model_id: string; key_id: number;
     rpm_used: number; rpd_used: number; tpm_used: number;
   }>;

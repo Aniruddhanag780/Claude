@@ -15,16 +15,16 @@ import type { Db } from '../types.js';
  * the credential. The label is a snapshot — if the operator renames the key
  * later, historical attempts keep the label they actually used.
  */
-export function up(db: Db): void {
-  const columns = db.prepare(`PRAGMA table_info(request_attempts)`).all() as { name: string }[];
+export async function up(db: Db): Promise<void> {
+  const columns = await db.all(`PRAGMA table_info(request_attempts)`) as { name: string }[];
   if (!columns.some((c) => c.name === 'key_label')) {
-    db.prepare('ALTER TABLE request_attempts ADD COLUMN key_label TEXT').run();
+    await db.run('ALTER TABLE request_attempts ADD COLUMN key_label TEXT');
   }
 }
 
-export function down(db: Db): void {
-  const columns = db.prepare(`PRAGMA table_info(request_attempts)`).all() as { name: string }[];
+export async function down(db: Db): Promise<void> {
+  const columns = await db.all(`PRAGMA table_info(request_attempts)`) as { name: string }[];
   if (columns.some((c) => c.name === 'key_label')) {
-    db.prepare('ALTER TABLE request_attempts DROP COLUMN key_label').run();
+    await db.run('ALTER TABLE request_attempts DROP COLUMN key_label');
   }
 }

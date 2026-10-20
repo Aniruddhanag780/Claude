@@ -34,25 +34,23 @@ function hostOf(baseUrl: string | null): string | null {
   }
 }
 
-export function up(db: Db): void {
-  const rows = db.prepare(
-    "SELECT id, base_url FROM api_keys WHERE platform = 'custom' AND label = 'Custom'",
-  ).all() as KeyRow[];
-  const update = db.prepare('UPDATE api_keys SET label = ? WHERE id = ?');
+export async function up(db: Db): Promise<void> {
+  const rows = await db.all(
+    "SELECT id, base_url FROM api_keys WHERE platform = 'custom' AND label = 'Custom'") as KeyRow[];
+  const update = 'UPDATE api_keys SET label = ? WHERE id = ?';
   for (const row of rows) {
     const host = hostOf(row.base_url);
-    if (host) update.run(host, row.id);
+    if (host) await db.run(update, [host, row.id]);
   }
 }
 
 /** Put back the generic label on every custom endpoint that currently carries
  *  exactly its own host, which is the set `up` could have produced. */
-export function down(db: Db): void {
-  const rows = db.prepare(
-    "SELECT id, label, base_url FROM api_keys WHERE platform = 'custom'",
-  ).all() as (KeyRow & { label: string | null })[];
-  const update = db.prepare("UPDATE api_keys SET label = 'Custom' WHERE id = ?");
+export async function down(db: Db): Promise<void> {
+  const rows = await db.all(
+    "SELECT id, label, base_url FROM api_keys WHERE platform = 'custom'") as (KeyRow & { label: string | null })[];
+  const update = "UPDATE api_keys SET label = 'Custom' WHERE id = ?";
   for (const row of rows) {
-    if (row.label && row.label === hostOf(row.base_url)) update.run(row.id);
+    if (row.label && row.label === hostOf(row.base_url)) await db.run(update, [row.id]);
   }
 }

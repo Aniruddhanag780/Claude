@@ -77,9 +77,7 @@ export function noteModelRetirementSignal(
   const reason = summarizeAttemptError((err as { message?: unknown })?.message);
   try {
     const db = getDb();
-    const row = db
-      .prepare('SELECT id, platform, model_id, key_id, source FROM models WHERE id = ?')
-      .get(route.modelDbId) as
+    const row = db.get('SELECT id, platform, model_id, key_id, source FROM models WHERE id = ?', [route.modelDbId]) as
       | { id: number; platform: string; model_id: string; key_id: number | null; source: string }
       | undefined;
     // Only catalog-managed rows: a model the user added by hand is their state,

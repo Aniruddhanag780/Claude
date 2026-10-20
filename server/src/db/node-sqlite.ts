@@ -74,7 +74,7 @@ export const nodeSqliteFactory: DbFactory = (resolvedPath) => {
     memory: resolvedPath === ':memory:',
     prepare: (sql) => wrapStatement(raw.prepare(sql)),
     exec: (sql) => raw.exec(sql),
-    pragma: (source) => raw.prepare(`PRAGMA ${source}`).all(),
+    pragma: (source) => raw.all(`PRAGMA ${source}`),
     close: () => raw.close(),
     transaction: <F extends (...args: any[]) => unknown>(fn: F): F => {
       const wrapped = function (this: unknown, ...args: Parameters<F>): ReturnType<F> {

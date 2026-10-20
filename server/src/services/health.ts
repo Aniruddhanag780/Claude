@@ -132,9 +132,7 @@ function recordTransportFailure(keyId: number, platform: string | undefined): bo
   // a confirmed-bad credential verdict outranks network evidence in both
   // directions, and only a successful validateKey clears it.
   const db = getDb();
-  const res = db
-    .prepare("UPDATE api_keys SET status = 'error' WHERE id = ? AND enabled = 1 AND status IN ('healthy', 'unknown')")
-    .run(keyId);
+  const res = db.run("UPDATE api_keys SET status = 'error' WHERE id = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [keyId]);
   if (res.changes > 0) {
     providerLog(
       'warn',
@@ -180,7 +178,7 @@ function recordInvalidFailure(keyId: number, platform?: string): void {
   failureCount.set(keyId, count);
 
   if (count >= CONSECUTIVE_FAILURES_TO_DISABLE) {
-    getDb().prepare('UPDATE api_keys SET enabled = 0 WHERE id = ?').run(keyId);
+    getDb().run('UPDATE api_keys SET enabled = 0 WHERE id = ?', [keyId]);
     // providerLog, not console.log: losing a key is the event an operator is
     // most likely to be looking for after the fact, so it goes to the dashboard
     // log viewer (where warn/error survive a restart) as well as to stdout —
@@ -207,11 +205,11 @@ function recordInvalidFailure(keyId: number, platform?: string): void {
 export const QUOTA_POLL_INTERVAL_MS = 15 * 60 * 1000;
 
 function quotaPollDue(keyId: number, now = Date.now()): boolean {
-  const row = getDb().prepare(`
+  const row = getDb().get(`
     SELECT created_at AS seenAt FROM provider_quota_observations
      WHERE key_id = ? AND source = 'quota_api'
      ORDER BY created_at DESC LIMIT 1
-  `).get(keyId) as { seenAt: string | null } | undefined;
+  `, [keyId]) as { seenAt: string | null } | undefined;
   if (!row?.seenAt) return true;
   const seen = Date.parse(row.seenAt.includes('T') ? row.seenAt : row.seenAt.replace(' ', 'T') + 'Z');
   if (!Number.isFinite(seen)) return true;
@@ -253,7 +251,7 @@ export function supportsQuotaPolling(provider: BaseProvider): boolean {
 export async function maybePollKeyQuota(keyId: number): Promise<boolean> {
   try {
     const db = getDb();
-    const row = db.prepare('SELECT * FROM api_keys WHERE id = ? AND enabled = 1').get(keyId) as any;
+    const row = db.get('SELECT * FROM api_keys WHERE id = ? AND enabled = 1', [keyId]) as any;
     if (!row) return false;
     const provider = resolveProvider(row.platform as Platform, row.base_url);
     if (!provider || !supportsQuotaPolling(provider)) return false;
@@ -266,7 +264,7 @@ export async function maybePollKeyQuota(keyId: number): Promise<boolean> {
 
 export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
   const db = getDb();
-  const row = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(keyId) as any;
+  const row = db.get('SELECT * FROM api_keys WHERE id = ?', [keyId]) as any;
   if (!row) return 'error';
 
   const provider = resolveProvider(row.platform as Platform, row.base_url);
@@ -277,7 +275,7 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
   // an older probe stored is cleared so the dashboard stops showing it.
   if (provider.supportsKeyValidation === false) {
     if (row.last_health_error != null) {
-      db.prepare('UPDATE api_keys SET last_health_error = NULL WHERE id = ?').run(keyId);
+      db.run('UPDATE api_keys SET last_health_error = NULL WHERE id = ?', [keyId]);
     }
     return row.status as KeyStatus;
   }
@@ -309,10 +307,9 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     // #1493: stamp last_healthy_at only on a VALID verdict. A transport error
     // (the catch below) refreshes last_checked_at but records no success, so
     // "checked recently" and "worked recently" stay distinguishable.
-    db.prepare(isValid
+    db.run(isValid
       ? "UPDATE api_keys SET status = ?, last_health_error = ?, last_checked_at = datetime('now'), last_healthy_at = datetime('now') WHERE id = ?"
-      : "UPDATE api_keys SET status = ?, last_health_error = ?, last_checked_at = datetime('now') WHERE id = ?")
-      .run(status, lastError, keyId);
+      : "UPDATE api_keys SET status = ?, last_health_error = ?, last_checked_at = datetime('now') WHERE id = ?"[status, lastError, keyId]);
 
     if (isValid) {
       failureCount.delete(keyId);
@@ -379,8 +376,7 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     let parked = false;
     if (err?.status === 429) transportFailures.delete(keyId);
     else parked = recordTransportFailure(keyId, row.platform);
-    db.prepare("UPDATE api_keys SET last_health_error = ?, last_checked_at = datetime('now') WHERE id = ?")
-      .run(lastError, keyId);
+    db.run("UPDATE api_keys SET last_health_error = ?, last_checked_at = datetime('now') WHERE id = ?", [lastError, keyId]);
     return (parked ? 'error' : row.status) as KeyStatus;
   }
 }
@@ -399,7 +395,7 @@ export type KeyProbeOutcome = 'valid' | 'invalid' | 'error';
 export async function probeKeyValidity(keyId: number): Promise<KeyProbeOutcome> {
   try {
     const db = getDb();
-    const row = db.prepare('SELECT * FROM api_keys WHERE id = ? AND enabled = 1').get(keyId) as any;
+    const row = db.get('SELECT * FROM api_keys WHERE id = ? AND enabled = 1', [keyId]) as any;
     if (!row) return 'error';
 
     const provider = resolveProvider(row.platform as Platform, row.base_url);
@@ -465,13 +461,9 @@ export function markKeyHealthyFromRequest(keyId: number): void {
     const lastStamp = lastHealthyStampedAt.get(keyId);
     if (lastStamp === undefined || now - lastStamp >= LAST_HEALTHY_STAMP_INTERVAL_MS) {
       lastHealthyStampedAt.set(keyId, now);
-      getDb()
-        .prepare("UPDATE api_keys SET last_healthy_at = datetime('now') WHERE id = ?")
-        .run(keyId);
+      getDb().run("UPDATE api_keys SET last_healthy_at = datetime('now') WHERE id = ?", [keyId]);
     }
-    getDb()
-      .prepare("UPDATE api_keys SET status = 'healthy', last_health_error = NULL WHERE id = ? AND status IN ('error', 'unknown')")
-      .run(keyId);
+    getDb().run("UPDATE api_keys SET status = 'healthy', last_health_error = NULL WHERE id = ? AND status IN ('error', 'unknown')", [keyId]);
     failureCount.delete(keyId);
     // #1510: a served request is the strongest reachability evidence there is —
     // it also ends any transport-error streak, parked or not.
@@ -577,11 +569,11 @@ async function runHealthPass(opts: HealthPassOptions): Promise<HealthPassResult>
 
   // age_ms comes from the DB clock (last_checked_at is written as
   // datetime('now')); the injected `now` above only drives pacing.
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT id, platform, base_url, status,
            CAST((julianday('now') - julianday(last_checked_at)) * 86400000 AS INTEGER) AS age_ms
     FROM api_keys WHERE enabled = 1
-  `).all() as HealthKeyRow[];
+  `) as HealthKeyRow[];
 
   const skippedKeyIds: number[] = [];
   const skipMs = opts.force ? 0 : getValidationRateLimitSkipMs();

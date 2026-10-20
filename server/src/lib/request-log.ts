@@ -16,17 +16,17 @@ function incrementSetting(db: LogTx, key: string, delta: number): void {
   // Read-then-write inside the same transaction; safe because better-sqlite3
   // is synchronous and serialized at the connection level. ON CONFLICT keeps
   // the first ever insert without a prior SELECT.
-  db.prepare(`
+  db.run(`
     INSERT INTO settings (key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ? AS TEXT)
-  `).run(key, String(delta), delta);
+  `, [key, String(delta), delta]);
 }
 
 function setSettingIfMissing(db: LogTx, key: string, value: string): void {
-  db.prepare(`
+  db.run(`
     INSERT INTO settings (key, value) VALUES (?, ?)
     ON CONFLICT(key) DO NOTHING
-  `).run(key, value);
+  `, [key, value]);
 }
 
 // Resolve the concrete models.id for a request (#1187). Catalog requests
@@ -42,18 +42,14 @@ function resolveModelDbId(
   keyId: number | null,
 ): number | null {
   if (platform !== 'custom') {
-    const row = db.prepare('SELECT id FROM models WHERE platform = ? AND model_id = ? LIMIT 1')
-      .get(platform, modelId) as { id: number } | undefined;
+    const row = db.get('SELECT id FROM models WHERE platform = ? AND model_id = ? LIMIT 1', [platform, modelId]) as { id: number } | undefined;
     return row?.id ?? null;
   }
   if (keyId == null) return null;
-  const key = db.prepare("SELECT base_url FROM api_keys WHERE id = ? AND platform = 'custom'")
-    .get(keyId) as { base_url: string | null } | undefined;
+  const key = db.get("SELECT base_url FROM api_keys WHERE id = ? AND platform = 'custom'", [keyId]) as { base_url: string | null } | undefined;
   if (!key?.base_url) return null;
   const scope = key.base_url.trim().replace(/\/+$/, '');
-  const row = db.prepare(
-    'SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ? LIMIT 1',
-  ).get('custom', modelId, scope) as { id: number } | undefined;
+  const row = db.get('SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ? LIMIT 1', ['custom', modelId, scope]) as { id: number } | undefined;
   return row?.id ?? null;
 }
 
@@ -118,22 +114,22 @@ export function logRequest(
     // middleware); null when logging happens outside an HTTP request.
     const client = getClientContext();
     const tx = db.transaction(() => {
-      const insert = db.prepare(`
+      const insert = db.run(`
         INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms, requested_model, served_model, client_ip, client_user_agent, client_agent, caller, model_db_id, failure_attribution)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(platform, modelId, keyId, status, inputTokens, outputTokens, latencyMs, error, ttfbMs, requestedModel, servedModel, client.ip, client.userAgent, client.agent, caller, resolveModelDbId(db, platform, modelId, keyId), failureAttribution);
+      `, [platform, modelId, keyId, status, inputTokens, outputTokens, latencyMs, error, ttfbMs, requestedModel, servedModel, client.ip, client.userAgent, client.agent, caller, resolveModelDbId(db, platform, modelId, keyId), failureAttribution]);
 
       // Report the row id back to the fallback loop's attempt trace (if one is
       // active): the LAST id noted during a loop run is the terminal row the
       // per-attempt batch is keyed to. No-op outside a fallback-loop run.
       if (insert.lastInsertRowid != null) noteRequestRowId(insert.lastInsertRowid);
 
-      const createdAt = db.prepare(`SELECT created_at FROM requests WHERE id = ?`).get(insert.lastInsertRowid) as { created_at: string } | undefined;
+      const createdAt = db.get(`SELECT created_at FROM requests WHERE id = ?`, [insert.lastInsertRowid]) as { created_at: string } | undefined;
       const hour = hourKey(createdAt?.created_at ?? new Date().toISOString().slice(0, 19).replace('T', ' '));
       const isSuccess = status === 'success' ? 1 : 0;
       const isError = status === 'error' ? 1 : 0;
 
-      db.prepare(`
+      db.run(`
         INSERT INTO request_hourly (hour, total_requests, success_count, error_count, input_tokens, output_tokens)
         VALUES (?, 1, ?, ?, ?, ?)
         ON CONFLICT(hour) DO UPDATE SET
@@ -142,7 +138,7 @@ export function logRequest(
           error_count    = error_count + ?,
           input_tokens   = input_tokens + ?,
           output_tokens  = output_tokens + ?
-      `).run(hour, isSuccess, isError, inputTokens, outputTokens, isSuccess, isError, inputTokens, outputTokens);
+      `, [hour, isSuccess, isError, inputTokens, outputTokens, isSuccess, isError, inputTokens, outputTokens]);
 
       incrementSetting(db, 'total_requests', 1);
       incrementSetting(db, 'total_input_tokens', inputTokens);
@@ -172,13 +168,12 @@ export function persistRequestAttempts(trace: RequestTrace): void {
   if (trace.records.length === 0 || trace.lastRequestRowId == null) return;
   try {
     const db = getDb();
-    const insert = db.prepare(`
-      INSERT INTO request_attempts (request_id, ordinal, platform, model_id, key_ordinal, key_label, outcome, start_offset_ms, duration_ms, error_summary)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
     const tx = db.transaction(() => {
       for (const r of trace.records) {
-        insert.run(trace.lastRequestRowId, r.ordinal, r.platform, r.modelId, r.keyOrdinal, r.keyLabel, r.outcome, r.startOffsetMs, r.durationMs, r.errorSummary);
+        db.run(`
+      INSERT INTO request_attempts (request_id, ordinal, platform, model_id, key_ordinal, key_label, outcome, start_offset_ms, duration_ms, error_summary)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [trace.lastRequestRowId, r.ordinal, r.platform, r.modelId, r.keyOrdinal, r.keyLabel, r.outcome, r.startOffsetMs, r.durationMs, r.errorSummary]);
       }
     });
     tx();

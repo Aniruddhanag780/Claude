@@ -161,7 +161,7 @@ export function warnOnRoutingOverrideDrift(
       // "not seeded yet" rather than "wrong".
       if (getSetting(CATALOG_LAST_SYNC_SETTING)) {
         const known = new Set(
-          (getDb().prepare('SELECT DISTINCT model_id FROM models').all() as { model_id: string }[])
+          (getDb().all('SELECT DISTINCT model_id FROM models') as { model_id: string }[])
             .map(r => r.model_id),
         );
         for (const modelId of accepted.keys()) {

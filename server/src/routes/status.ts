@@ -28,7 +28,7 @@ export const providersRouter = Router();
 // server is not serviceable, which is exactly the /livez and /readyz 503 signal.
 function isDbReachable(): boolean {
   try {
-    getDb().prepare('SELECT 1').get();
+    getDb().get('SELECT 1');
     return true;
   } catch {
     return false;
@@ -68,13 +68,13 @@ statusRouter.get('/readyz', (_req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const agg = db.prepare(`
+  const agg = db.get(`
     SELECT
       COUNT(*) AS enabled_keys,
       COUNT(DISTINCT CASE WHEN status IN ('healthy', 'unknown') THEN platform END) AS ready_upstreams
     FROM api_keys
     WHERE enabled = 1
-  `).get() as { enabled_keys: number; ready_upstreams: number };
+  `) as { enabled_keys: number; ready_upstreams: number };
 
   const readyUpstreams = agg.ready_upstreams ?? 0;
   if (readyUpstreams > 0) {
@@ -120,7 +120,7 @@ providersRouter.get('/providers', (req: Request, res: Response) => {
   const db = getDb();
 
   // Per-platform key-status rollup (only enabled keys count toward serviceability).
-  const platformRows = db.prepare(`
+  const platformRows = db.all(`
     SELECT
       platform,
       SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS enabled_keys,
@@ -130,27 +130,27 @@ providersRouter.get('/providers', (req: Request, res: Response) => {
       SUM(CASE WHEN enabled = 1 AND status = 'error' THEN 1 ELSE 0 END) AS error_keys
     FROM api_keys
     GROUP BY platform
-  `).all() as PlatformKeyRow[];
+  `) as PlatformKeyRow[];
 
   // Active cooldowns (rate limiting) rolled up to the platform, with the soonest
   // resume time. rate_limit_cooldowns is per (platform, model, key); the MIN is
   // the earliest moment any of that platform's routes frees up.
   const now = Date.now();
-  const cooldownRows = db.prepare(`
+  const cooldownRows = db.all(`
     SELECT platform, MIN(expires_at_ms) AS resume_ms
     FROM rate_limit_cooldowns
     WHERE expires_at_ms > ?
     GROUP BY platform
-  `).all(now) as Array<{ platform: string; resume_ms: number }>;
+  `, [now]) as Array<{ platform: string; resume_ms: number }>;
   const resumeByPlatform = new Map(cooldownRows.map(r => [r.platform, r.resume_ms]));
 
   // Most recent probe error per platform (enabled keys, newest first).
-  const errorRows = db.prepare(`
+  const errorRows = db.all(`
     SELECT platform, last_health_error
     FROM api_keys
     WHERE enabled = 1 AND last_health_error IS NOT NULL
     ORDER BY last_checked_at DESC
-  `).all() as Array<{ platform: string; last_health_error: string }>;
+  `) as Array<{ platform: string; last_health_error: string }>;
   const lastErrorByPlatform = new Map<string, string>();
   for (const row of errorRows) {
     if (!lastErrorByPlatform.has(row.platform)) {

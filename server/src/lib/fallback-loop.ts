@@ -139,9 +139,7 @@ function benchKeyAcrossPlatform(
 ): void {
   let modelIds: string[] = [];
   try {
-    modelIds = (getDb().prepare(
-      'SELECT model_id FROM models WHERE platform = ? AND enabled = 1 AND (key_id IS NULL OR key_id = ?)',
-    ).all(route.platform, route.keyId) as { model_id: string }[]).map(r => r.model_id);
+    modelIds = (getDb().all('SELECT model_id FROM models WHERE platform = ? AND enabled = 1 AND (key_id IS NULL OR key_id = ?)', [route.platform, route.keyId]) as { model_id: string }[]).map(r => r.model_id);
   } catch (dbErr: any) {
     console.warn(`[FallbackLoop] could not list ${route.platform} models to bench key ${route.keyId}: ${dbErr?.message ?? dbErr}`);
     return;

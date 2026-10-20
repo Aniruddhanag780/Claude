@@ -80,11 +80,11 @@ let lastSnapshot: HealthSnapshot | null = null;
  *  tests to inject a fake DB; callers normally use updateDegradationState. */
 export function computeHealthSnapshot(): HealthSnapshot {
   const db = getDb();
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT platform, status
     FROM api_keys
     WHERE enabled = 1
-  `).all() as { platform: string; status: string }[];
+  `) as { platform: string; status: string }[];
 
   const usable = new Set<string>();
   const present = new Set<string>();

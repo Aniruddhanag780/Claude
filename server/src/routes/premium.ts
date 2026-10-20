@@ -76,7 +76,7 @@ premiumRouter.post('/key', async (req: Request, res: Response) => {
 /** DELETE /api/premium/key — deactivate locally (the purchase itself is untouched). */
 premiumRouter.delete('/key', async (_req: Request, res: Response) => {
   const db = getDb();
-  db.prepare('DELETE FROM settings WHERE key IN (?, ?)').run(SETTING_LICENSE_KEY, SETTING_LICENSE_STATUS);
+  db.run('DELETE FROM settings WHERE key IN (?, ?)', [SETTING_LICENSE_KEY, SETTING_LICENSE_STATUS]);
   // Drop back to the free tier in the background; failure just means the next
   // scheduled poll handles it.
   void syncCatalog(true);

@@ -1,32 +1,32 @@
 import type { Db } from '../types.js';
 
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
+  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
   return columns.some(col => col.name === column);
 }
 
-function addKeyIdColumn(db: Db, table: string): void {
-  if (!hasColumn(db, table, 'key_id')) {
-    db.prepare(`ALTER TABLE ${table} ADD COLUMN key_id INTEGER`).run();
+async function addKeyIdColumn(db: Db, table: string): Promise<void> {
+  if (!await hasColumn(db, table, 'key_id')) {
+    await db.run(`ALTER TABLE ${table} ADD COLUMN key_id INTEGER`);
   }
 }
 
-function dropKeyIdColumn(db: Db, table: string): void {
-  if (hasColumn(db, table, 'key_id')) {
-    db.prepare(`ALTER TABLE ${table} DROP COLUMN key_id`).run();
+async function dropKeyIdColumn(db: Db, table: string): Promise<void> {
+  if (await hasColumn(db, table, 'key_id')) {
+    await db.run(`ALTER TABLE ${table} DROP COLUMN key_id`);
   }
 }
 
-export function up(db: Db): void {
-  addKeyIdColumn(db, 'embedding_models');
-  addKeyIdColumn(db, 'media_models');
-  db.prepare('CREATE INDEX IF NOT EXISTS idx_embedding_models_key_id ON embedding_models(key_id)').run();
-  db.prepare('CREATE INDEX IF NOT EXISTS idx_media_models_key_id ON media_models(key_id)').run();
+export async function up(db: Db): Promise<void> {
+  await addKeyIdColumn(db, 'embedding_models');
+  await addKeyIdColumn(db, 'media_models');
+  await db.run('CREATE INDEX IF NOT EXISTS idx_embedding_models_key_id ON embedding_models(key_id)');
+  await db.run('CREATE INDEX IF NOT EXISTS idx_media_models_key_id ON media_models(key_id)');
 }
 
-export function down(db: Db): void {
-  db.prepare('DROP INDEX IF EXISTS idx_embedding_models_key_id').run();
-  db.prepare('DROP INDEX IF EXISTS idx_media_models_key_id').run();
-  dropKeyIdColumn(db, 'media_models');
-  dropKeyIdColumn(db, 'embedding_models');
+export async function down(db: Db): Promise<void> {
+  await db.run('DROP INDEX IF EXISTS idx_embedding_models_key_id');
+  await db.run('DROP INDEX IF EXISTS idx_media_models_key_id');
+  await dropKeyIdColumn(db, 'media_models');
+  await dropKeyIdColumn(db, 'embedding_models');
 }

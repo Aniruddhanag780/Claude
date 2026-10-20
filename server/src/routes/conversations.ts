@@ -129,9 +129,7 @@ function parseMessages(json: string): unknown[] {
 }
 
 function getConversation(id: number): ConversationRow | undefined {
-  return getDb()
-    .prepare('SELECT * FROM playground_conversations WHERE id = ?')
-    .get(id) as ConversationRow | undefined;
+  return getDb().get('SELECT * FROM playground_conversations WHERE id = ?', [id]) as ConversationRow | undefined;
 }
 
 function parseId(req: Request, res: Response): number | null {
@@ -173,7 +171,7 @@ function serialiseMessages(messages: unknown[], res: Response): string | null {
 // count straight out of the stored blob (SQLite's JSON1, present in both the
 // better-sqlite3 and node:sqlite drivers) instead of parsing every transcript.
 conversationsRouter.get('/', (_req: Request, res: Response) => {
-  const rows = getDb().prepare(`
+  const rows = getDb().all(`
     SELECT id,
            title,
            model,
@@ -182,7 +180,7 @@ conversationsRouter.get('/', (_req: Request, res: Response) => {
            updated_at_ms
       FROM playground_conversations
      ORDER BY updated_at_ms DESC, id DESC
-  `).all() as SummaryRow[];
+  `) as SummaryRow[];
   res.json(rows.map(row => ({
     id: row.id,
     title: row.title,
@@ -211,18 +209,11 @@ conversationsRouter.post('/', (req: Request, res: Response) => {
   if (messagesJson === null) return;
 
   const now = Date.now();
-  const info = getDb().prepare(`
+  const info = getDb().run(`
     INSERT INTO playground_conversations
       (title, messages_json, model, system_prompt, created_at_ms, updated_at_ms)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(
-    parsed.data.title ?? '',
-    messagesJson,
-    parsed.data.model ?? null,
-    parsed.data.systemPrompt ?? null,
-    now,
-    now,
-  );
+  `, [parsed.data.title ?? '', messagesJson, parsed.data.model ?? null, parsed.data.systemPrompt ?? null, now, now]);
   res.status(201).json(toJson(getConversation(Number(info.lastInsertRowid))!));
 });
 
@@ -246,25 +237,18 @@ conversationsRouter.put('/:id', (req: Request, res: Response) => {
   // One statement for the whole conversation: title, transcript, model and
   // system prompt always move together, so a save can never leave a row half
   // updated (the transcript of one exchange under the title of another).
-  getDb().prepare(`
+  getDb().run(`
     UPDATE playground_conversations
        SET title = ?, messages_json = ?, model = ?, system_prompt = ?, updated_at_ms = ?
      WHERE id = ?
-  `).run(
-    title ?? row.title,
-    messagesJson,
-    model === undefined ? row.model : model,
-    systemPrompt === undefined ? row.system_prompt : systemPrompt,
-    Date.now(),
-    id,
-  );
+  `, [title ?? row.title, messagesJson, model === undefined ? row.model : model, systemPrompt === undefined ? row.system_prompt : systemPrompt, Date.now(), id]);
   res.json(toJson(getConversation(id)!));
 });
 
 conversationsRouter.delete('/:id', (req: Request, res: Response) => {
   const id = parseId(req, res);
   if (id === null) return;
-  const info = getDb().prepare('DELETE FROM playground_conversations WHERE id = ?').run(id);
+  const info = getDb().run('DELETE FROM playground_conversations WHERE id = ?', [id]);
   if (info.changes === 0) return notFound(res);
   res.json({ success: true });
 });

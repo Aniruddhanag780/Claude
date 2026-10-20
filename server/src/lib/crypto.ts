@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { restrictToOwner } from './file-permissions.js';
 import type { Db } from '../db/types.js';
 
@@ -19,12 +20,24 @@ const KEY_BYTES = 32;
 const KEY_HEX_LEN = KEY_BYTES * 2;
 const PLACEHOLDER_KEY = 'your-64-char-hex-key-here';
 
-// The dev-fallback key lives in a file next to the DB, NOT in the DB itself.
-// Storing it beside the ciphertext it protects (the old `settings` row) meant
-// encryption-at-rest protected nothing for a default install: whoever copied
-// the DB also copied the key. The file sits in the same directory but is a
-// separate artifact, and is chmod 0600 so it isn't world-readable.
+// Postgres has no local database file to keep the key beside (it lives on a
+// remote server), so the dev-fallback key file sits at a stable location in the
+// repository root instead. It is a separate artifact from the ciphertext it
+// protects — never stored inside the database — and is chmod 0600 so it isn't
+// world-readable.
+//
+// The path is derived from this module's own URL, not from process.cwd(), so it
+// resolves identically under `src/` (tsx) and `dist/` (compiled) and does not
+// change with the working directory. Three levels up from `server/src/lib` (or
+// `server/dist/lib`) is the repository root.
 const KEY_FILE_NAME = '.encryption-key';
+const KEY_FILE_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+  KEY_FILE_NAME,
+);
 
 function parseHexKey(value: string, source: 'env' | 'db' | 'file'): Buffer {
   if (value.length !== KEY_HEX_LEN || !/^[0-9a-fA-F]+$/.test(value)) {
@@ -55,18 +68,6 @@ function missingKeyError(): Error {
   );
 }
 
-// The directory that holds the DB is the only place we can keep the key file
-// next to (but not inside) the database. In-memory and anonymous databases have
-// no such directory (db.memory is true, db.name is ":memory:" or ""), and Db
-// backings without file metadata (memory undefined) have none either, so those
-// callers fall back to the legacy settings-table behavior.
-function keyFilePathFor(db: Db): string | null {
-  if (db.memory !== false) return null;
-  const dbPath = db.name;
-  if (!dbPath || dbPath === ':memory:') return null;
-  return path.join(path.dirname(dbPath), KEY_FILE_NAME);
-}
-
 // Write the hex key with a temp-file-and-rename so a crash never leaves a
 // half-written key, and restrict it to the owner so it isn't readable by other
 // local users. The temp file is restricted BEFORE the rename so the key is
@@ -87,11 +88,11 @@ function writeKeyFileAtomic(keyFile: string, hex: string): void {
  * Initialize encryption key from env or an explicit local-dev fallback.
  * Must be called after DB is initialized.
  *
- * Precedence (dev fallback): ENCRYPTION_KEY env > existing key file next to the
- * DB > legacy `settings` table row (migrated to the file, then deleted) >
+ * Precedence (dev fallback): ENCRYPTION_KEY env > existing local key file >
+ * legacy `settings` table row (migrated to the file, then deleted) >
  * freshly generated key written to the file.
  */
-export function initEncryptionKey(db: Db): void {
+export async function initEncryptionKey(db: Db): Promise<void> {
   // 1. Explicit env key always wins.
   const envKey = process.env.ENCRYPTION_KEY;
   if (envKey && envKey !== PLACEHOLDER_KEY) {
@@ -103,24 +104,9 @@ export function initEncryptionKey(db: Db): void {
     throw missingKeyError();
   }
 
-  const keyFile = keyFilePathFor(db);
+  const keyFile = KEY_FILE_PATH;
 
-  // In-memory / anonymous DBs have no directory to hold a key file, so keep the
-  // legacy settings-table behavior for them (ephemeral runs, most tests).
-  if (!keyFile) {
-    const row = db.prepare("SELECT value FROM settings WHERE key = 'encryption_key'").get() as { value: string } | undefined;
-    if (row) {
-      cachedKey = parseHexKey(row.value, 'db');
-      console.warn('[crypto] No ENCRYPTION_KEY set — using an auto-generated in-memory key (dev only).');
-      return;
-    }
-    cachedKey = crypto.randomBytes(KEY_BYTES);
-    db.prepare("INSERT INTO settings (key, value) VALUES ('encryption_key', ?)").run(cachedKey.toString('hex'));
-    console.warn('[crypto] No ENCRYPTION_KEY set — generated an in-memory dev key. Set ENCRYPTION_KEY for production.');
-    return;
-  }
-
-  // 2. An existing key file next to the DB.
+  // 2. An existing local dev key file.
   if (fs.existsSync(keyFile)) {
     const value = fs.readFileSync(keyFile, 'utf8').trim();
     cachedKey = parseHexKey(value, 'file');
@@ -128,10 +114,10 @@ export function initEncryptionKey(db: Db): void {
     return;
   }
 
-  // 3. A legacy key still sitting in the settings table (older dev installs).
+  // 3. A legacy key still sitting in the settings table (older installs).
   //    Migrate it to the key file so the DB stops storing the key that protects
   //    it, confirm a decrypt round-trip with the migrated key, then drop the row.
-  const legacy = db.prepare("SELECT value FROM settings WHERE key = 'encryption_key'").get() as { value: string } | undefined;
+  const legacy = await db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'encryption_key'");
   if (legacy) {
     const migrated = parseHexKey(legacy.value, 'db');
     writeKeyFileAtomic(keyFile, migrated.toString('hex'));
@@ -141,7 +127,7 @@ export function initEncryptionKey(db: Db): void {
       cachedKey = null;
       throw new Error('[crypto] Failed to migrate the DB-stored key to a key file: round-trip check failed.');
     }
-    db.prepare("DELETE FROM settings WHERE key = 'encryption_key'").run();
+    await db.run("DELETE FROM settings WHERE key = 'encryption_key'");
     console.warn(`[crypto] Migrated the legacy DB-stored key to ${keyFile} and removed it from the database (dev only). Set ENCRYPTION_KEY for production.`);
     return;
   }

@@ -107,11 +107,11 @@ export function ineligibleMessage(platform: string, reason: IneligibleReason | u
 // (or the bundled baseline) wrote, or any embedding / media row, which only
 // the catalog and the bundled baseline write for a built-in platform.
 function hasCatalogOwnedRows(db: Db, platform: string): boolean {
-  const row = db.prepare(`
+  const row = db.get(`
     SELECT (SELECT COUNT(*) FROM models           WHERE platform = ? AND source = 'catalog')
          + (SELECT COUNT(*) FROM embedding_models WHERE platform = ?)
          + (SELECT COUNT(*) FROM media_models     WHERE platform = ?) AS c
-  `).get(platform, platform, platform) as { c: number };
+  `, [platform, platform, platform]) as { c: number };
   return row.c > 0;
 }
 
@@ -140,7 +140,7 @@ export async function discoverBuiltinModels(
 /** Discovered model ids already present on this platform, in any provenance. */
 export function registeredModelIds(db: Db, platform: string): Set<string> {
   return new Set(
-    (db.prepare("SELECT model_id FROM models WHERE platform = ? AND endpoint_scope = ''").all(platform) as { model_id: string }[])
+    (db.all("SELECT model_id FROM models WHERE platform = ? AND endpoint_scope = ''", [platform]) as { model_id: string }[])
       .map(r => r.model_id),
   );
 }
@@ -175,24 +175,9 @@ export function registerDiscoveredModels(
   return db.transaction(() => {
     const result: RegisterDiscoveredResult = { created: [], existing: [], tombstoned: [] };
     const seed = customModelSeed(db);
-    const exists = db.prepare("SELECT 1 FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ''");
-    const insert = db.prepare(`
-      INSERT INTO models
-        (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
-         rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, key_id,
-         supports_tools, supports_vision, source, endpoint_scope)
-      VALUES (@platform, @modelId, @modelId, @intelligenceRank, @speedRank, @sizeLabel,
-         NULL, NULL, NULL, NULL, '', @contextWindow, 1, NULL,
-         1, @vision, @source, '')
-      ON CONFLICT(platform, model_id, endpoint_scope) DO NOTHING
-    `);
-    const selectId = db.prepare("SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ''");
-    const inChain = db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?');
-    const maxPriority = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config');
-    const addToChain = db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)');
 
     for (const entry of entries) {
-      if (exists.get(platform, entry.modelId)) {
+      if (db.get("SELECT 1 FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ''", [platform, entry.modelId])) {
         result.existing.push(entry.modelId);
         continue;
       }
@@ -203,19 +188,19 @@ export function registerDiscoveredModels(
         }
         clearCatalogModelTombstone(db, 'chat', platform, entry.modelId);
       }
-      insert.run({
-        platform,
-        modelId: entry.modelId,
-        intelligenceRank: seed.intelligenceRank,
-        speedRank: seed.speedRank,
-        sizeLabel: seed.sizeLabel,
-        contextWindow: entry.contextWindow ?? null,
-        vision: entry.vision ? 1 : 0,
-        source: DISCOVERED_MODEL_SOURCE,
-      });
-      const row = selectId.get(platform, entry.modelId) as { id: number };
-      if (!inChain.get(row.id)) {
-        addToChain.run(row.id, (maxPriority.get() as { m: number }).m + 1);
+      db.run(`
+      INSERT INTO models
+        (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
+         rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, key_id,
+         supports_tools, supports_vision, source, endpoint_scope)
+      VALUES ($1, $2, $2, $3, $4, $5,
+         NULL, NULL, NULL, NULL, '', $6, 1, NULL,
+         1, $7, $8, '')
+      ON CONFLICT(platform, model_id, endpoint_scope) DO NOTHING
+    `, [platform, entry.modelId, seed.intelligenceRank, seed.speedRank, seed.sizeLabel, entry.contextWindow ?? null, entry.vision ? 1 : 0, DISCOVERED_MODEL_SOURCE]);
+      const row = db.get("SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ''", [platform, entry.modelId]) as { id: number };
+      if (!db.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [row.id])) {
+        addToChain.run(row.id, (db.get('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config') as { m: number }).m + 1);
       }
       ensureModelInProfiles(db, row.id);
       result.created.push(entry.modelId);
@@ -263,12 +248,12 @@ export interface BuiltinDiscoveryResult {
 }
 
 function usableKeys(db: Db, platform: string): KeyRow[] {
-  return db.prepare(`
+  return db.all(`
     SELECT id, platform, encrypted_key, iv, auth_tag, proxy_encrypted, proxy_iv, proxy_auth_tag
       FROM api_keys
      WHERE platform = ? AND enabled = 1 AND status != 'invalid'
      ORDER BY CASE status WHEN 'healthy' THEN 0 ELSE 1 END, id
-  `).all(platform) as KeyRow[];
+  `, [platform]) as KeyRow[];
 }
 
 /**
@@ -336,7 +321,7 @@ export function triggerBuiltinModelDiscovery(
   const pending = inFlight.get(platform);
   if (pending) return pending;
   if (reason === 'healthy') {
-    const hasModels = db.prepare('SELECT 1 FROM models WHERE platform = ? LIMIT 1').get(platform);
+    const hasModels = db.get('SELECT 1 FROM models WHERE platform = ? LIMIT 1', [platform]);
     if (hasModels) return null;
     const last = lastEventRunMs.get(platform) ?? 0;
     if (Date.now() - last < EVENT_MIN_GAP_MS) return null;

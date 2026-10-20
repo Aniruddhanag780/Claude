@@ -28,11 +28,11 @@ export function reserveProviderCredential(
 ): { credential: ReservedProviderCredential | null; budgetBlocked: boolean } {
   if (row.platform === 'custom' && row.key_id == null) return { credential: null, budgetBlocked: false };
   const bound = row.key_id != null;
-  const keys = getDb().prepare(`
+  const keys = getDb().all(`
     SELECT id, encrypted_key, iv, auth_tag, base_url FROM api_keys
     WHERE ${bound ? 'id' : 'platform'} = ? AND enabled = 1
       AND status IN ('healthy', 'unknown') ORDER BY RANDOM()
-  `).all(bound ? row.key_id : row.platform) as KeyRow[];
+  `, [bound ? row.key_id : row.platform]) as KeyRow[];
   let budgetBlocked = false;
   for (const keyRow of keys) {
     if (skip(keyRow.id)) continue;

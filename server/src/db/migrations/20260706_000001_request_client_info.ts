@@ -9,25 +9,25 @@ import type { Db } from '../types.js';
  * Guarded like the baseline's column adds: catalog-sync re-runs migrations
  * over a live schema, so ALTERs must be idempotent.
  */
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
+  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
   return columns.some(col => col.name === column);
 }
 
-export function up(db: Db): void {
-  if (!hasColumn(db, 'requests', 'client_ip')) {
-    db.prepare('ALTER TABLE requests ADD COLUMN client_ip TEXT').run();
+export async function up(db: Db): Promise<void> {
+  if (!await hasColumn(db, 'requests', 'client_ip')) {
+    await db.run('ALTER TABLE requests ADD COLUMN client_ip TEXT');
   }
-  if (!hasColumn(db, 'requests', 'client_user_agent')) {
-    db.prepare('ALTER TABLE requests ADD COLUMN client_user_agent TEXT').run();
+  if (!await hasColumn(db, 'requests', 'client_user_agent')) {
+    await db.run('ALTER TABLE requests ADD COLUMN client_user_agent TEXT');
   }
 }
 
-export function down(db: Db): void {
-  if (hasColumn(db, 'requests', 'client_user_agent')) {
-    db.prepare('ALTER TABLE requests DROP COLUMN client_user_agent').run();
+export async function down(db: Db): Promise<void> {
+  if (await hasColumn(db, 'requests', 'client_user_agent')) {
+    await db.run('ALTER TABLE requests DROP COLUMN client_user_agent');
   }
-  if (hasColumn(db, 'requests', 'client_ip')) {
-    db.prepare('ALTER TABLE requests DROP COLUMN client_ip').run();
+  if (await hasColumn(db, 'requests', 'client_ip')) {
+    await db.run('ALTER TABLE requests DROP COLUMN client_ip');
   }
 }

@@ -38,9 +38,7 @@ const FETCH_TIMEOUT_MS = 30_000;
 const MAX_DOCUMENTS = 100;
 
 function candidates(): RerankCandidate[] {
-  const rows = getDb().prepare(
-    "SELECT id, platform, base_url, encrypted_key, iv, auth_tag FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') AND platform IN ('cohere', 'custom') ORDER BY platform, created_at",
-  ).all() as { id: number; platform: string; base_url: string | null; encrypted_key: string; iv: string; auth_tag: string }[];
+  const rows = getDb().all("SELECT id, platform, base_url, encrypted_key, iv, auth_tag FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') AND platform IN ('cohere', 'custom') ORDER BY platform, created_at") as { id: number; platform: string; base_url: string | null; encrypted_key: string; iv: string; auth_tag: string }[];
   const out: RerankCandidate[] = [];
   for (const row of rows) {
     if (row.platform === 'custom' && !row.base_url) continue;

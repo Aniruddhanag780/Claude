@@ -208,9 +208,7 @@ function throwIfClientGone(signal?: AbortSignal): void {
 }
 
 export function listMediaModels(modality: MediaModality): MediaModelRow[] {
-  return getDb()
-    .prepare('SELECT * FROM media_models WHERE modality = ? AND enabled = 1 ORDER BY priority, id')
-    .all(modality) as MediaModelRow[];
+  return getDb().all('SELECT * FROM media_models WHERE modality = ? AND enabled = 1 ORDER BY priority, id', [modality]) as MediaModelRow[];
 }
 
 /** All media models (every media modality, including disabled) for the
@@ -218,9 +216,7 @@ export function listMediaModels(modality: MediaModality): MediaModelRow[] {
  *  'search' / 'decision') but have their own pages and APIs, so they are left
  *  out here. */
 export function listAllMediaModels(): MediaModelRow[] {
-  return getDb()
-    .prepare("SELECT * FROM media_models WHERE modality NOT IN ('search', 'decision') ORDER BY modality, priority, id")
-    .all() as MediaModelRow[];
+  return getDb().all("SELECT * FROM media_models WHERE modality NOT IN ('search', 'decision') ORDER BY modality, priority, id") as MediaModelRow[];
 }
 
 interface ProviderCredential {
@@ -814,10 +810,8 @@ function resolveMediaChain(model: string | undefined, modality: MediaModality): 
 function logMedia(row: Pick<MediaModelRow, 'platform' | 'model_id' | 'modality'>, keyId: number | null, status: 'success' | 'error', latencyMs: number, error: string | null): void {
   try {
     const client = getClientContext();
-    getDb()
-      .prepare(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
-                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)`)
-      .run(row.platform, row.model_id, keyId, status, latencyMs, error, row.modality, client.ip, client.userAgent, client.agent);
+    getDb().run(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)`, [row.platform, row.model_id, keyId, status, latencyMs, error, row.modality, client.ip, client.userAgent, client.agent]);
   } catch (e) {
     console.error('Failed to log media request:', e);
   }

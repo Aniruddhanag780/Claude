@@ -3,7 +3,7 @@
 //
 // DOWN: reversible
 //
-// The failover-ladder drill-down (issue #335) renders WHY each hop failed, but
+// The failover-ladder drill-await down(issue #335) renders WHY each hop failed, but
 // the `outcome` class alone loses the provider's actual words ("rate limit
 // reached for llama-3.3-70b, retry in 7m12s" collapses to 'rate_limited').
 // This nullable column stores a short, REDACTED summary of the per-attempt
@@ -15,19 +15,19 @@
 
 import type { Db } from '../types.js';
 
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
+  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
   return columns.some((candidate) => candidate.name === column);
 }
 
-export function up(db: Db): void {
-  if (!hasColumn(db, 'request_attempts', 'error_summary')) {
-    db.prepare('ALTER TABLE request_attempts ADD COLUMN error_summary TEXT').run();
+export async function up(db: Db): Promise<void> {
+  if (!await hasColumn(db, 'request_attempts', 'error_summary')) {
+    await db.run('ALTER TABLE request_attempts ADD COLUMN error_summary TEXT');
   }
 }
 
-export function down(db: Db): void {
-  if (hasColumn(db, 'request_attempts', 'error_summary')) {
-    db.prepare('ALTER TABLE request_attempts DROP COLUMN error_summary').run();
+export async function down(db: Db): Promise<void> {
+  if (await hasColumn(db, 'request_attempts', 'error_summary')) {
+    await db.run('ALTER TABLE request_attempts DROP COLUMN error_summary');
   }
 }

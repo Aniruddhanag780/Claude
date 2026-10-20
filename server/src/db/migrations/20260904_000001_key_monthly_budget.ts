@@ -1,8 +1,8 @@
 import type { Db } from '../types.js';
 
-/** Guard so the migration can be re-run safely (roundtrip/catalog-sync tests re-run up()). */
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+/** Guard so the migration can be re-run safely (roundtrip/catalog-sync tests re-run await up()). */
+async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
+  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
   return columns.some(col => col.name === column);
 }
 
@@ -15,20 +15,20 @@ function hasColumn(db: Db, table: string, column: string): boolean {
  * the per-key vocabulary already used for daily limits in ratelimit.ts; the
  * month is derived from requests.created_at (UTC), never wall-clock local.
  */
-export function up(db: Db): void {
-  if (!hasColumn(db, 'api_keys', 'monthly_request_cap')) {
-    db.prepare('ALTER TABLE api_keys ADD COLUMN monthly_request_cap INTEGER NOT NULL DEFAULT 0').run();
+export async function up(db: Db): Promise<void> {
+  if (!await hasColumn(db, 'api_keys', 'monthly_request_cap')) {
+    await db.run('ALTER TABLE api_keys ADD COLUMN monthly_request_cap INTEGER NOT NULL DEFAULT 0');
   }
-  if (!hasColumn(db, 'api_keys', 'monthly_token_cap')) {
-    db.prepare('ALTER TABLE api_keys ADD COLUMN monthly_token_cap INTEGER NOT NULL DEFAULT 0').run();
+  if (!await hasColumn(db, 'api_keys', 'monthly_token_cap')) {
+    await db.run('ALTER TABLE api_keys ADD COLUMN monthly_token_cap INTEGER NOT NULL DEFAULT 0');
   }
 }
 
-export function down(db: Db): void {
+export async function down(db: Db): Promise<void> {
   for (const column of ['monthly_request_cap', 'monthly_token_cap']) {
-    if (hasColumn(db, 'api_keys', column)) {
+    if (await hasColumn(db, 'api_keys', column)) {
       try {
-        db.prepare(`ALTER TABLE api_keys DROP COLUMN ${column}`).run();
+        await db.run(`ALTER TABLE api_keys DROP COLUMN ${column}`);
       } catch {
         // best-effort: some builds pin the table; leaving the column harms nobody
       }

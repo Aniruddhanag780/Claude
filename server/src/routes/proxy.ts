@@ -342,7 +342,7 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
   // as an `auto:<name>` model so a client can pick a specific fallback chain
   // per request (auto:my-group) instead of only the active one. Available iff
   // at least one model in that profile's chain can serve a request right now.
-  const profileRows = getDb().prepare(`
+  const profileRows = getDb().all(`
     SELECT p.id, p.name,
            EXISTS (
              SELECT 1
@@ -362,7 +362,7 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
     FROM profiles p
     WHERE p.type = 'custom'
     ORDER BY p.sort_order, p.id
-  `).all() as { id: number; name: string; usable: number; max_ctx: number | null }[];
+  `) as { id: number; name: string; usable: number; max_ctx: number | null }[];
 
   // Claude-family discovery entries (#880). The Anthropic-shaped GET /v1/models
   // in routes/anthropic.ts already lists one id per Claude family so clients
@@ -1293,7 +1293,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
       groupChain = resolveModelGroupCandidates(members, resolved!.demotedDbIds);
       if (groupChain.length === 0) {
         const placeholders = members.map(() => '?').join(',');
-        const anyEnabled = db.prepare(`SELECT 1 FROM models WHERE id IN (${placeholders}) AND enabled = 1 LIMIT 1`).get(...members);
+        const anyEnabled = db.get(`SELECT 1 FROM models WHERE id IN (${placeholders}) AND enabled = 1 LIMIT 1`, [...members]);
         // Honest statuses: a model whose providers exist but have no usable key
         // is a server-side configuration gap (503), not a client mistake; a
         // disabled/unknown model is a 404 model_not_found (OpenAI semantics).
@@ -1319,11 +1319,11 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
         return;
       }
     } else {
-      const enabled = db.prepare('SELECT id FROM models WHERE model_id = ? AND enabled = 1').get(requestedModel) as { id: number } | undefined;
+      const enabled = db.get('SELECT id FROM models WHERE model_id = ? AND enabled = 1', [requestedModel]) as { id: number } | undefined;
       if (enabled) {
         preferredModel = enabled.id;
       } else {
-        const disabled = db.prepare('SELECT id FROM models WHERE model_id = ?').get(requestedModel) as { id: number } | undefined;
+        const disabled = db.get('SELECT id FROM models WHERE model_id = ?', [requestedModel]) as { id: number } | undefined;
         const reason = disabled ? 'is disabled' : 'is not in the catalog';
         res.status(404).json({
           error: {
@@ -2219,7 +2219,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // (chain-disabled / no key) — the latter is a server-side
         // configuration gap, so it renders an honest 503.
         const placeholders = members.map(() => '?').join(',');
-        const anyEnabled = db.prepare(`SELECT 1 FROM models WHERE id IN (${placeholders}) AND enabled = 1 LIMIT 1`).get(...members);
+        const anyEnabled = db.get(`SELECT 1 FROM models WHERE id IN (${placeholders}) AND enabled = 1 LIMIT 1`, [...members]);
         if (anyEnabled) {
           res.status(503).json({
             error: {
@@ -2249,11 +2249,11 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       preferredModel = (sticky != null && groupChain.some(r => r.model_db_id === sticky)) ? sticky : undefined;
     } else {
       // Unify OFF, or an id that isn't in the catalog: legacy single-row pin.
-      const enabled = db.prepare('SELECT id FROM models WHERE model_id = ? AND enabled = 1').get(requestedModel) as { id: number } | undefined;
+      const enabled = db.get('SELECT id FROM models WHERE model_id = ? AND enabled = 1', [requestedModel]) as { id: number } | undefined;
       if (enabled) {
         preferredModel = enabled.id;
       } else {
-        const disabled = db.prepare('SELECT id FROM models WHERE model_id = ?').get(requestedModel) as { id: number } | undefined;
+        const disabled = db.get('SELECT id FROM models WHERE model_id = ?', [requestedModel]) as { id: number } | undefined;
         const reason = disabled ? 'is disabled' : 'is not in the catalog';
         res.status(404).json({
           error: {

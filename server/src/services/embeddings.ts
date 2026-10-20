@@ -75,9 +75,7 @@ async function upstreamEmbeddingsError(r: Response): Promise<EmbeddingsError> {
 }
 
 export function listEmbeddingModels(): EmbeddingModelRow[] {
-  return getDb().prepare(
-    'SELECT * FROM embedding_models ORDER BY family, priority',
-  ).all() as EmbeddingModelRow[];
+  return getDb().all('SELECT * FROM embedding_models ORDER BY family, priority') as EmbeddingModelRow[];
 }
 
 export function getDefaultFamily(): string {
@@ -207,13 +205,13 @@ export interface CustomEmbeddingRegistration {
  * the caller has to pick a new family name instead.
  */
 export function registerCustomEmbeddingModel(db: Db, reg: CustomEmbeddingRegistration): { modelDbId: number; created: boolean } {
-  const sibling = db.prepare(`
+  const sibling = db.get(`
     SELECT dimensions
       FROM embedding_models
      WHERE family = ?
        AND NOT (platform = 'custom' AND model_id = ?)
      LIMIT 1
-  `).get(reg.family, reg.modelId) as { dimensions: number } | undefined;
+  `, [reg.family, reg.modelId]) as { dimensions: number } | undefined;
   if (sibling && sibling.dimensions !== reg.dimensions) {
     throw new EmbeddingsError(
       `Embedding family '${reg.family}' is ${sibling.dimensions} dimensions, but '${reg.modelId}' returned ${reg.dimensions}. Use a new family name.`,
@@ -222,27 +220,26 @@ export function registerCustomEmbeddingModel(db: Db, reg: CustomEmbeddingRegistr
   }
 
   const endpointKeyIds = customEndpointKeyIds(db, reg.keyId);
-  const existingModel = db.prepare(`
+  const existingModel = db.get(`
     SELECT id, priority, key_id
       FROM embedding_models
      WHERE platform = 'custom' AND model_id = ?
      LIMIT 1
-  `).get(reg.modelId) as { id: number; priority: number; key_id: number | null } | undefined;
+  `, [reg.modelId]) as { id: number; priority: number; key_id: number | null } | undefined;
   // A model already on this endpoint keeps the key it has; only a move to a
   // different endpoint re-binds it.
   const bindKeyId = existingModel?.key_id != null && endpointKeyIds.has(existingModel.key_id)
     ? existingModel.key_id
     : reg.keyId;
   const priority = existingModel?.priority ?? (
-    (db.prepare('SELECT COALESCE(MAX(priority), 0) AS maxPriority FROM embedding_models WHERE family = ?')
-      .get(reg.family) as { maxPriority: number }).maxPriority + 1
+    (db.get('SELECT COALESCE(MAX(priority), 0) AS maxPriority FROM embedding_models WHERE family = ?', [reg.family]) as { maxPriority: number }).maxPriority + 1
   );
 
   // `display_name` is optional: a new model takes its id, and a model already
   // on record keeps the name it has instead of being reset by a submit that
   // simply left the field blank (#704).
   if (existingModel) {
-    db.prepare(`
+    db.run(`
       UPDATE embedding_models
          SET family = ?,
              display_name = COALESCE(?, display_name),
@@ -253,15 +250,15 @@ export function registerCustomEmbeddingModel(db: Db, reg: CustomEmbeddingRegistr
              quota_label = ?,
              key_id = ?
        WHERE id = ?
-    `).run(reg.family, reg.displayName, reg.dimensions, reg.maxInputTokens, priority, reg.quotaLabel, bindKeyId, existingModel.id);
+    `, [reg.family, reg.displayName, reg.dimensions, reg.maxInputTokens, priority, reg.quotaLabel, bindKeyId, existingModel.id]);
     return { modelDbId: existingModel.id, created: false };
   }
 
-  const model = db.prepare(`
+  const model = db.run(`
     INSERT INTO embedding_models
       (family, platform, model_id, display_name, dimensions, max_input_tokens, priority, enabled, quota_label, key_id)
     VALUES (?, 'custom', ?, ?, ?, ?, ?, 1, ?, ?)
-  `).run(reg.family, reg.modelId, reg.displayName ?? reg.modelId, reg.dimensions, reg.maxInputTokens, priority, reg.quotaLabel, bindKeyId);
+  `, [reg.family, reg.modelId, reg.displayName ?? reg.modelId, reg.dimensions, reg.maxInputTokens, priority, reg.quotaLabel, bindKeyId]);
   return { modelDbId: Number(model.lastInsertRowid), created: true };
 }
 
@@ -354,10 +351,10 @@ function logEmbeddingRequest(
 ): void {
   try {
     const client = getClientContext();
-    getDb().prepare(`
+    getDb().run(`
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
       VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'embedding', ?, ?, ?)
-    `).run(row.platform, row.model_id, keyId, status, inputTokens, latencyMs, error, client.ip, client.userAgent, client.agent);
+    `, [row.platform, row.model_id, keyId, status, inputTokens, latencyMs, error, client.ip, client.userAgent, client.agent]);
   } catch (e) {
     console.error('Failed to log embedding request:', e);
   }
@@ -380,9 +377,7 @@ export async function runEmbeddings(model: string | undefined, inputs: string[],
     );
   }
 
-  const chain = (getDb().prepare(
-    'SELECT * FROM embedding_models WHERE family = ? AND enabled = 1 ORDER BY priority',
-  ).all(family) as EmbeddingModelRow[]);
+  const chain = (getDb().all('SELECT * FROM embedding_models WHERE family = ? AND enabled = 1 ORDER BY priority', [family]) as EmbeddingModelRow[]);
   if (chain.length === 0) {
     throw new EmbeddingsError(`No enabled providers for embedding family '${family}'.`, 503);
   }

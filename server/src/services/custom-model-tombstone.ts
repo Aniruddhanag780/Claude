@@ -20,12 +20,12 @@ export function recordCustomModelTombstone(
   endpointScope: string,
   modelId: string,
 ): void {
-  db.prepare(`
+  db.run(`
     INSERT INTO custom_model_tombstones (endpoint_scope, model_id)
     VALUES (?, ?)
     ON CONFLICT(endpoint_scope, model_id)
     DO UPDATE SET created_at = datetime('now')
-  `).run(endpointScope, modelId);
+  `, [endpointScope, modelId]);
 }
 
 export function isCustomModelTombstoned(
@@ -33,9 +33,7 @@ export function isCustomModelTombstoned(
   endpointScope: string,
   modelId: string,
 ): boolean {
-  return db.prepare(
-    'SELECT 1 FROM custom_model_tombstones WHERE endpoint_scope = ? AND model_id = ?',
-  ).get(endpointScope, modelId) !== undefined;
+  return db.get('SELECT 1 FROM custom_model_tombstones WHERE endpoint_scope = ? AND model_id = ?', [endpointScope, modelId]) !== undefined;
 }
 
 export function clearCustomModelTombstone(
@@ -43,6 +41,5 @@ export function clearCustomModelTombstone(
   endpointScope: string,
   modelId: string,
 ): void {
-  db.prepare('DELETE FROM custom_model_tombstones WHERE endpoint_scope = ? AND model_id = ?')
-    .run(endpointScope, modelId);
+  db.run('DELETE FROM custom_model_tombstones WHERE endpoint_scope = ? AND model_id = ?', [endpointScope, modelId]);
 }

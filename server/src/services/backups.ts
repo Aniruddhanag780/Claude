@@ -78,7 +78,7 @@ function isBackupableTable(name: string): boolean {
 
 /** Every table a dump may contain, in a stable order. */
 export function listTables(db: Db = getDb()): string[] {
-  const rows = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[];
+  const rows = db.all("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name") as { name: string }[];
   return rows.map((row) => row.name).filter(isBackupableTable);
 }
 
@@ -175,7 +175,7 @@ export function writeBackupSchedule(schedule: BackupSchedule): BackupSchedule {
  *  different schema silently drops columns added since, or fails halfway; the
  *  header lets restore refuse instead. */
 export function schemaVersion(db: Db): string {
-  const rows = db.prepare('SELECT filename FROM migrations ORDER BY filename').all() as { filename: string }[];
+  const rows = db.all('SELECT filename FROM migrations ORDER BY filename') as { filename: string }[];
   const latest = rows.length > 0 ? rows[rows.length - 1].filename : '(none)';
   return `${rows.length} migrations, latest ${latest}`;
 }
@@ -239,14 +239,14 @@ function sqliteEscape(value: unknown): string {
 }
 
 function sqliteCreateTable(db: Db, table: string): string | null {
-  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) as { sql: string } | undefined;
+  const row = db.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", [table]) as { sql: string } | undefined;
   if (!row?.sql) return null;
   return `${row.sql.replace(/^CREATE TABLE/i, 'CREATE TABLE IF NOT EXISTS')};`;
 }
 
 function sqliteDumpTable(db: Db, table: string): string {
-  const columns = (db.prepare(`PRAGMA table_info("${table}")`).all() as { name: string }[]).map((c) => c.name);
-  const rows = db.prepare(`SELECT * FROM "${table}"`).all() as Record<string, unknown>[];
+  const columns = (db.all(`PRAGMA table_info("${table}")`) as { name: string }[]).map((c) => c.name);
+  const rows = db.all(`SELECT * FROM "${table}"`) as Record<string, unknown>[];
   const lines: string[] = [`DELETE FROM "${table}";`];
   if (rows.length > 0) {
     const columnList = columns.map((c) => `"${c}"`).join(', ');
@@ -300,9 +300,7 @@ export function createBackup(
   restrictToOwner(filepath);
 
   const filesize = fs.statSync(filepath).size;
-  const result = db.prepare(
-    'INSERT INTO backups (filename, filepath, filesize, is_full, source, created_at, tables_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
-  ).run(filename, filepath, filesize, isFull ? 1 : 0, source, createdAt, JSON.stringify(tables));
+  const result = db.run('INSERT INTO backups (filename, filepath, filesize, is_full, source, created_at, tables_json) VALUES (?, ?, ?, ?, ?, ?, ?)', [filename, filepath, filesize, isFull ? 1 : 0, source, createdAt, JSON.stringify(tables)]);
 
   return { id: Number(result.lastInsertRowid), filename, filesize, isFull, source, createdAt, tables };
 }
@@ -349,13 +347,13 @@ function toMeta(row: BackupRow): BackupMeta {
 export function listBackups(db: Db, opts: { page?: number; pageSize?: number } = {}): { items: BackupMeta[]; total: number } {
   const page = Math.max(1, opts.page ?? 1);
   const pageSize = Math.min(200, Math.max(1, opts.pageSize ?? 20));
-  const total = (db.prepare('SELECT COUNT(*) AS n FROM backups').get() as { n: number }).n;
-  const rows = db.prepare(`SELECT ${SELECT_COLUMNS} FROM backups ORDER BY id DESC LIMIT ? OFFSET ?`).all(pageSize, (page - 1) * pageSize) as BackupRow[];
+  const total = (db.get('SELECT COUNT(*) AS n FROM backups') as { n: number }).n;
+  const rows = db.all(`SELECT ${SELECT_COLUMNS} FROM backups ORDER BY id DESC LIMIT ? OFFSET ?`, [pageSize, (page - 1) * pageSize]) as BackupRow[];
   return { items: rows.map(toMeta), total };
 }
 
 function readBackupRecord(db: Db, id: number): BackupRow {
-  const row = db.prepare(`SELECT ${SELECT_COLUMNS} FROM backups WHERE id = ?`).get(id) as BackupRow | undefined;
+  const row = db.get(`SELECT ${SELECT_COLUMNS} FROM backups WHERE id = ?`, [id]) as BackupRow | undefined;
   if (!row) throw httpError('Backup not found', 404);
   return row;
 }
@@ -391,7 +389,7 @@ export function deleteBackup(db: Db, id: number): void {
   } catch {
     // Metadata removal below still succeeds; a missing file is not fatal.
   }
-  db.prepare('DELETE FROM backups WHERE id = ?').run(id);
+  db.run('DELETE FROM backups WHERE id = ?', [id]);
 }
 
 /** Statements naming a table the dump policy excludes. A dump this server
@@ -474,7 +472,7 @@ export function restoreBackup(db: Db, id: number): RestoreResult {
       // the existing ledger remains authoritative. Keep DDL in this same
       // transaction so a failed restore also restores the trigger.
       const usageTrigger = header.tables.includes('requests')
-        ? db.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'requests_key_monthly_usage'").get() as { sql: string } | undefined
+        ? db.get("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'requests_key_monthly_usage'") as { sql: string } | undefined
         : undefined;
       if (usageTrigger) db.exec('DROP TRIGGER requests_key_monthly_usage');
       db.exec(sql);

@@ -612,9 +612,7 @@ function proxyProbeTarget(): string {
 
   let platforms: { platform: string }[] = [];
   try {
-    platforms = getDb().prepare(
-      `SELECT DISTINCT platform FROM api_keys WHERE enabled = 1 ORDER BY platform`,
-    ).all() as { platform: string }[];
+    platforms = getDb().all(`SELECT DISTINCT platform FROM api_keys WHERE enabled = 1 ORDER BY platform`) as { platform: string }[];
   } catch {
     return DEFAULT_PROXY_PROBE_TARGET;
   }

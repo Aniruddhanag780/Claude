@@ -6,17 +6,17 @@
 
 import type { Db } from '../types.js';
 
-export function up(db: Db): void {
-  db.exec(`
+export async function up(db: Db): Promise<void> {
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS custom_model_tombstones (
       endpoint_scope TEXT NOT NULL,
       model_id TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')),
       PRIMARY KEY (endpoint_scope, model_id)
     );
   `);
 }
 
-export function down(db: Db): void {
-  db.exec('DROP TABLE IF EXISTS custom_model_tombstones;');
+export async function down(db: Db): Promise<void> {
+  await db.exec('DROP TABLE IF EXISTS custom_model_tombstones;');
 }

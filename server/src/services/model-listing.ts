@@ -70,11 +70,11 @@ export function buildModelListing(): ModelListing {
     // Unify ON: one entry per logical model group. Pull per-row availability +
     // context keyed by db id, then aggregate over each group's members.
     type AvailRow = { id: number; platform: string; intelligence_rank: number; context_window: number | null; enabled: number; available: number; supports_tools: number };
-    const rows = db.prepare(`
+    const rows = db.all(`
       SELECT m.id, m.platform, m.intelligence_rank, m.context_window, m.supports_tools,
              m.enabled AS enabled, ${availableExpr} AS available
       FROM models m
-    `).all() as AvailRow[];
+    `) as AvailRow[];
     const byId = new Map(rows.map(r => [r.id, r]));
     allListed = getModelGroups().map(g => {
       const infos = g.members.map(m => byId.get(m.model_db_id)).filter(Boolean) as AvailRow[];
@@ -98,7 +98,7 @@ export function buildModelListing(): ModelListing {
   } else {
     // Unify OFF: one entry per model_id (dedup picks the available, smartest
     // representative row).
-    const models = db.prepare(`
+    const models = db.all(`
       SELECT platform, model_id, display_name, context_window, enabled, available, intelligence_rank, id, supports_tools
       FROM (
         SELECT m.platform, m.model_id, m.display_name, m.context_window, m.intelligence_rank, m.id, m.supports_tools,
@@ -111,7 +111,7 @@ export function buildModelListing(): ModelListing {
         FROM models m
       )
       WHERE rn = 1
-    `).all() as (ModelListRow & { intelligence_rank: number; id: number; supports_tools: number })[];
+    `) as (ModelListRow & { intelligence_rank: number; id: number; supports_tools: number })[];
     allListed = models.map(m => ({
       id: m.model_id, name: m.display_name, ownedBy: m.platform,
       available: m.available, enabled: m.enabled, contextWindow: m.context_window,

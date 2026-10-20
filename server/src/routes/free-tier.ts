@@ -109,13 +109,13 @@ freeTierRouter.get('/', (_req: Request, res: Response) => {
   // Only platforms with an enabled key have a free tier to speak of — same
   // filter the stacked bar uses for its per-model breakdown.
   const platformSet = new Set(
-    (db.prepare('SELECT DISTINCT platform FROM api_keys WHERE enabled = 1').all() as { platform: string }[])
+    (db.all('SELECT DISTINCT platform FROM api_keys WHERE enabled = 1') as { platform: string }[])
       .map(p => p.platform),
   );
   // Usable keys per platform: a documented budget is per account, so two usable
   // accounts really are twice the pool (fallback.ts uses the same filter).
   const keyCountMap = new Map(
-    (db.prepare("SELECT platform, COUNT(*) as count FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform").all() as { platform: string; count: number }[])
+    (db.all("SELECT platform, COUNT(*) as count FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; count: number }[])
       .map(k => [k.platform, k.count]),
   );
 
@@ -124,18 +124,18 @@ freeTierRouter.get('/', (_req: Request, res: Response) => {
   // marker — a switched-off row still consumes the same provider allowance.
   const activeProfileId = getActiveProfileId(db);
   const rows = (activeProfileId
-    ? db.prepare(`
+    ? db.all(`
         SELECT m.platform, m.model_id, m.monthly_token_budget, pm.enabled AS chain_enabled
         FROM profile_models pm
         JOIN models m ON m.id = pm.model_db_id
         WHERE pm.profile_id = ? AND m.enabled = 1
-      `).all(activeProfileId)
-    : db.prepare(`
+      `, [activeProfileId])
+    : db.all(`
         SELECT m.platform, m.model_id, m.monthly_token_budget, COALESCE(fc.enabled, 1) AS chain_enabled
         FROM models m
         LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
         WHERE m.enabled = 1
-      `).all()) as { platform: string; model_id: string; monthly_token_budget: string; chain_enabled: number }[];
+      `)) as { platform: string; model_id: string; monthly_token_budget: string; chain_enabled: number }[];
 
   const pools = new Map<string, PoolAgg>();
   for (const row of rows) {

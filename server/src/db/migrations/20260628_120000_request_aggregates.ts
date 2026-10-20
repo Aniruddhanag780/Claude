@@ -15,10 +15,11 @@ import type { Db } from '../types.js';
  * this migration. Lifetime counters start counting from "now" — rows pruned
  * before this migration are unrecoverable from the aggregate.
  */
-function tableExists(db: Db, name: string): boolean {
-  return !!db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
-    .get(name);
+async function tableExists(db: Db, name: string): Promise<boolean> {
+  return !!await db.get(
+    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name = ?",
+    [name],
+  );
 }
 
 function hourKey(createdAt: string): string {
@@ -26,12 +27,12 @@ function hourKey(createdAt: string): string {
   return createdAt.slice(0, 13) + ':00:00';
 }
 
-export function up(db: Db): void {
+export async function up(db: Db): Promise<void> {
   // Hourly aggregate table. `hour` is the primary key so the same-hour upsert
   // is a single-row write. We never update tokens on a partial failure, so
   // success/error counts and token sums stay consistent.
-  if (!tableExists(db, 'request_hourly')) {
-    db.prepare(`
+  if (!await tableExists(db, 'request_hourly')) {
+    await db.run(`
       CREATE TABLE request_hourly (
         hour TEXT PRIMARY KEY,
         total_requests INTEGER NOT NULL DEFAULT 0,
@@ -40,15 +41,15 @@ export function up(db: Db): void {
         input_tokens INTEGER NOT NULL DEFAULT 0,
         output_tokens INTEGER NOT NULL DEFAULT 0
       )
-    `).run();
-    db.prepare(`CREATE INDEX idx_request_hourly_hour ON request_hourly(hour)`).run();
+    `);
+    await db.run(`CREATE INDEX idx_request_hourly_hour ON request_hourly(hour)`);
   }
 
   // Backfill from any surviving raw rows. This is best-effort: rows pruned
   // before this migration ran are gone for good from the aggregate, but the
   // lifetime counters below will still be seeded with current totals.
-  if (tableExists(db, 'requests')) {
-    const bucket = db.prepare(`
+  if (await tableExists(db, 'requests')) {
+    const bucket = await db.all(`
       SELECT
         substr(created_at, 1, 13) || ':00:00' AS hour,
         COUNT(*) AS total_requests,
@@ -58,7 +59,7 @@ export function up(db: Db): void {
         COALESCE(SUM(output_tokens), 0) AS output_tokens
       FROM requests
       GROUP BY substr(created_at, 1, 13)
-    `).all() as Array<{
+    `) as Array<{
       hour: string;
       total_requests: number;
       success_count: number;
@@ -67,53 +68,61 @@ export function up(db: Db): void {
       output_tokens: number;
     }>;
 
-    const upsert = db.prepare(`
+    const upsert = `
       INSERT INTO request_hourly (hour, total_requests, success_count, error_count, input_tokens, output_tokens)
-      VALUES (@hour, @total_requests, @success_count, @error_count, @input_tokens, @output_tokens)
+      VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(hour) DO UPDATE SET
         total_requests = excluded.total_requests,
         success_count  = excluded.success_count,
         error_count    = excluded.error_count,
         input_tokens   = excluded.input_tokens,
         output_tokens  = excluded.output_tokens
-    `);
+    `;
 
-    const tx = db.transaction((rows: typeof bucket) => {
-      for (const row of rows) upsert.run(row);
+    await db.transaction(async (tx) => {
+      for (const row of bucket) {
+        await tx.run(upsert, [
+          row.hour,
+          row.total_requests,
+          row.success_count,
+          row.error_count,
+          row.input_tokens,
+          row.output_tokens,
+        ]);
+      }
     });
-    tx(bucket);
 
     // Seed lifetime counters from current raw totals. These are best-effort
     // since pruned history is unrecoverable, but they at least match the
     // pre-migration visible total so the UI doesn't reset to 0.
-    const totals = db.prepare(`
+    const totals = await db.get(`
       SELECT
         COUNT(*) AS total_requests,
         COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
         COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
         MIN(created_at) AS first_request_at
       FROM requests
-    `).get() as { total_requests: number; total_input_tokens: number; total_output_tokens: number; first_request_at: string | null };
+    `) as { total_requests: number; total_input_tokens: number; total_output_tokens: number; first_request_at: string | null };
 
-    const setSetting = db.prepare(`
+    const setSetting = `
       INSERT INTO settings (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `);
-    setSetting.run('total_requests', String(totals.total_requests));
-    setSetting.run('total_input_tokens', String(totals.total_input_tokens));
-    setSetting.run('total_output_tokens', String(totals.total_output_tokens));
+    `;
+    await db.run(setSetting, ['total_requests', String(totals.total_requests)]);
+    await db.run(setSetting, ['total_input_tokens', String(totals.total_input_tokens)]);
+    await db.run(setSetting, ['total_output_tokens', String(totals.total_output_tokens)]);
     if (totals.first_request_at) {
-      setSetting.run('first_request_at', totals.first_request_at);
+      await db.run(setSetting, ['first_request_at', totals.first_request_at]);
     }
   }
 }
 
-export function down(db: Db): void {
-  db.prepare(`DROP INDEX IF EXISTS idx_request_hourly_hour`).run();
-  db.prepare(`DROP TABLE IF EXISTS request_hourly`).run();
-  db.prepare(`DELETE FROM settings WHERE key IN (
+export async function down(db: Db): Promise<void> {
+  await db.run(`DROP INDEX IF EXISTS idx_request_hourly_hour`);
+  await db.run(`DROP TABLE IF EXISTS request_hourly`);
+  await db.run(`DELETE FROM settings WHERE key IN (
     'total_requests', 'total_input_tokens', 'total_output_tokens', 'first_request_at'
-  )`).run();
+  )`);
 }
 
 // Exported so tests can reuse the same bucketing logic.

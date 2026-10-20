@@ -41,22 +41,21 @@ export function registerCustomMediaModel(
   const modelId = entry.modelId;
   const quotaLabel = entry.quotaLabel?.trim() || 'custom endpoint';
 
-  const existingModel = db.prepare(`
+  const existingModel = db.get(`
     SELECT id, modality, priority, key_id
       FROM media_models
      WHERE platform = 'custom' AND model_id = ?
      LIMIT 1
-  `).get(modelId) as { id: number; modality: string; priority: number; key_id: number | null } | undefined;
+  `, [modelId]) as { id: number; modality: string; priority: number; key_id: number | null } | undefined;
   const bindKeyId = existingModel?.key_id != null && endpointKeyIds.has(existingModel.key_id)
     ? existingModel.key_id
     : keyId;
   const priority = existingModel && existingModel.modality === entry.modality
     ? existingModel.priority
-    : (db.prepare('SELECT COALESCE(MAX(priority), 0) AS maxPriority FROM media_models WHERE modality = ?')
-      .get(entry.modality) as { maxPriority: number }).maxPriority + 1;
+    : (db.get('SELECT COALESCE(MAX(priority), 0) AS maxPriority FROM media_models WHERE modality = ?', [entry.modality]) as { maxPriority: number }).maxPriority + 1;
 
   if (existingModel) {
-    db.prepare(`
+    db.run(`
       UPDATE media_models
          SET display_name = COALESCE(?, display_name),
              modality = ?,
@@ -65,14 +64,14 @@ export function registerCustomMediaModel(
              quota_label = ?,
              key_id = ?
        WHERE id = ?
-    `).run(entry.displayName, entry.modality, priority, quotaLabel, bindKeyId, existingModel.id);
+    `, [entry.displayName, entry.modality, priority, quotaLabel, bindKeyId, existingModel.id]);
     return { modelDbId: existingModel.id, model: modelId, modality: entry.modality, created: false };
   }
 
-  const model = db.prepare(`
+  const model = db.run(`
     INSERT INTO media_models
       (platform, model_id, display_name, modality, priority, enabled, quota_label, key_id)
     VALUES ('custom', ?, ?, ?, ?, 1, ?, ?)
-  `).run(modelId, entry.displayName ?? modelId, entry.modality, priority, quotaLabel, bindKeyId);
+  `, [modelId, entry.displayName ?? modelId, entry.modality, priority, quotaLabel, bindKeyId]);
   return { modelDbId: Number(model.lastInsertRowid), model: modelId, modality: entry.modality, created: true };
 }

@@ -98,17 +98,17 @@ function listModels(args: Record<string, unknown>): unknown {
 function providerHealth(): unknown {
   const db = getDb();
   const now = Date.now();
-  const keys = db.prepare(`
+  const keys = db.all(`
     SELECT platform, status, COUNT(*) AS n
     FROM api_keys WHERE enabled = 1
     GROUP BY platform, status
-  `).all() as Array<{ platform: string; status: string; n: number }>;
-  const cooldowns = db.prepare(`
+  `) as Array<{ platform: string; status: string; n: number }>;
+  const cooldowns = db.all(`
     SELECT platform, COUNT(*) AS n
     FROM rate_limit_cooldowns WHERE expires_at_ms > ?
     GROUP BY platform
-  `).all(now) as Array<{ platform: string; n: number }>;
-  const availableModels = db.prepare(`
+  `, [now]) as Array<{ platform: string; n: number }>;
+  const availableModels = db.all(`
     SELECT m.platform, COUNT(*) AS n
     FROM models m
     WHERE m.enabled = 1 AND EXISTS (
@@ -117,7 +117,7 @@ function providerHealth(): unknown {
         AND (m.key_id IS NULL OR k.id = m.key_id)
     )
     GROUP BY m.platform
-  `).all() as Array<{ platform: string; n: number }>;
+  `) as Array<{ platform: string; n: number }>;
 
   const byPlatform = new Map<string, { keys: Record<string, number>; active_cooldowns: number; available_models: number }>();
   const entry = (p: string) => {
@@ -133,7 +133,7 @@ function providerHealth(): unknown {
 
 function providerList(): unknown {
   const db = getDb();
-  const keys = db.prepare(`
+  const keys = db.all(`
     SELECT platform, COUNT(*) AS n,
       SUM(CASE WHEN status = 'healthy' THEN 1 ELSE 0 END) AS healthy,
       SUM(CASE WHEN status = 'rate_limited' THEN 1 ELSE 0 END) AS rate_limited,
@@ -142,7 +142,7 @@ function providerList(): unknown {
     FROM api_keys WHERE enabled = 1
     GROUP BY platform
     ORDER BY platform
-  `).all() as Array<{ platform: string; n: number; healthy: number; rate_limited: number; invalid: number; error: number }>;
+  `) as Array<{ platform: string; n: number; healthy: number; rate_limited: number; invalid: number; error: number }>;
   return keys.map(k => ({
     platform: k.platform,
     total_keys: k.n,
@@ -178,20 +178,20 @@ function usageSummary(args: Record<string, unknown>): unknown {
   // routes/analytics.ts.
   const since = new Date(Date.now() - USAGE_RANGES[range] * 3600_000)
     .toISOString().slice(0, 19).replace('T', ' ');
-  const totals = db.prepare(`
+  const totals = db.get(`
     SELECT COALESCE(SUM(total_requests), 0) AS requests,
            COALESCE(SUM(success_count), 0) AS successes,
            COALESCE(SUM(error_count), 0) AS errors,
            COALESCE(SUM(input_tokens), 0) AS input_tokens,
            COALESCE(SUM(output_tokens), 0) AS output_tokens
     FROM request_hourly WHERE hour >= ?
-  `).get(since.slice(0, 13) + ':00:00') as { requests: number; successes: number; errors: number; input_tokens: number; output_tokens: number };
-  const topModels = db.prepare(`
+  `, [since.slice(0, 13) + ':00:00']) as { requests: number; successes: number; errors: number; input_tokens: number; output_tokens: number };
+  const topModels = db.all(`
     SELECT platform, model_id, COUNT(*) AS requests,
            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successes
     FROM requests WHERE created_at >= ?
     GROUP BY platform, model_id ORDER BY requests DESC LIMIT 5
-  `).all(since) as Array<{ platform: string; model_id: string; requests: number; successes: number }>;
+  `, [since]) as Array<{ platform: string; model_id: string; requests: number; successes: number }>;
   return {
     range,
     requests: totals.requests,

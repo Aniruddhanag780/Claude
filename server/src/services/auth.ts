@@ -26,7 +26,7 @@ export function normalizeEmail(email: string): string {
 }
 
 export function userCount(): number {
-  const row = getDb().prepare('SELECT COUNT(*) AS c FROM users').get() as { c: number };
+  const row = getDb().get('SELECT COUNT(*) AS c FROM users') as { c: number };
   return row.c;
 }
 
@@ -34,22 +34,20 @@ export function userCount(): number {
 export function createUser(email: string, password: string): SessionUser {
   const db = getDb();
   const normalized = normalizeEmail(email);
-  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(normalized);
+  const existing = db.get('SELECT id FROM users WHERE email = ?', [normalized]);
   if (existing) {
     const err = new Error('An account with that email already exists') as any;
     err.code = 'email_taken';
     throw err;
   }
-  const result = db.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)')
-    .run(normalized, hashPassword(password));
+  const result = db.run('INSERT INTO users (email, password_hash) VALUES (?, ?)', [normalized, hashPassword(password)]);
   return { userId: Number(result.lastInsertRowid), email: normalized };
 }
 
 /** Verify credentials. Returns the user on success, null on failure. */
 export function verifyCredentials(email: string, password: string): SessionUser | null {
   const db = getDb();
-  const row = db.prepare('SELECT id, email, password_hash FROM users WHERE email = ?')
-    .get(normalizeEmail(email)) as { id: number; email: string; password_hash: string } | undefined;
+  const row = db.get('SELECT id, email, password_hash FROM users WHERE email = ?', [normalizeEmail(email)]) as { id: number; email: string; password_hash: string } | undefined;
   if (!row) return null;
   if (!verifyPassword(password, row.password_hash)) return null;
   return { userId: row.id, email: row.email };
@@ -63,15 +61,14 @@ export function desktopSessionToken(): string {
   if (userCount() === 0) {
     createUser('desktop@localhost', crypto.randomBytes(24).toString('hex'));
   }
-  const first = getDb().prepare('SELECT id FROM users ORDER BY id ASC LIMIT 1').get() as { id: number };
+  const first = getDb().get('SELECT id FROM users ORDER BY id ASC LIMIT 1') as { id: number };
   return createSession(first.id);
 }
 
 /** Mint a session and return the raw token (only the hash is persisted). */
 export function createSession(userId: number): string {
   const token = crypto.randomBytes(32).toString('hex');
-  getDb().prepare('INSERT INTO sessions (token_hash, user_id, expires_at_ms) VALUES (?, ?, ?)')
-    .run(sha256(token), userId, Date.now() + SESSION_TTL_MS);
+  getDb().run('INSERT INTO sessions (token_hash, user_id, expires_at_ms) VALUES (?, ?, ?)', [sha256(token), userId, Date.now() + SESSION_TTL_MS]);
   return token;
 }
 
@@ -79,14 +76,14 @@ export function createSession(userId: number): string {
 export function validateSession(token: string | undefined | null): SessionUser | null {
   if (!token) return null;
   const db = getDb();
-  const row = db.prepare(`
+  const row = db.get(`
     SELECT s.user_id, s.expires_at_ms, u.email
     FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ?
-  `).get(sha256(token)) as { user_id: number; expires_at_ms: number; email: string } | undefined;
+  `, [sha256(token)]) as { user_id: number; expires_at_ms: number; email: string } | undefined;
   if (!row) return null;
   if (row.expires_at_ms < Date.now()) {
-    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
+    db.run('DELETE FROM sessions WHERE token_hash = ?', [sha256(token)]);
     return null;
   }
   return { userId: row.user_id, email: row.email };
@@ -94,25 +91,24 @@ export function validateSession(token: string | undefined | null): SessionUser |
 
 export function deleteSession(token: string | undefined | null): void {
   if (!token) return;
-  getDb().prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
+  getDb().run('DELETE FROM sessions WHERE token_hash = ?', [sha256(token)]);
 }
 
 /** Update the email of the authenticated user after verifying the current password. Throws { code: 'email_taken' } on conflict. */
 export function updateEmail(userId: number, currentPassword: string, newEmail: string): boolean {
   const db = getDb();
-  const row = db.prepare('SELECT password_hash FROM users WHERE id = ?')
-    .get(userId) as { password_hash: string } | undefined;
+  const row = db.get('SELECT password_hash FROM users WHERE id = ?', [userId]) as { password_hash: string } | undefined;
   if (!row) return false;
   if (!verifyPassword(currentPassword, row.password_hash)) return false;
 
   const normalized = normalizeEmail(newEmail);
-  const existing = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(normalized, userId);
+  const existing = db.get('SELECT id FROM users WHERE email = ? AND id != ?', [normalized, userId]);
   if (existing) {
     const err = new Error('An account with that email already exists') as any;
     err.code = 'email_taken';
     throw err;
   }
-  db.prepare('UPDATE users SET email = ? WHERE id = ?').run(normalized, userId);
+  db.run('UPDATE users SET email = ? WHERE id = ?', [normalized, userId]);
   // Keep sessions alive; the new email will be reflected on the next validateSession call.
   return true;
 }
@@ -120,18 +116,17 @@ export function updateEmail(userId: number, currentPassword: string, newEmail: s
 /** Update the password of the authenticated user after verifying the current one. Invalidates all sessions on success. */
 export function updatePassword(userId: number, currentPassword: string, newPassword: string): boolean {
   const db = getDb();
-  const row = db.prepare('SELECT password_hash FROM users WHERE id = ?')
-    .get(userId) as { password_hash: string } | undefined;
+  const row = db.get('SELECT password_hash FROM users WHERE id = ?', [userId]) as { password_hash: string } | undefined;
   if (!row) return false;
   if (!verifyPassword(currentPassword, row.password_hash)) return false;
-  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), userId);
-  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+  db.run('UPDATE users SET password_hash = ? WHERE id = ?', [hashPassword(newPassword), userId]);
+  db.run('DELETE FROM sessions WHERE user_id = ?', [userId]);
   return true;
 }
 
 /** The single account's email, or null before first-run setup. */
 export function accountEmail(): string | null {
-  const row = getDb().prepare('SELECT email FROM users LIMIT 1').get() as { email: string } | undefined;
+  const row = getDb().get('SELECT email FROM users LIMIT 1') as { email: string } | undefined;
   return row?.email ?? null;
 }
 
@@ -142,9 +137,9 @@ export function accountEmail(): string | null {
  */
 export function resetUserPassword(newPassword: string): SessionUser | null {
   const db = getDb();
-  const row = db.prepare('SELECT id, email FROM users LIMIT 1').get() as { id: number; email: string } | undefined;
+  const row = db.get('SELECT id, email FROM users LIMIT 1') as { id: number; email: string } | undefined;
   if (!row) return null;
-  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), row.id);
-  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(row.id);
+  db.run('UPDATE users SET password_hash = ? WHERE id = ?', [hashPassword(newPassword), row.id]);
+  db.run('DELETE FROM sessions WHERE user_id = ?', [row.id]);
   return { userId: row.id, email: row.email };
 }

@@ -47,8 +47,10 @@ import * as removeAurayProvider from '../migrations/20261019_000001_remove_auray
 import * as keyLastHealthyAt from '../migrations/20261020_000001_key_last_healthy_at.js';
 
 export interface MigrationModule {
-  up(db: Db): void;
-  down(db: Db): void;
+  /** Apply the migration. Async so every statement can be awaited against Postgres. */
+  up(db: Db): void | Promise<void>;
+  /** Revert the migration. Async so every statement can be awaited against Postgres. */
+  down(db: Db): void | Promise<void>;
 }
 
 export interface DefaultMigration {

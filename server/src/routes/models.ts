@@ -81,9 +81,7 @@ function dbValue(key: keyof typeof MODEL_FIELD_COLUMNS, value: unknown): unknown
 }
 
 function fetchModelRow(id: number): ModelRow | undefined {
-  return getDb()
-    .prepare('SELECT id, platform, model_id, key_id, source FROM models WHERE id = ?')
-    .get(id) as ModelRow | undefined;
+  return getDb().get('SELECT id, platform, model_id, key_id, source FROM models WHERE id = ?', [id]) as ModelRow | undefined;
 }
 
 const createModelSchema = z.object({
@@ -133,9 +131,7 @@ modelsRouter.post('/', (req: Request, res: Response) => {
     return;
   }
 
-  const existing = db.prepare(
-    'SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ?'
-  ).get(data.platform, data.modelId, endpointScope) as { id: number } | undefined;
+  const existing = db.get('SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ?', [data.platform, data.modelId, endpointScope]) as { id: number } | undefined;
 
   if (existing) {
     res.status(409).json({ error: { message: `Model "${data.modelId}" already exists for platform "${data.platform}"` } });
@@ -152,40 +148,24 @@ modelsRouter.post('/', (req: Request, res: Response) => {
       clearCatalogModelTombstone(db, 'chat', data.platform, data.modelId);
     }
 
-    const info = db.prepare(`
+    const info = db.run(`
       INSERT INTO models (
         platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
         rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
         enabled, supports_vision, supports_tools, key_id, source, endpoint_scope
       ) VALUES (
-        @platform, @modelId, @displayName, @intelligenceRank, @speedRank, @sizeLabel,
-        @rpmLimit, @rpdLimit, @tpmLimit, @tpdLimit, '', @contextWindow,
-        1, @supportsVision, @supportsTools, @keyId, 'user', @endpointScope
+        $1, $2, $3, $4, $5, $6,
+        $7, $8, $9, $10, '', $11,
+        1, $12, $13, $14, 'user', $15
       )
-    `).run({
-      platform: data.platform,
-      modelId: data.modelId,
-      displayName: data.displayName || data.modelId,
-      intelligenceRank: seed.intelligenceRank,
-      speedRank: seed.speedRank,
-      sizeLabel: seed.sizeLabel,
-      rpmLimit: data.rpmLimit ?? null,
-      rpdLimit: data.rpdLimit ?? null,
-      tpmLimit: data.tpmLimit ?? null,
-      tpdLimit: data.tpdLimit ?? null,
-      contextWindow: data.contextWindow ?? null,
-      supportsVision: data.supportsVision ? 1 : 0,
-      supportsTools: data.supportsTools !== undefined ? (data.supportsTools ? 1 : 0) : 1,
-      keyId: boundKeyId,
-      endpointScope,
-    });
+    `, [data.platform, data.modelId, data.displayName || data.modelId, seed.intelligenceRank, seed.speedRank, seed.sizeLabel, data.rpmLimit ?? null, data.rpdLimit ?? null, data.tpmLimit ?? null, data.tpdLimit ?? null, data.contextWindow ?? null, data.supportsVision ? 1 : 0, data.supportsTools !== undefined ? (data.supportsTools ? 1 : 0) : 1, boundKeyId, endpointScope]);
 
     const modelDbId = Number(info.lastInsertRowid);
 
-    const inChain = db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(modelDbId);
+    const inChain = db.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [modelDbId]);
     if (!inChain) {
-      const max = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config').get() as { m: number };
-      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(modelDbId, max.m + 1);
+      const max = db.get('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config') as { m: number };
+      db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)', [modelDbId, max.m + 1]);
     }
     ensureModelInProfiles(db, modelDbId);
 
@@ -225,7 +205,7 @@ modelsRouter.delete('/custom/:id', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = db.prepare("SELECT id, key_id, model_id FROM models WHERE id = ? AND platform = 'custom'").get(id) as { id: number; key_id: number | null; model_id: string } | undefined;
+  const row = db.get("SELECT id, key_id, model_id FROM models WHERE id = ? AND platform = 'custom'", [id]) as { id: number; key_id: number | null; model_id: string } | undefined;
   if (!row) {
     res.status(404).json({ error: { message: `Unknown custom model ${id}` } });
     return;
@@ -235,9 +215,9 @@ modelsRouter.delete('/custom/:id', (req: Request, res: Response) => {
     // #926: keep this deletion across the scheduled custom-model sync, or the
     // next daily pass re-registers a model the operator removed on purpose.
     recordCustomModelTombstone(db, endpointScopeOfKey(db, row.key_id), row.model_id);
-    db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?').run(id);
-    db.prepare('DELETE FROM profile_models WHERE model_db_id = ?').run(id);
-    db.prepare("DELETE FROM models WHERE id = ? AND platform = 'custom'").run(id);
+    db.run('DELETE FROM fallback_config WHERE model_db_id = ?', [id]);
+    db.run('DELETE FROM profile_models WHERE model_db_id = ?', [id]);
+    db.run("DELETE FROM models WHERE id = ? AND platform = 'custom'", [id]);
     deleteUnusedCustomEndpointKey(db, row.key_id);
     pruneUnavailableSavedFusionConfig();
   });
@@ -282,7 +262,7 @@ modelsRouter.patch('/:id', (req: Request, res: Response) => {
       // after each sync), i.e. the baseline an override that returns to the
       // catalog default is recognised against (#1178).
       const preUpdateRow = isCatalogManagedModel(row)
-        ? db.prepare('SELECT * FROM models WHERE id = ?').get(id) as Record<string, unknown> | undefined
+        ? db.get('SELECT * FROM models WHERE id = ?', [id]) as Record<string, unknown> | undefined
         : undefined;
 
       const assignments: string[] = [];
@@ -292,7 +272,7 @@ modelsRouter.patch('/:id', (req: Request, res: Response) => {
         values.push(dbValue(key as keyof typeof MODEL_FIELD_COLUMNS, modelPatch[key]));
       }
       values.push(id);
-      db.prepare(`UPDATE models SET ${assignments.join(', ')} WHERE id = ?`).run(...values);
+      db.run(`UPDATE models SET ${assignments.join(', ')} WHERE id = ?`, [...values]);
 
       if (isCatalogManagedModel(row)) {
         const overridePatch: ModelOverridePatch = {};
@@ -309,19 +289,17 @@ modelsRouter.patch('/:id', (req: Request, res: Response) => {
       }
 
       if (disablesModel) {
-        db.prepare('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?').run(id);
+        db.run('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?', [id]);
         pruneUnavailableSavedFusionConfig();
       }
     }
 
     if (disablesModel || parsed.data.fallbackEnabled !== undefined) {
       const next = disablesModel ? 0 : parsed.data.fallbackEnabled ? 1 : 0;
-      db.prepare('UPDATE fallback_config SET enabled = ? WHERE model_db_id = ?')
-        .run(next, id);
+      db.run('UPDATE fallback_config SET enabled = ? WHERE model_db_id = ?', [next, id]);
       const activeProfileId = getActiveProfileId(db);
       if (activeProfileId != null) {
-        db.prepare('UPDATE profile_models SET enabled = ? WHERE profile_id = ? AND model_db_id = ?')
-          .run(next, activeProfileId, id);
+        db.run('UPDATE profile_models SET enabled = ? WHERE profile_id = ? AND model_db_id = ?', [next, activeProfileId, id]);
       }
     }
   });
@@ -352,9 +330,9 @@ modelsRouter.delete('/:id', (req: Request, res: Response) => {
       // scheduled custom-model sync must not resurrect this row.
       recordCustomModelTombstone(db, endpointScopeOfKey(db, row.key_id), row.model_id);
     }
-    db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?').run(id);
-    db.prepare('DELETE FROM profile_models WHERE model_db_id = ?').run(id);
-    db.prepare('DELETE FROM models WHERE id = ?').run(id);
+    db.run('DELETE FROM fallback_config WHERE model_db_id = ?', [id]);
+    db.run('DELETE FROM profile_models WHERE model_db_id = ?', [id]);
+    db.run('DELETE FROM models WHERE id = ?', [id]);
     if (row.platform === 'custom') deleteUnusedCustomEndpointKey(db, row.key_id);
     pruneUnavailableSavedFusionConfig();
   });
@@ -430,7 +408,7 @@ modelsRouter.post('/:id/test', async (req: Request, res: Response) => {
 modelsRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
   const activeProfileId = getActiveProfileId(db);
-  const models = activeProfileId == null ? db.prepare(`
+  const models = activeProfileId == null ? db.all(`
     SELECT m.*, fc.priority, fc.enabled as fallback_enabled,
            mo.overrides_json IS NOT NULL AS has_overrides, mo.overrides_json,
            ak.label AS key_label
@@ -439,7 +417,7 @@ modelsRouter.get('/', (_req: Request, res: Response) => {
     LEFT JOIN model_overrides mo ON mo.platform = m.platform AND mo.model_id = m.model_id
     LEFT JOIN api_keys ak ON ak.id = m.key_id
     ORDER BY COALESCE(fc.priority, m.intelligence_rank) ASC
-  `).all() as any[] : db.prepare(`
+  `) as any[] : db.all(`
     SELECT m.*, COALESCE(pm.priority, fc.priority) AS priority,
            COALESCE(pm.enabled, fc.enabled) AS fallback_enabled,
            mo.overrides_json IS NOT NULL AS has_overrides, mo.overrides_json,
@@ -450,15 +428,15 @@ modelsRouter.get('/', (_req: Request, res: Response) => {
     LEFT JOIN model_overrides mo ON mo.platform = m.platform AND mo.model_id = m.model_id
     LEFT JOIN api_keys ak ON ak.id = m.key_id
     ORDER BY COALESCE(pm.priority, fc.priority, m.intelligence_rank) ASC
-  `).all(activeProfileId) as any[];
+  `, [activeProfileId]) as any[];
 
   // Count keys per platform
-  const keyCounts = db.prepare(`
+  const keyCounts = db.all(`
     SELECT platform, COUNT(*) as count
     FROM api_keys
     WHERE enabled = 1
     GROUP BY platform
-  `).all() as { platform: string; count: number }[];
+  `) as { platform: string; count: number }[];
 
   const keyCountMap = new Map(keyCounts.map(k => [k.platform, k.count]));
 

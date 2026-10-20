@@ -59,9 +59,7 @@ export function resolveAuth(token: string | undefined): ResolvedAuth | null {
     return { kind: 'unified', systemPrompt: null };
   }
   if (!token.startsWith(CLIENT_PROFILE_KEY_PREFIX)) return null;
-  const row = getDb().prepare(
-    'SELECT id, name, system_prompt, enabled FROM client_profiles WHERE token_hash = ?',
-  ).get(hashClientProfileKey(token)) as ProfileRow | undefined;
+  const row = getDb().get('SELECT id, name, system_prompt, enabled FROM client_profiles WHERE token_hash = ?', [hashClientProfileKey(token)]) as ProfileRow | undefined;
   if (!row || !row.enabled) return null;
   const prompt = row.system_prompt != null && row.system_prompt.trim().length > 0
     ? row.system_prompt

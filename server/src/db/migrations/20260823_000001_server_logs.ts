@@ -29,8 +29,8 @@
 
 import type { Db } from '../types.js';
 
-export function up(db: Db): void {
-  db.exec(`
+export async function up(db: Db): Promise<void> {
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS server_logs (
       id INTEGER PRIMARY KEY,
       level TEXT CHECK(level IN ('warn','error')),
@@ -48,8 +48,8 @@ export function up(db: Db): void {
   `);
 }
 
-export function down(db: Db): void {
-  db.exec(`
+export async function down(db: Db): Promise<void> {
+  await db.exec(`
     DROP INDEX IF EXISTS idx_server_logs_created;
     DROP TABLE IF EXISTS server_logs;
   `);

@@ -851,7 +851,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
       groupChain = resolveModelGroupCandidates(members, resolved!.demotedDbIds);
       if (groupChain.length === 0) {
         const placeholders = members.map(() => '?').join(',');
-        const anyEnabled = db.prepare(`SELECT 1 FROM models WHERE id IN (${placeholders}) AND enabled = 1 LIMIT 1`).get(...members);
+        const anyEnabled = db.get( `SELECT 1 FROM models WHERE id IN (${placeholders}) AND enabled = 1 LIMIT 1`, [...members]);
         const reason = anyEnabled ? 'has no providers with an enabled key' : 'is disabled';
         res.status(400).json({
           error: {
@@ -865,11 +865,11 @@ export async function handleResponses(req: Request, res: Response): Promise<void
       const sticky = getStickyModel(messages, sessionIdHeader, requestedModelLabel);
       preferredModel = (sticky != null && groupChain.some(r => r.model_db_id === sticky)) ? sticky : undefined;
     } else {
-      const enabled = db.prepare('SELECT id FROM models WHERE model_id = ? AND enabled = 1').get(requestedModelLabel) as { id: number } | undefined;
+      const enabled = db.get('SELECT id FROM models WHERE model_id = ? AND enabled = 1', [requestedModelLabel]) as { id: number } | undefined;
       if (enabled) {
         preferredModel = enabled.id;
       } else {
-        const disabled = db.prepare('SELECT id FROM models WHERE model_id = ?').get(requestedModelLabel) as { id: number } | undefined;
+        const disabled = db.get('SELECT id FROM models WHERE model_id = ?', [requestedModelLabel]) as { id: number } | undefined;
         const reason = disabled ? 'is disabled' : 'is not in the catalog';
         res.status(400).json({
           error: {

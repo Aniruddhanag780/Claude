@@ -115,13 +115,13 @@ function lookupTierDbIds(tier: TierSelector): number[] {
   const labels = TIER_SIZE_LABELS[tier];
   const placeholders = labels.map(() => '?').join(', ');
   const db = getDb();
-  const rows = db.prepare(`
+  const rows = db.all( `
     SELECT m.id as id
     FROM models m
     LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
     WHERE m.enabled = 1 AND m.size_label IN (${placeholders})
     ORDER BY COALESCE(fc.priority, 0) ASC, m.id ASC
-  `).all(...labels) as { id: number }[];
+  `, [...labels]) as { id: number }[];
   return rows.map(r => r.id);
 }
 
@@ -136,14 +136,14 @@ export function resolveAnthropicModel(model?: string): ResolvedAnthropicModel {
   // made the head flap between providers run to run, so pick deterministically:
   // chain priority first (ascending, as everywhere else), then insertion order.
   const lookupEnabled = (modelId: string): { id: number; model_id: string } | undefined =>
-    db.prepare(`
+    db.get(`
       SELECT m.id as id, m.model_id as model_id
       FROM models m
       LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
       WHERE m.model_id = ? AND m.enabled = 1
       ORDER BY COALESCE(fc.priority, 0) ASC, m.id ASC
       LIMIT 1
-    `).get(modelId) as { id: number; model_id: string } | undefined;
+    `, [modelId]) as { id: number; model_id: string } | undefined;
 
   const family = classifyClaudeFamily(model);
   if (family) {

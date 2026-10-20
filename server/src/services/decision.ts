@@ -110,10 +110,8 @@ function parseMeta(raw: string | null): DecisionModelMeta {
 }
 
 function allDecisionRows(): DecisionModelRow[] {
-  return getDb()
-    .prepare(`SELECT id, platform, model_id, display_name, priority, enabled, quota_label, meta_json
-                FROM media_models WHERE modality = ? ORDER BY priority, id`)
-    .all(DECISION_MODALITY) as DecisionModelRow[];
+  return getDb().all(`SELECT id, platform, model_id, display_name, priority, enabled, quota_label, meta_json
+                FROM media_models WHERE modality = ? ORDER BY priority, id`, [DECISION_MODALITY]) as DecisionModelRow[];
 }
 
 // ── Adapters ────────────────────────────────────────────────────────────────
@@ -276,10 +274,8 @@ export const DECISION_PLATFORMS = new Set(Object.keys(ADAPTERS));
 
 function logDecision(row: DecisionModelRow, keyId: number | null, status: 'ok' | 'error', latencyMs: number, questionCount: number, inputTokens: number, clientAgent: string | null, error: string | null): void {
   try {
-    getDb()
-      .prepare(`INSERT INTO decision_requests (model_id, platform, key_id, status, latency_ms, question_count, input_tokens, client_agent, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(row.model_id, row.platform, keyId, status, latencyMs, questionCount, inputTokens, clientAgent, error);
+    getDb().run(`INSERT INTO decision_requests (model_id, platform, key_id, status, latency_ms, question_count, input_tokens, client_agent, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [row.model_id, row.platform, keyId, status, latencyMs, questionCount, inputTokens, clientAgent, error]);
   } catch (e) {
     console.error('Failed to log decision request:', e);
   }
@@ -296,9 +292,7 @@ function coolDown(row: DecisionModelRow, keyId: number, e: DecisionError): void 
 }
 
 function hasUsableKey(platform: string): boolean {
-  return !!getDb()
-    .prepare("SELECT 1 FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') LIMIT 1")
-    .get(platform);
+  return !!getDb().get("SELECT 1 FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') LIMIT 1", [platform]);
 }
 
 /** True when at least one enabled decision model has a usable key. */
@@ -420,17 +414,17 @@ export interface DecisionModelView {
 export function listDecisionModels(): DecisionModelView[] {
   const db = getDb();
   const platforms = [...DECISION_PLATFORMS];
-  const keyRows = db.prepare(`
+  const keyRows = db.all( `
     SELECT platform, enabled, status FROM api_keys
      WHERE platform IN (${platforms.map(() => '?').join(', ')})
-  `).all(...platforms) as { platform: string; enabled: number; status: string }[];
+  `, [...platforms]) as { platform: string; enabled: number; status: string }[];
   const healthy = (k: { enabled: number; status: string }) => k.enabled === 1 && (k.status === 'healthy' || k.status === 'unknown');
   const monthCounts = new Map(
-    (db.prepare(`
+    (db.all(`
       SELECT platform, model_id, COUNT(*) AS n FROM decision_requests
        WHERE status = 'ok' AND created_at >= datetime('now', 'start of month')
        GROUP BY platform, model_id
-    `).all() as { platform: string; model_id: string; n: number }[]).map(r => [`${r.platform}:${r.model_id}`, r.n]),
+    `) as { platform: string; model_id: string; n: number }[]).map(r => [`${r.platform}:${r.model_id}`, r.n]),
   );
   return allDecisionRows().map(row => {
     const meta = parseMeta(row.meta_json);
@@ -453,8 +447,6 @@ export function listDecisionModels(): DecisionModelView[] {
 
 /** Turn a decision model on or off. False when the id is not a decision model. */
 export function setDecisionModelEnabled(id: number, enabled: boolean): boolean {
-  const info = getDb()
-    .prepare('UPDATE media_models SET enabled = ? WHERE id = ? AND modality = ?')
-    .run(enabled ? 1 : 0, id, DECISION_MODALITY);
+  const info = getDb().run('UPDATE media_models SET enabled = ? WHERE id = ? AND modality = ?', [enabled ? 1 : 0, id, DECISION_MODALITY]);
   return info.changes > 0;
 }

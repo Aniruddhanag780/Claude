@@ -22,8 +22,8 @@
 
 import type { Db } from '../types.js';
 
-export function up(db: Db): void {
-  db.exec(`
+export async function up(db: Db): Promise<void> {
+  await db.exec(`
     CREATE INDEX IF NOT EXISTS idx_provider_quota_observations_latest
       ON provider_quota_observations(platform, key_id, quota_pool_key, metric, observed_at DESC, created_at DESC);
 
@@ -32,8 +32,8 @@ export function up(db: Db): void {
   `);
 }
 
-export function down(db: Db): void {
-  db.exec(`
+export async function down(db: Db): Promise<void> {
+  await db.exec(`
     DROP INDEX IF EXISTS idx_provider_quota_observations_created_at;
     DROP INDEX IF EXISTS idx_provider_quota_observations_latest;
   `);

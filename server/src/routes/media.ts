@@ -16,14 +16,10 @@ export const mediaRouter = Router();
 mediaRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
   const keyCounts = new Map(
-    (db.prepare(
-      "SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform",
-    ).all() as { platform: string; n: number }[]).map(r => [r.platform, r.n]),
+    (db.all("SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; n: number }[]).map(r => [r.platform, r.n]),
   );
   const customKeyIds = new Set(
-    (db.prepare(
-      "SELECT id FROM api_keys WHERE platform = 'custom' AND enabled = 1 AND status IN ('healthy', 'unknown')",
-    ).all() as { id: number }[]).map(r => r.id),
+    (db.all("SELECT id FROM api_keys WHERE platform = 'custom' AND enabled = 1 AND status IN ('healthy', 'unknown')") as { id: number }[]).map(r => r.id),
   );
 
   res.json({
@@ -62,7 +58,7 @@ mediaRouter.get('/usage', (req: Request, res: Response) => {
   const modality = parsed.data;
   const db = getDb();
 
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT mm.id, mm.platform, mm.model_id, mm.display_name, mm.quota_label,
            COALESCE(SUM(CASE WHEN r.created_at >= datetime('now', 'start of day') THEN 1 ELSE 0 END), 0) AS requests_today,
            COALESCE(SUM(CASE WHEN r.created_at >= datetime('now', 'start of month') THEN 1 ELSE 0 END), 0) AS requests_month
@@ -76,7 +72,7 @@ mediaRouter.get('/usage', (req: Request, res: Response) => {
     WHERE mm.modality = ? AND mm.enabled = 1
     GROUP BY mm.id
     ORDER BY mm.priority ASC
-  `).all(modality, modality) as {
+  `, [modality, modality]) as {
     id: number; platform: string; model_id: string; display_name: string;
     quota_label: string | null; requests_today: number; requests_month: number;
   }[];
@@ -152,8 +148,7 @@ mediaRouter.post('/custom', (req: Request, res: Response) => {
   });
 
   const result = upsert();
-  const storedName = (db.prepare('SELECT display_name FROM media_models WHERE id = ?')
-    .get(result.modelDbId) as { display_name: string }).display_name;
+  const storedName = (db.get('SELECT display_name FROM media_models WHERE id = ?', [result.modelDbId]) as { display_name: string }).display_name;
   res.status(201).json({
     success: true,
     keyId: result.keyId,
@@ -180,7 +175,7 @@ mediaRouter.put('/:id', (req: Request, res: Response) => {
     res.status(400).json({ error: { message: 'Invalid request body' } });
     return;
   }
-  const info = getDb().prepare('UPDATE media_models SET enabled = ? WHERE id = ?').run(parsed.data.enabled ? 1 : 0, id);
+  const info = getDb().run('UPDATE media_models SET enabled = ? WHERE id = ?', [parsed.data.enabled ? 1 : 0, id]);
   if (info.changes === 0) {
     res.status(404).json({ error: { message: `Unknown media model ${id}` } });
     return;
@@ -196,13 +191,13 @@ mediaRouter.delete('/custom/:id', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = db.prepare("SELECT key_id FROM media_models WHERE id = ? AND platform = 'custom'").get(id) as { key_id: number | null } | undefined;
+  const row = db.get("SELECT key_id FROM media_models WHERE id = ? AND platform = 'custom'", [id]) as { key_id: number | null } | undefined;
   if (!row) {
     res.status(404).json({ error: { message: `Unknown custom media model ${id}` } });
     return;
   }
   const remove = db.transaction(() => {
-    db.prepare("DELETE FROM media_models WHERE id = ? AND platform = 'custom'").run(id);
+    db.run("DELETE FROM media_models WHERE id = ? AND platform = 'custom'", [id]);
     deleteUnusedCustomEndpointKey(db, row.key_id);
   });
   remove();

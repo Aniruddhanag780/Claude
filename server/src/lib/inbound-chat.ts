@@ -133,9 +133,7 @@ function resolvePin(model: string | undefined, messages: ChatMessage[], sessionI
     };
   }
 
-  const enabled = db.prepare(
-    'SELECT id FROM models WHERE model_id = ? AND enabled = 1',
-  ).get(requested) as { id: number } | undefined;
+  const enabled = db.get('SELECT id FROM models WHERE model_id = ? AND enabled = 1', [requested]) as { id: number } | undefined;
   if (!enabled) {
     const err = new Error(`Model '${requested}' is disabled or is not in the catalog`) as Error & { status?: number; code?: string };
     err.status = 404;

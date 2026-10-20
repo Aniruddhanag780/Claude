@@ -150,10 +150,8 @@ function readPriorityOverrides(): Record<string, number> {
 }
 
 function allEngineRows(): SearchEngineRow[] {
-  return getDb()
-    .prepare(`SELECT id, platform, model_id, display_name, priority, enabled, quota_label, key_id, meta_json
-                FROM media_models WHERE modality = ? ORDER BY priority, id`)
-    .all(SEARCH_MODALITY) as SearchEngineRow[];
+  return getDb().all(`SELECT id, platform, model_id, display_name, priority, enabled, quota_label, key_id, meta_json
+                FROM media_models WHERE modality = ? ORDER BY priority, id`, [SEARCH_MODALITY]) as SearchEngineRow[];
 }
 
 /** Every search engine row in effective order (local reorder over catalog
@@ -417,10 +415,8 @@ export const SEARCH_ENGINE_PLATFORMS = new Set(Object.keys(ADAPTERS).filter(p =>
 
 function logSearch(row: SearchEngineRow, keyId: number | null, status: 'ok' | 'error', latencyMs: number, resultCount: number, clientAgent: string | null, error: string | null): void {
   try {
-    getDb()
-      .prepare(`INSERT INTO search_requests (engine_id, platform, key_id, status, latency_ms, result_count, client_agent, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(row.model_id, row.platform, keyId, status, latencyMs, resultCount, clientAgent, error);
+    getDb().run(`INSERT INTO search_requests (engine_id, platform, key_id, status, latency_ms, result_count, client_agent, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [row.model_id, row.platform, keyId, status, latencyMs, resultCount, clientAgent, error]);
   } catch (e) {
     console.error('Failed to log search request:', e);
   }
@@ -451,12 +447,12 @@ export function searchAvailable(): boolean {
     if (row.enabled !== 1) continue;
     if (row.platform === 'custom') {
       if (row.key_id == null) continue;
-      const k = db.prepare("SELECT 1 FROM api_keys WHERE id = ? AND enabled = 1 AND status IN ('healthy', 'unknown')").get(row.key_id);
+      const k = db.get("SELECT 1 FROM api_keys WHERE id = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [row.key_id]);
       if (k) return true;
       continue;
     }
     if (!ADAPTERS[row.platform]) continue;
-    const k = db.prepare("SELECT 1 FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') LIMIT 1").get(row.platform);
+    const k = db.get("SELECT 1 FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') LIMIT 1", [row.platform]);
     if (k) return true;
   }
   return false;
@@ -596,17 +592,17 @@ const FREE_LAG_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function listSearchEngines(): SearchEngineView[] {
   const db = getDb();
-  const keyRows = db.prepare(`
+  const keyRows = db.all( `
     SELECT id, platform, enabled, status FROM api_keys
      WHERE platform = 'custom' OR platform IN (${[...SEARCH_ENGINE_PLATFORMS].map(() => '?').join(', ')})
-  `).all(...SEARCH_ENGINE_PLATFORMS) as { id: number; platform: string; enabled: number; status: string }[];
+  `, [...SEARCH_ENGINE_PLATFORMS]) as { id: number; platform: string; enabled: number; status: string }[];
   const healthy = (k: { enabled: number; status: string }) => k.enabled === 1 && (k.status === 'healthy' || k.status === 'unknown');
   const monthCounts = new Map(
-    (db.prepare(`
+    (db.all(`
       SELECT platform, engine_id, COUNT(*) AS n FROM search_requests
        WHERE status = 'ok' AND created_at >= datetime('now', 'start of month')
        GROUP BY platform, engine_id
-    `).all() as { platform: string; engine_id: string; n: number }[]).map(r => [`${r.platform}:${r.engine_id}`, r.n]),
+    `) as { platform: string; engine_id: string; n: number }[]).map(r => [`${r.platform}:${r.engine_id}`, r.n]),
   );
 
   return orderedEngines().map(row => {
@@ -645,7 +641,7 @@ export function updateSearchEngine(id: number, patch: { enabled?: boolean; prior
   const target = ordered.find(r => r.id === id);
   if (!target) return false;
   if (patch.enabled !== undefined) {
-    db.prepare('UPDATE media_models SET enabled = ? WHERE id = ?').run(patch.enabled ? 1 : 0, id);
+    db.run('UPDATE media_models SET enabled = ? WHERE id = ?', [patch.enabled ? 1 : 0, id]);
   }
   if (patch.priority !== undefined) {
     const rest = ordered.filter(r => r.id !== id);
@@ -687,28 +683,28 @@ export function searchAnalytics(range: SearchAnalyticsRange): SearchAnalytics {
   const where = since ? 'WHERE created_at >= ?' : '';
   const args = since ? [since] : [];
 
-  const totals = db.prepare(`
+  const totals = db.get( `
     SELECT COUNT(*) AS attempts,
            COALESCE(SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END), 0) AS ok,
            COALESCE(AVG(latency_ms), 0) AS avg_latency
       FROM search_requests ${where}
-  `).get(...args) as { attempts: number; ok: number; avg_latency: number };
-  const today = (db.prepare(`
+  `, [...args]) as { attempts: number; ok: number; avg_latency: number };
+  const today = (db.get(`
     SELECT COUNT(*) AS n FROM search_requests WHERE status = 'ok' AND created_at >= datetime('now', 'start of day')
-  `).get() as { n: number }).n;
+  `) as { n: number }).n;
 
   const names = new Map(allEngineRows().map(r => [r.model_id, r.display_name]));
-  const byEngine = (db.prepare(`
+  const byEngine = (db.all(`
     SELECT engine_id, COUNT(*) AS n FROM search_requests
      ${where ? `${where} AND` : 'WHERE'} status = 'ok'
      GROUP BY engine_id ORDER BY n DESC, engine_id
-  `).all(...args) as { engine_id: string; n: number }[])
+  `, [...args]) as { engine_id: string; n: number }[])
     .map(r => ({ engineId: r.engine_id, displayName: names.get(r.engine_id) ?? r.engine_id, count: r.n }));
-  const series = (db.prepare(`
+  const series = (db.all(`
     SELECT date(created_at) AS day, engine_id, COUNT(*) AS n FROM search_requests
      ${where ? `${where} AND` : 'WHERE'} status = 'ok'
      GROUP BY day, engine_id ORDER BY day, engine_id
-  `).all(...args) as { day: string; engine_id: string; n: number }[])
+  `, [...args]) as { day: string; engine_id: string; n: number }[])
     .map(r => ({ date: r.day, engineId: r.engine_id, count: r.n }));
 
   return {

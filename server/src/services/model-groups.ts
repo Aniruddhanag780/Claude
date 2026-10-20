@@ -383,7 +383,7 @@ let groupsCache: { fingerprint: string; groups: ModelGroup[] } | null = null;
  */
 export function getModelGroups(): ModelGroup[] {
   const db = getDb();
-  const rows = db.prepare(`
+  const rows = db.all(`
     SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.endpoint_scope,
            (SELECT k.group_label FROM api_keys k
@@ -393,7 +393,7 @@ export function getModelGroups(): ModelGroup[] {
              ORDER BY k.id LIMIT 1) AS endpoint_group
     FROM models m
     ORDER BY m.id
-  `).all() as GroupableRow[];
+  `) as GroupableRow[];
   const overrides = getUnifyOverrides();
   let fingerprint = JSON.stringify(overrides);
   for (const r of rows) {

@@ -15,23 +15,23 @@ import type { Db } from '../types.js';
  */
 const COLUMNS = ['proxy_encrypted', 'proxy_iv', 'proxy_auth_tag'] as const;
 
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
+  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
   return columns.some((candidate) => candidate.name === column);
 }
 
-export function up(db: Db): void {
+export async function up(db: Db): Promise<void> {
   for (const column of COLUMNS) {
-    if (!hasColumn(db, 'api_keys', column)) {
-      db.prepare(`ALTER TABLE api_keys ADD COLUMN ${column} TEXT`).run();
+    if (!await hasColumn(db, 'api_keys', column)) {
+      await db.run(`ALTER TABLE api_keys ADD COLUMN ${column} TEXT`);
     }
   }
 }
 
-export function down(db: Db): void {
+export async function down(db: Db): Promise<void> {
   for (const column of COLUMNS) {
-    if (hasColumn(db, 'api_keys', column)) {
-      db.prepare(`ALTER TABLE api_keys DROP COLUMN ${column}`).run();
+    if (await hasColumn(db, 'api_keys', column)) {
+      await db.run(`ALTER TABLE api_keys DROP COLUMN ${column}`);
     }
   }
 }

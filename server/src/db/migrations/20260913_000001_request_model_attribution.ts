@@ -20,24 +20,24 @@
 
 import type { Db } from '../types.js';
 
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
+  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
   return columns.some(c => c.name === column);
 }
 
-export function up(db: Db): void {
-  if (hasColumn(db, 'requests', 'model_db_id')) return;
+export async function up(db: Db): Promise<void> {
+  if (await hasColumn(db, 'requests', 'model_db_id')) return;
 
   // Add the column (nullable — unattributed requests keep NULL).
-  db.prepare('ALTER TABLE requests ADD COLUMN model_db_id INTEGER').run();
+  await db.run('ALTER TABLE requests ADD COLUMN model_db_id INTEGER');
 
   // Non-unique index for backfill scans and future analytics queries.
-  db.prepare('CREATE INDEX IF NOT EXISTS idx_requests_model_db_id ON requests(model_db_id)').run();
+  await db.run('CREATE INDEX IF NOT EXISTS idx_requests_model_db_id ON requests(model_db_id)');
 
   // Backfill catalog requests: (platform, model_id) → models.id
   // These are unambiguous — catalog rows are unique on (platform, model_id).
   // SQLite UPDATE has no table alias; correlate via the full table name.
-  db.prepare(`
+  await db.run(`
     UPDATE requests
     SET model_db_id = (
       SELECT m.id FROM models m
@@ -45,11 +45,11 @@ export function up(db: Db): void {
       LIMIT 1
     )
     WHERE requests.platform != 'custom'
-  `).run();
+  `);
 
   // Backfill custom requests: key_id → api_keys.base_url → models.endpoint_scope
   // Only while the saved key still resolves to a matching row.
-  db.prepare(`
+  await db.run(`
     UPDATE requests
     SET model_db_id = (
       SELECT m.id FROM models m
@@ -60,7 +60,7 @@ export function up(db: Db): void {
       LIMIT 1
     )
     WHERE requests.platform = 'custom' AND requests.key_id IS NOT NULL
-  `).run();
+  `);
 
   // Orphaned custom history stays NULL — better than being attributed to the
   // wrong relay. The two UPDATEs above are best-effort: if a custom key was
@@ -68,8 +68,8 @@ export function up(db: Db): void {
   // NULL (which is exactly the "unattributable" semantics we want).
 }
 
-export function down(db: Db): void {
-  if (!hasColumn(db, 'requests', 'model_db_id')) return;
-  db.prepare('DROP INDEX IF EXISTS idx_requests_model_db_id').run();
-  db.prepare('ALTER TABLE requests DROP COLUMN model_db_id').run();
+export async function down(db: Db): Promise<void> {
+  if (!await hasColumn(db, 'requests', 'model_db_id')) return;
+  await db.run('DROP INDEX IF EXISTS idx_requests_model_db_id');
+  await db.run('ALTER TABLE requests DROP COLUMN model_db_id');
 }

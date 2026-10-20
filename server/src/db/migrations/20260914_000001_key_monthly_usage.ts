@@ -1,8 +1,8 @@
 import type { Db } from '../types.js';
 
 /** A durable ledger: pruning analytics must never reopen a spent monthly cap. */
-export function up(db: Db): void {
-  db.exec(`
+export async function up(db: Db): Promise<void> {
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS key_monthly_usage (
       key_id INTEGER NOT NULL,
       month TEXT NOT NULL,
@@ -34,6 +34,6 @@ export function up(db: Db): void {
   `);
 }
 
-export function down(db: Db): void {
-  db.exec('DROP TRIGGER IF EXISTS requests_key_monthly_usage; DROP TABLE IF EXISTS key_monthly_usage;');
+export async function down(db: Db): Promise<void> {
+  await db.exec('DROP TRIGGER IF EXISTS requests_key_monthly_usage; DROP TABLE IF EXISTS key_monthly_usage;');
 }

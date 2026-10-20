@@ -169,7 +169,7 @@ export function rotateSecrets(
   const rowsToRotate: RowToRotate[] = [];
 
   for (const group of ENCRYPTION_GROUPS) {
-    const cols = db.prepare(`PRAGMA table_info(${group.table})`).all() as Array<{ name: string }>;
+    const cols = db.all(`PRAGMA table_info(${group.table})`) as Array<{ name: string }>;
     const names = new Set(cols.map((c) => c.name));
 
     // Ciphertext held as (encrypted, iv, auth_tag) columns.
@@ -178,10 +178,8 @@ export function rotateSecrets(
         continue;
       }
 
-      const rows = db.prepare(
-        `SELECT ${group.idColumn} AS id, ${group.encrypted} AS enc, ${group.iv} AS iv, ${group.authTag} AS tag ` +
-        `FROM ${group.table} WHERE ${group.encrypted} IS NOT NULL`,
-      ).all() as Array<{ id: number; enc: string; iv: string; tag: string }>;
+      const rows = db.all(`SELECT ${group.idColumn} AS id, ${group.encrypted} AS enc, ${group.iv} AS iv, ${group.authTag} AS tag ` +
+        `FROM ${group.table} WHERE ${group.encrypted} IS NOT NULL`) as Array<{ id: number; enc: string; iv: string; tag: string }>;
 
       for (const row of rows) {
         let plaintext: string;
@@ -201,7 +199,7 @@ export function rotateSecrets(
     // Ciphertext held as a JSON blob in settings.value.
     if (!names.has('key') || !names.has('value')) continue;
 
-    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(group.settingKey) as { value: string } | undefined;
+    const row = db.get('SELECT value FROM settings WHERE key = ?', [group.settingKey]) as { value: string } | undefined;
     // An unset or cleared setting stores '' rather than a blob — nothing to do.
     if (!row || !row.value) continue;
 
@@ -249,13 +247,10 @@ export function applyRotation(
       if (r.group.kind === 'setting') {
         // Same encoding encodeFetchRelayToken() writes, so the running server
         // reads it back unchanged.
-        db.prepare('UPDATE settings SET value = ? WHERE key = ?')
-          .run(JSON.stringify(r.reEncrypted), r.group.settingKey);
+        db.run('UPDATE settings SET value = ? WHERE key = ?', [JSON.stringify(r.reEncrypted), r.group.settingKey]);
         continue;
       }
-      db.prepare(
-        `UPDATE ${r.group.table} SET ${r.group.encrypted} = ?, ${r.group.iv} = ?, ${r.group.authTag} = ? WHERE ${r.group.idColumn} = ?`,
-      ).run(r.reEncrypted.encrypted, r.reEncrypted.iv, r.reEncrypted.authTag, r.id);
+      db.run(`UPDATE ${r.group.table} SET ${r.group.encrypted} = ?, ${r.group.iv} = ?, ${r.group.authTag} = ? WHERE ${r.group.idColumn} = ?`, [r.reEncrypted.encrypted, r.reEncrypted.iv, r.reEncrypted.authTag, r.id]);
     }
   });
   write(rows);

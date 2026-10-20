@@ -70,7 +70,7 @@ export function listModerationModels(): ModerationModelRow[] {
   const rows: ModerationModelRow[] = [];
   for (const platform of PLATFORM_ORDER) {
     const ep = MODERATION_MODELS[platform];
-    const key = db.prepare(`
+    const key = db.get(`
       SELECT id, encrypted_key, iv, auth_tag
         FROM api_keys
        WHERE platform = ?
@@ -78,7 +78,7 @@ export function listModerationModels(): ModerationModelRow[] {
          AND status IN ('healthy', 'unknown')
        ORDER BY id
        LIMIT 1
-    `).get(platform) as { id: number; encrypted_key: string; iv: string; auth_tag: string } | undefined;
+    `, [platform]) as { id: number; encrypted_key: string; iv: string; auth_tag: string } | undefined;
     if (key) {
       rows.push({
         platform,
@@ -152,10 +152,10 @@ function logModerationRequest(
 ): void {
   try {
     const client = getClientContext();
-    getDb().prepare(`
+    getDb().run(`
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
       VALUES (?, ?, ?, ?, 0, 0, ?, ?, 'moderation', ?, ?, ?)
-    `).run(row.platform, row.modelId, row.keyId, status, latencyMs, error, client.ip, client.userAgent, client.agent);
+    `, [row.platform, row.modelId, row.keyId, status, latencyMs, error, client.ip, client.userAgent, client.agent]);
   } catch (e) {
     console.error('Failed to log moderation request:', e);
   }

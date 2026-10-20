@@ -145,9 +145,7 @@ export function pruneQuotaObservations(
   nowMs: number,
   budgetMs = QUOTA_OBSERVATIONS_PRUNE_BUDGET_MS,
 ): { deleted: number; done: boolean } {
-  const hasTable = !!db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='provider_quota_observations'")
-    .get();
+  const hasTable = !!db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='provider_quota_observations'");
   if (!hasTable) return { deleted: 0, done: true };
 
   const { retentionDays, maxRows } = getQuotaObservationRetentionConfig();
@@ -157,7 +155,8 @@ export function pruneQuotaObservations(
 
   if (retentionDays > 0) {
     const cutoff = toSqliteTimestamp(new Date(nowMs - retentionDays * DAY_MS));
-    const byAge = db.prepare(`
+    for (;;) {
+      const changes = db.run(`
       DELETE FROM provider_quota_observations
       WHERE rowid IN (
         SELECT rowid FROM provider_quota_observations
@@ -165,9 +164,7 @@ export function pruneQuotaObservations(
         ORDER BY created_at ASC
         LIMIT ?
       )
-    `);
-    for (;;) {
-      const changes = byAge.run(cutoff, QUOTA_OBSERVATIONS_PRUNE_CHUNK).changes;
+    `, [cutoff, QUOTA_OBSERVATIONS_PRUNE_CHUNK]).changes;
       deleted += changes;
       if (changes < QUOTA_OBSERVATIONS_PRUNE_CHUNK) break;
       if (!inBudget()) return { deleted, done: false };
@@ -175,7 +172,8 @@ export function pruneQuotaObservations(
   }
 
   if (maxRows > 0) {
-    const byCount = db.prepare(`
+    for (;;) {
+      const changes = db.run(`
       DELETE FROM provider_quota_observations
       WHERE rowid IN (
         SELECT rowid
@@ -183,9 +181,7 @@ export function pruneQuotaObservations(
         ORDER BY created_at DESC, rowid DESC
         LIMIT ? OFFSET ?
       )
-    `);
-    for (;;) {
-      const changes = byCount.run(QUOTA_OBSERVATIONS_PRUNE_CHUNK, maxRows).changes;
+    `, [QUOTA_OBSERVATIONS_PRUNE_CHUNK, maxRows]).changes;
       deleted += changes;
       if (changes < QUOTA_OBSERVATIONS_PRUNE_CHUNK) break;
       if (!inBudget()) return { deleted, done: false };
@@ -208,22 +204,18 @@ export function pruneQuotaObservations(
  * with the in-memory ring and is not a timestamp.
  */
 export function pruneServerLogs(db: RetentionDb, nowMs: number): number {
-  const hasTable = !!db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='server_logs'")
-    .get();
+  const hasTable = !!db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='server_logs'");
   if (!hasTable) return 0;
 
   const { retentionDays, maxRows } = getServerLogRetentionConfig();
   let deleted = 0;
 
   if (retentionDays > 0) {
-    deleted += db
-      .prepare('DELETE FROM server_logs WHERE created_at_ms < ?')
-      .run(nowMs - retentionDays * DAY_MS).changes;
+    deleted += db.run('DELETE FROM server_logs WHERE created_at_ms < ?', [nowMs - retentionDays * DAY_MS]).changes;
   }
 
   if (maxRows > 0) {
-    deleted += db.prepare(`
+    deleted += db.run(`
       DELETE FROM server_logs
       WHERE id IN (
         SELECT id
@@ -231,7 +223,7 @@ export function pruneServerLogs(db: RetentionDb, nowMs: number): number {
         ORDER BY created_at_ms DESC, id DESC
         LIMIT -1 OFFSET ?
       )
-    `).run(maxRows).changes;
+    `, [maxRows]).changes;
   }
 
   return deleted;
@@ -266,11 +258,9 @@ export function pruneServerLogs(db: RetentionDb, nowMs: number): number {
 export function pruneExpiredClaims(db: RetentionDb, nowMs: number): number {
   let deleted = 0;
   for (const table of ['idempotency_claims', 'response_cache', 'sessions'] as const) {
-    const present = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
-      .get(table);
+    const present = db.get("SELECT name FROM sqlite_master WHERE type='table' AND name = ?", [table]);
     if (!present) continue;
-    deleted += db.prepare(`DELETE FROM ${table} WHERE expires_at_ms <= ?`).run(nowMs).changes;
+    deleted += db.run(`DELETE FROM ${table} WHERE expires_at_ms <= ?`, [nowMs]).changes;
   }
   return deleted;
 }
@@ -284,9 +274,7 @@ export function pruneExpiredClaims(db: RetentionDb, nowMs: number): number {
  * growth. Guarded against the table being absent like every other prune here.
  */
 export function pruneSearchLogs(db: RetentionDb, nowMs: number): number {
-  const hasTable = !!db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='search_requests'")
-    .get();
+  const hasTable = !!db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='search_requests'");
   if (!hasTable) return 0;
 
   const { retentionDays, maxRows } = getSearchLogRetentionConfig();
@@ -294,11 +282,11 @@ export function pruneSearchLogs(db: RetentionDb, nowMs: number): number {
 
   if (retentionDays > 0) {
     const cutoff = toSqliteTimestamp(new Date(nowMs - retentionDays * DAY_MS));
-    deleted += db.prepare('DELETE FROM search_requests WHERE created_at < ?').run(cutoff).changes;
+    deleted += db.run('DELETE FROM search_requests WHERE created_at < ?', [cutoff]).changes;
   }
 
   if (maxRows > 0) {
-    deleted += db.prepare(`
+    deleted += db.run(`
       DELETE FROM search_requests
       WHERE id IN (
         SELECT id
@@ -306,7 +294,7 @@ export function pruneSearchLogs(db: RetentionDb, nowMs: number): number {
         ORDER BY created_at DESC, id DESC
         LIMIT -1 OFFSET ?
       )
-    `).run(maxRows).changes;
+    `, [maxRows]).changes;
   }
 
   return deleted;
@@ -322,9 +310,7 @@ export function pruneSearchLogs(db: RetentionDb, nowMs: number): number {
  * every other prune here.
  */
 export function pruneDecisionLogs(db: RetentionDb, nowMs: number): number {
-  const hasTable = !!db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='decision_requests'")
-    .get();
+  const hasTable = !!db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='decision_requests'");
   if (!hasTable) return 0;
 
   const { retentionDays, maxRows } = getDecisionLogRetentionConfig();
@@ -332,11 +318,11 @@ export function pruneDecisionLogs(db: RetentionDb, nowMs: number): number {
 
   if (retentionDays > 0) {
     const cutoff = toSqliteTimestamp(new Date(nowMs - retentionDays * DAY_MS));
-    deleted += db.prepare('DELETE FROM decision_requests WHERE created_at < ?').run(cutoff).changes;
+    deleted += db.run('DELETE FROM decision_requests WHERE created_at < ?', [cutoff]).changes;
   }
 
   if (maxRows > 0) {
-    deleted += db.prepare(`
+    deleted += db.run(`
       DELETE FROM decision_requests
       WHERE id IN (
         SELECT id
@@ -344,7 +330,7 @@ export function pruneDecisionLogs(db: RetentionDb, nowMs: number): number {
         ORDER BY created_at DESC, id DESC
         LIMIT -1 OFFSET ?
       )
-    `).run(maxRows).changes;
+    `, [maxRows]).changes;
   }
 
   return deleted;
@@ -369,11 +355,11 @@ export function pruneRequestAnalytics(options: {
 
   if (retentionDays > 0) {
     const cutoff = toSqliteTimestamp(new Date(nowMs - retentionDays * DAY_MS));
-    deleted += db.prepare('DELETE FROM requests WHERE created_at < ?').run(cutoff).changes;
+    deleted += db.run('DELETE FROM requests WHERE created_at < ?', [cutoff]).changes;
   }
 
   if (maxRows > 0) {
-    deleted += db.prepare(`
+    deleted += db.run(`
       DELETE FROM requests
       WHERE id IN (
         SELECT id
@@ -381,7 +367,7 @@ export function pruneRequestAnalytics(options: {
         ORDER BY created_at DESC, id DESC
         LIMIT -1 OFFSET ?
       )
-    `).run(maxRows).changes;
+    `, [maxRows]).changes;
   }
 
   // Persisted server logs, on the same 60s gate as the requests prune above.
@@ -412,9 +398,7 @@ export function pruneRequestAnalytics(options: {
 
   if (nowMs >= nextHourlyPruneAtMs) {
     nextHourlyPruneAtMs = nowMs + HOURLY_PRUNE_INTERVAL_MS;
-    const hasHourly = !!db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='request_hourly'")
-      .get();
+    const hasHourly = !!db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='request_hourly'");
     if (hasHourly) {
       // Hour keys are created_at truncated to the hour, in SQLite's canonical
       // 'YYYY-MM-DD HH:00:00' text (space separator) — same as logRequest.hourKey()
@@ -422,7 +406,7 @@ export function pruneRequestAnalytics(options: {
       // compare on the space form so the prune boundary matches the read window.
       const sqliteCutoff = toSqliteTimestamp(new Date(nowMs - HOURLY_RETENTION_DAYS * DAY_MS));
       const hourlyCutoff = sqliteCutoff.slice(0, 13) + ':00:00';
-      const hourlyDeleted = db.prepare('DELETE FROM request_hourly WHERE hour < ?').run(hourlyCutoff).changes;
+      const hourlyDeleted = db.run('DELETE FROM request_hourly WHERE hour < ?', [hourlyCutoff]).changes;
       if (hourlyDeleted > 0) {
         deleted += hourlyDeleted;
       }

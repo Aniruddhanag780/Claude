@@ -26,8 +26,8 @@
 
 import type { Db } from '../types.js';
 
-export function up(db: Db): void {
-  db.exec(`
+export async function up(db: Db): Promise<void> {
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS response_cache (
       cache_key TEXT PRIMARY KEY,
       body_json TEXT NOT NULL,
@@ -48,8 +48,8 @@ export function up(db: Db): void {
   `);
 }
 
-export function down(db: Db): void {
-  db.exec(`
+export async function down(db: Db): Promise<void> {
+  await db.exec(`
     DROP INDEX IF EXISTS idx_response_cache_expires;
     DROP TABLE IF EXISTS response_cache;
   `);

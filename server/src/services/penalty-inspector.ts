@@ -126,13 +126,13 @@ export function getPenaltyInspector(): PenaltyInspectorSnapshot {
   const penalties = getAllPenalties();
   if (penalties.length > 0) {
     const placeholders = penalties.map(() => '?').join(',');
-    const models = db.prepare(`
+    const models = db.all( `
       SELECT m.id AS model_db_id, m.platform, m.model_id, m.display_name,
              m.enabled AS model_enabled, fc.enabled AS fallback_enabled, fc.priority
         FROM models m
         LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
        WHERE m.id IN (${placeholders})
-    `).all(...penalties.map(p => p.modelDbId)) as Array<{
+    `, [...penalties.map(p => p.modelDbId)]) as Array<{
       model_db_id: number;
       platform: string;
       model_id: string;
@@ -159,7 +159,7 @@ export function getPenaltyInspector(): PenaltyInspectorSnapshot {
     }
   }
 
-  const cooldownRows = db.prepare(`
+  const cooldownRows = db.all(`
     SELECT c.platform, c.model_id, c.key_id, c.expires_at_ms,
            m.id AS model_db_id, m.display_name, m.enabled AS model_enabled,
            fc.enabled AS fallback_enabled, fc.priority,
@@ -170,7 +170,7 @@ export function getPenaltyInspector(): PenaltyInspectorSnapshot {
       LEFT JOIN api_keys ak ON ak.id = c.key_id
      WHERE c.expires_at_ms > ?
      ORDER BY c.expires_at_ms ASC
-  `).all(now) as Array<{
+  `, [now]) as Array<{
     platform: string;
     model_id: string;
     key_id: number;
@@ -204,7 +204,7 @@ export function getPenaltyInspector(): PenaltyInspectorSnapshot {
   }
 
   const since = toSqliteDateTime(now - INSPECTOR_LOOKBACK_MINUTES * 60 * 1000);
-  const errorRows = db.prepare(`
+  const errorRows = db.all(`
     SELECT r.id, r.platform, r.model_id, r.key_id, r.error, r.latency_ms, r.created_at,
            m.id AS model_db_id, m.display_name, m.enabled AS model_enabled,
            fc.enabled AS fallback_enabled, fc.priority,
@@ -217,7 +217,7 @@ export function getPenaltyInspector(): PenaltyInspectorSnapshot {
        AND r.created_at >= ?
      ORDER BY r.created_at DESC, r.id DESC
      LIMIT 250
-  `).all(since) as Array<{
+  `, [since]) as Array<{
     id: number;
     platform: string;
     model_id: string;

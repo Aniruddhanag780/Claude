@@ -38,8 +38,7 @@ export function endpointScopeForBaseUrl(baseUrl: string | null | undefined): str
  */
 export function endpointScopeOfKey(db: Db, keyId: number | null | undefined): string {
   if (keyId == null) return '';
-  const row = db.prepare("SELECT base_url FROM api_keys WHERE id = ? AND platform = 'custom'")
-    .get(keyId) as { base_url: string | null } | undefined;
+  const row = db.get("SELECT base_url FROM api_keys WHERE id = ? AND platform = 'custom'", [keyId]) as { base_url: string | null } | undefined;
   return endpointScopeForBaseUrl(row?.base_url);
 }
 
