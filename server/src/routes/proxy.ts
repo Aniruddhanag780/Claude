@@ -4,7 +4,7 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import type { ChatMessage, ChatToolCall, TokenUsage } from '@freellmapi/shared/types.js';
 import { type RouteResult, type ResolvedChain, type ChainRow, routeRequest, resolveRoutingChain, resolveModelGroupCandidates, resolveStickyPreference, hasEnabledVisionModel, hasEnabledToolsModel, routingReserveTokens, failureAttributionFor } from '../services/router.js';
-import { secondsUntilNextMonth } from '../services/key-budget.js';
+import { secondsUntilNextMonth, nextMonthResetAt } from '../services/key-budget.js';
 import { runEmbeddings, EmbeddingsError } from '../services/embeddings.js';
 import { runRerank, RerankError, rerankRetryAfterSec } from '../services/rerank.js';
 import { runSearch, SearchError, searchRetryAfterSec, listSearchEngines } from '../services/search.js';
@@ -468,6 +468,50 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
         supported_parameters: supportedParametersForPlatforms(m.platforms, { tools: m.supportsTools }),
       })),
     ],
+  });
+});
+
+
+// GET /v1/usage — self-service consumption for inference clients (#1568).
+//
+// OpenRouter exposes GET /api/v1/auth/key (usage + limits for the calling key)
+// and LiteLLM exposes /key/info; every agent user who wonders "what happened
+// to my 120M tokens" currently has to open the dashboard to find out. This
+// puts the same answer behind the key that spent the tokens: one month-to-date
+// roll-up of successful proxied requests, split by provider platform, plus
+// when the window resets.
+//
+// Reads the durable key_monthly_usage ledger (the per-key monthly-cap source),
+// NOT the analytics table, so retention pruning can never make the answer
+// disagree with what the caps enforce. Aggregated per PROVIDER key joined to
+// api_keys for the platform label; requests whose key was deleted have already
+// dropped out of the ledger's join and are reported under "removed".
+proxyRouter.get('/usage', (req: Request, res: Response) => {
+  if (!requireInferenceAuth(req, res)) return;
+
+  const month = new Date().toISOString().slice(0, 7);
+  const db = getDb();
+  const totals = db.prepare(`
+    SELECT COALESCE(SUM(requests), 0) AS requests, COALESCE(SUM(tokens), 0) AS tokens
+    FROM key_monthly_usage WHERE month = ?
+  `).get(month) as { requests: number; tokens: number };
+  const byPlatform = db.prepare(`
+    SELECT COALESCE(k.platform, 'removed') AS platform,
+           SUM(u.requests) AS requests, SUM(u.tokens) AS tokens
+    FROM key_monthly_usage u
+    LEFT JOIN api_keys k ON k.id = u.key_id
+    WHERE u.month = ?
+    GROUP BY COALESCE(k.platform, 'removed')
+    ORDER BY tokens DESC, requests DESC
+  `).all(month) as { platform: string; requests: number; tokens: number }[];
+
+  res.json({
+    object: 'usage',
+    month,
+    resetsAt: nextMonthResetAt(),
+    requests: totals.requests,
+    tokens: totals.tokens,
+    byPlatform,
   });
 });
 

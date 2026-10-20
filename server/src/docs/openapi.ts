@@ -624,6 +624,22 @@ export const openapiSpec = {
         },
       },
     },
+    '/v1/usage': {
+      get: {
+        tags: ['Models'],
+        operationId: 'getUsage',
+        summary: 'Month-to-date consumption for the calling key',
+        description:
+          'Returns the current calendar month\'s successful requests and tokens, split by provider ' +
+          'platform, plus the UTC instant when the monthly window resets. Read from the same ledger ' +
+          'the per-key monthly caps enforce, so these numbers always agree with a 429 quota_exceeded ' +
+          'response. Mirrors OpenRouter GET /api/v1/auth/key and LiteLLM /key/info.',
+        responses: {
+          '200': { description: 'Usage roll-up: month, resetsAt, requests, tokens, byPlatform[].' },
+          '401': { $ref: '#/components/responses/Unauthorized' },
+        },
+      },
+    },
     '/v1beta/models': {
       get: {
         tags: ['Gemini'],
