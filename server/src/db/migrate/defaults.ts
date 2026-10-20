@@ -12,6 +12,7 @@ import * as modelsPlatformAndSource from '../migrations/010_models_platform_and_
 import * as addProxyToCredentialsAndApiKeys from '../migrations/011_add_proxy_to_credentials_and_api_keys.js';
 import * as requestAttemptsAndServedModel from '../migrations/012_request_attempts_and_served_model.js';
 import * as benchmarkCatalogModels from '../migrations/013_benchmark_catalog_models.js';
+import * as addRequestCaller from '../migrations/014_add_request_caller.js';
 
 export interface MigrationModule {
   up(client: pg.PoolClient | pg.Pool): Promise<void> | void;
@@ -36,6 +37,7 @@ export const MODELS_PLATFORM_AND_SOURCE_FILENAME = '010_models_platform_and_sour
 export const ADD_PROXY_TO_CREDENTIALS_AND_API_KEYS_FILENAME = '011_add_proxy_to_credentials_and_api_keys.ts';
 export const REQUEST_ATTEMPTS_AND_SERVED_MODEL_FILENAME = '012_request_attempts_and_served_model.ts';
 export const BENCHMARK_CATALOG_MODELS_FILENAME = '013_benchmark_catalog_models.ts';
+export const ADD_REQUEST_CALLER_FILENAME = '014_add_request_caller.ts';
 
 export const DEFAULT_MIGRATIONS: readonly DefaultMigration[] = [
   { filename: INITIAL_SCHEMA_FILENAME, module: initialSchema },
@@ -51,4 +53,5 @@ export const DEFAULT_MIGRATIONS: readonly DefaultMigration[] = [
   { filename: ADD_PROXY_TO_CREDENTIALS_AND_API_KEYS_FILENAME, module: addProxyToCredentialsAndApiKeys },
   { filename: REQUEST_ATTEMPTS_AND_SERVED_MODEL_FILENAME, module: requestAttemptsAndServedModel },
   { filename: BENCHMARK_CATALOG_MODELS_FILENAME, module: benchmarkCatalogModels },
+  { filename: ADD_REQUEST_CALLER_FILENAME, module: addRequestCaller },
 ];

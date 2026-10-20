@@ -2,6 +2,7 @@ import { getDb } from '../db/index.js';
 import { recordRequestTelemetry } from '../services/analytics-aggregator.js';
 import { getActiveRegistry } from '../services/router-registry.js';
 import { settleMonthlyUsage } from '../services/key-budget.js';
+import { getClientContext } from './client-context.js';
 import { noteRequestRowId, type RequestTrace } from './attempt-trace.js';
 
 // Memory-first zero-DB request logging
@@ -19,9 +20,9 @@ export function logRequest(
   _servedModel: string | null = null,
   // Which gateway pathway produced the request ('http' for the OpenAI-
   // compatible proxy, /v1/responses, /v1/messages, the Ollama + Gemini wires
-  // and fusion's sub-calls). Upstream persists it on the request row; the
-  // fork's memory-first telemetry has no per-caller breakdown, so the value is
-  // accepted (and ignored) here to keep every upstream call site compiling.
+  // and fusion's sub-calls; 'mcp' / 'web' for the other surfaces). Persisted
+  // on the request row's own `caller` column (#1102) — the fork's port used
+  // to fold it into `client_agent`, which belongs to the agent classifier.
   _caller: string | null = null,
 ) {
   try {
@@ -59,11 +60,12 @@ export function logRequest(
 
     const db = getDb();
     if (typeof db?.query === 'function') {
+      const client = getClientContext();
       const qPromise = db.query(
-        `INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms, requested_model, served_model, client_agent)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        `INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms, requested_model, served_model, client_agent, caller)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING id`,
-        [platform, modelId, keyId, status, inputTokens || 0, outputTokens || 0, latencyMs || 0, error || null, _ttfbMs, _requestedModel, _servedModel, _caller]
+        [platform, modelId, keyId, status, inputTokens || 0, outputTokens || 0, latencyMs || 0, error || null, _ttfbMs, _requestedModel, _servedModel, client.agent, _caller]
       );
       if (qPromise && typeof qPromise.then === 'function') {
         qPromise.then((res: any) => {
