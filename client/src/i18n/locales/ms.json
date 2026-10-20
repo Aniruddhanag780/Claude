@@ -365,8 +365,9 @@
     "decisionSetupHelp": "Decision routing asks a free decision model which strategy fits each request. It needs a key for one of these providers. Both have a free tier, no card needed.",
     "decisionAddKey": "Add {provider} key",
     "decisionNoModels": "No decision model is turned on yet. Turn one on under Models → Decision.",
-    "decisionOpenModels": "Open decision models"
-  },
+    "decisionOpenModels": "Open decision models",
+    "builtinKeyConcurrency": "Built-in per-key concurrency caps",
+    "builtinKeyConcurrencyHint": "When on, the major free-tier platforms fall back to a conservative built-in per-key concurrency cap unless a MAX_CONCURRENT_REQUESTS_PER_KEY* env var says otherwise. Off by default."  },
   "penaltyInspector": {
     "title": "Tekanan penghala",
     "subtitle": "Penalti, cooldown, dan kegagalan dari {minutes} minit terakhir",
