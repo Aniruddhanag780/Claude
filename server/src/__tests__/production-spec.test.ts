@@ -5,6 +5,7 @@ import { matchModelImplementations, computeRouteScore, SmartRouterError } from '
 import { analyticsAggregator } from '../services/analytics-aggregator.js';
 import { initPostgresPool } from '../db/postgres.js';
 import { runMigrations, getMigrationStatuses } from '../db/migrate/runner.js';
+import { DEFAULT_MIGRATIONS } from '../db/migrate/defaults.js';
 
 describe('Production Implementation Specification Tests', () => {
   beforeEach(() => {
@@ -267,7 +268,9 @@ describe('Production Implementation Specification Tests', () => {
       await runMigrations(pool, 'up');
       const statuses = await getMigrationStatuses(pool);
 
-      expect(statuses.length).toBe(7);
+      // The count follows the migration ledger — a hardcoded number goes stale
+      // every time a migration is added (the fork is at 13).
+      expect(statuses.length).toBe(DEFAULT_MIGRATIONS.length);
       expect(statuses[0].filename).toBe('001_initial_schema.ts');
       expect(statuses[0].status).toBe('applied');
       expect(statuses[1].filename).toBe('002_seed_providers_models.ts');

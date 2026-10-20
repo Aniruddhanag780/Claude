@@ -145,6 +145,10 @@ describe('bandit router', () => {
     // skipped — a wasted draw. With the pool filtered, vision-c receives
     // every explore draw (~10% of requests); unfixed it got only ~5%, far
     // below the 150/2000 bound asserted here.
+    //
+    // The 2000 routing calls below take ~4.5s on a loaded CI box, so the
+    // generic 5s per-test limit was within ~500ms of killing it. The budget
+    // is raised, NOT the assertions.
     setExploreEnabled(true);
     addModel({ platform: 'google', modelId: 'vision-a', name: 'Vision A', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 1, vision: true });
     addModel({ platform: 'groq', modelId: 'text-b', name: 'Text B', intelligenceRank: 2, sizeLabel: 'Frontier', budget: '~50M', priority: 2 });
@@ -162,7 +166,7 @@ describe('bandit router', () => {
     // vision-c bound below actually pins down.
     expect(counts['text-b'] ?? 0).toBe(0);
     expect(counts['vision-c'] ?? 0).toBeGreaterThan(150);
-  });
+  }, 30_000);
 
   it('smartest vs fastest flips which model wins, at equal reliability', () => {
     // Smart: frontier tier, slow. Fast: small tier, high throughput. Equal success.
