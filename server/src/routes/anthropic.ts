@@ -204,9 +204,9 @@ function newMessageId(): string {
 }
 
 // ── Auth (shared with the OpenAI route) ─────────────────────────────────────
-function authenticate(req: Request, res: Response): boolean {
+async function authenticate(req: Request, res: Response): Promise<boolean> {
   const token = extractApiToken(req);
-  const unifiedKey = getUnifiedApiKey();
+  const unifiedKey = await getUnifiedApiKey();
   if (!token || !timingSafeStringEqual(token, unifiedKey)) {
     sendError(res, 401, 'authentication_error', 'Invalid API key');
     return false;
@@ -460,7 +460,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
 
 export async function handleMessages(req: Request, res: Response): Promise<void> {
   const start = Date.now();
-  if (!authenticate(req, res)) return;
+  if (!await authenticate(req, res)) return;
 
   const parsed = messagesSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -508,7 +508,7 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
   const messageHasCacheControl = body.messages.some(message =>
     Array.isArray(message.content)
     && message.content.some(block => block && typeof block === 'object' && 'cache_control' in block));
-  const compressionResult = compressRequest(messages, {
+  const compressionResult = await compressRequest(messages, {
     header: req.headers['x-freellm-compress'],
     tools,
     // Claude Code normally marks the system prefix. If a later native message
@@ -526,7 +526,7 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
   // Guardrail: per-request token budget (request_max_tokens_budget, default
   // off). A client-set max_tokens can only pass or reject; an omitted one is
   // capped to the budget remainder, mirroring /v1/chat/completions.
-  const budgetCheck = applyTokenBudget(estimatedInputTokens + imageCount * IMAGE_TOKEN_ESTIMATE, clientMaxTokens);
+  const budgetCheck = await applyTokenBudget(estimatedInputTokens + imageCount * IMAGE_TOKEN_ESTIMATE, clientMaxTokens);
   if (budgetCheck.rejection) {
     sendError(res, 413, 'invalid_request_error', tokenBudgetMessage(budgetCheck.rejection));
     return;
@@ -550,7 +550,7 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
   // Resolve the model through the operator's Claude-family map (opus/sonnet/
   // haiku/default → auto | a pinned catalog model). A concrete catalog id pins
   // directly. `pinned` drives the analytics requested-model label.
-  const resolved = resolveAnthropicModel(routedModel);
+  const resolved = await resolveAnthropicModel(routedModel);
   const pinnedModelId = resolved.pinned ? (body.model ?? null) : null;
 
   // Named `auto:<profile>` chains (and plain `auto`) must go through the same
@@ -563,7 +563,7 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
     : (isAutoModel(routedModel) ? routedModel : undefined);
   if (!resolved.pinned && autoModelString !== undefined) {
     try {
-      resolvedChain = resolveRoutingChain(autoModelString);
+      resolvedChain = await resolveRoutingChain(autoModelString);
       // Named auto:<profile> / auto:smart get their own sticky bucket. Plain
       // `auto` stays unscoped so Claude Code session affinity is unchanged.
       strategyKey = resolvedChain.strategyKey === 'auto' ? undefined : resolvedChain.strategyKey;
@@ -604,10 +604,10 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
   // leaking affinity across groups. Undefined for auto (the global scope).
   let stickyScope: string | undefined;
   if (resolved.modelId) {
-    const dispatch = isUnifyEnabled() ? resolveRequestedIdForDispatch(resolved.modelId, getModelGroups()) : null;
+    const dispatch = isUnifyEnabled() ? resolveRequestedIdForDispatch(resolved.modelId, await getModelGroups()) : null;
     const members = dispatch?.memberDbIds ?? null;
     if (members && members.length > 0) {
-      const chain = resolveModelGroupCandidates(members, dispatch!.demotedDbIds);
+      const chain = await resolveModelGroupCandidates(members, dispatch!.demotedDbIds);
       // An empty chain would mean the pinned row is no longer routable at all;
       // this surface is lenient, so leave the legacy single-row pin in place
       // rather than failing the request.
@@ -617,7 +617,7 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
       }
     }
   } else if (resolved.tierDbIds && resolved.tierDbIds.length > 0) {
-    const chain = resolveModelGroupCandidates(resolved.tierDbIds);
+    const chain = await resolveModelGroupCandidates(resolved.tierDbIds);
     if (chain.length > 0) {
       groupChain = chain;
       // Scoped per tier, not per model: a session on tier:sonnet keeps its
@@ -637,7 +637,7 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
     preferredModel = (sticky != null && groupChain.some(r => r.model_db_id === sticky)) ? sticky : undefined;
   }
   if (preferredModel == null && !groupChain) {
-    preferredModel = resolveStickyPreference(getStickyModel(messages, sessionId, strategyKey), resolvedChain?.chain);
+    preferredModel = await resolveStickyPreference(getStickyModel(messages, sessionId, strategyKey), resolvedChain?.chain);
   }
 
   // Thin adapter over the shared fallback loop (lib/fallback-loop.ts): the
@@ -685,14 +685,14 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
     logIdentity: { surface: 'anthropic messages', requestedModel },
     clientGone: () => clientGone,
     abortInFlight: () => hedgeAbort.abort(newHedgeAbortError()),
-    route: () => {
+    route: async () => {
       // Task-type routing (#1127): same header/derivation as /chat/completions.
       const taskType = resolveTaskType(req, tools, messages);
       // #507: inflate the routing estimate from any provider-reported REQUESTED
       // size latched onto state so the existing size gates in router.ts skip
       // low-TPM / small-context models on retry.
       const routingTotal = fallbackRoutingTokens(state, estimatedTotal, outputReserve);
-      return routeRequest(routingTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? resolvedChain?.chain, false, state.skipPlatforms.size > 0 ? state.skipPlatforms : undefined, outputReserve, taskType);
+      return await routeRequest(routingTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? resolvedChain?.chain, false, state.skipPlatforms.size > 0 ? state.skipPlatforms : undefined, outputReserve, taskType);
     },
     dispatch: async (route, attempt, dispatchCtx) => {
       const contextBudget = routeOutputBudget(route, estimatedInputTokens);
@@ -769,7 +769,7 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
         // is where the silent failure was worst: parseToolInput turns
         // unparseable arguments into `input: {}`, so the client sees a tool_use
         // block with nothing in it and no indication anything went wrong.
-        if (isToolArgumentValidationEnabled()) {
+        if (await isToolArgumentValidationEnabled()) {
           const invalid = invalidToolCallReasons(respToolCalls, schemas);
           if (invalid.length > 0) throw invalidToolArgumentsError(route.displayName, invalid);
         }
@@ -778,7 +778,7 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
       const promptTokens = result.usage?.prompt_tokens ?? estimatedInputTokens;
       const completionTokens = result.usage?.completion_tokens ?? Math.ceil((respText.length + respToolCalls.reduce((n, c) => n + c.function.arguments.length, 0)) / 4);
 
-      recordUpstreamSuccess(route, result.usage?.total_tokens ?? promptTokens + completionTokens, state);
+      await recordUpstreamSuccess(route, result.usage?.total_tokens ?? promptTokens + completionTokens, state);
       // Remember this model for the rest of the auto-routed session. A pin used
       // to make this a no-op (the pin fixed the model); a group pin still has a
       // provider choice to remember, recorded under the group's own scope.
@@ -796,24 +796,24 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
       };
 
       res.setHeader('X-Routed-Via', routedViaValue(route.platform, route.modelId));
-      setFallbackHeaders(res, attempt, attemptLog);
-      logRequest(route.platform, route.modelId, route.keyId, 'success', promptTokens, completionTokens, Date.now() - start, null, null, pinnedModelId, null, 'http');
+      await setFallbackHeaders(res, attempt, attemptLog);
+      await logRequest(route.platform, route.modelId, route.keyId, 'success', promptTokens, completionTokens, Date.now() - start, null, null, pinnedModelId, null, 'http');
       res.json(anthropicResponse);
       return 'done';
     },
-    logFailure: (route, err) => {
-      logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, sanitizeProviderErrorMessage(err.message), null, pinnedModelId, null, 'http', failureAttributionFor(err));
+    logFailure: async (route, err) => {
+      await logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, sanitizeProviderErrorMessage(err.message), null, pinnedModelId, null, 'http', await failureAttributionFor(err));
     },
-    onFatal: (route, err, attempt) => {
-      setFallbackHeaders(res, attempt, attemptLog);
+    onFatal: async (route, err, attempt) => {
+      await setFallbackHeaders(res, attempt, attemptLog);
       sendError(res, 502, 'api_error', `Provider error (${route.displayName}): ${sanitizeProviderErrorMessage(err.message)}`);
     },
-    onRoutingExhausted: (lastError, routeErr, exhaustion, info) => {
-      setFallbackHeaders(res, info.attempts.length, info.attempts);
+    onRoutingExhausted: async (lastError, routeErr, exhaustion, info) => {
+      await setFallbackHeaders(res, info.attempts.length, info.attempts);
       sendExhaustion(res, exhaustion);
     },
-    onExhausted: (exhaustion, info) => {
-      setFallbackHeaders(res, info.attempts.length, info.attempts);
+    onExhausted: async (exhaustion, info) => {
+      await setFallbackHeaders(res, info.attempts.length, info.attempts);
       sendExhaustion(res, exhaustion);
     },
   });
@@ -878,13 +878,13 @@ async function streamCompletion(
   let dialectMode: 'undecided' | 'passthrough' | 'dialect' = 'undecided';
   let heldText = '';
 
-  const ensureMessageStart = () => {
+  const ensureMessageStart = async () => {
     if (messageStarted) return;
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Routed-Via', routedViaValue(route.platform, route.modelId));
-    setFallbackHeaders(res, ctx.attempt, ctx.attemptLog);
+    await setFallbackHeaders(res, ctx.attempt, ctx.attemptLog);
     // Committed: the answer is on its way, so the retry budget must no longer
     // cancel this attempt (it could not fail over now anyway).
     ctx.disarmHedge();
@@ -917,8 +917,8 @@ async function streamCompletion(
   };
 
   // Commit (if needed), open the text block (if needed), and stream `text`.
-  const emitText = (text: string) => {
-    ensureMessageStart();
+  const emitText = async (text: string) => {
+    await ensureMessageStart();
     if (!textBlockOpen) {
       flushThinking(); // thinking block precedes the text block
       textBlockIndex = nextIndex++;
@@ -944,7 +944,7 @@ async function streamCompletion(
         if (!messageStarted) throw new Error(`in-band provider error from ${route.displayName}: ${msg}`);
         writeSse(res, 'error', { type: 'error', error: { type: 'api_error', message: `Provider error (${route.displayName}): ${sanitizeProviderErrorMessage(String(msg))}` } });
         res.end();
-        logRequest(route.platform, route.modelId, route.keyId, 'error', ctx.estimatedInputTokens, outputChars, Date.now() - ctx.start, `in-band error frame: ${sanitizeProviderErrorMessage(String(msg))}`, null, ctx.pinnedModelId, null, 'http', failureAttributionFor({ message: String(msg) }));
+        await logRequest(route.platform, route.modelId, route.keyId, 'error', ctx.estimatedInputTokens, outputChars, Date.now() - ctx.start, `in-band error frame: ${sanitizeProviderErrorMessage(String(msg))}`, null, ctx.pinnedModelId, null, 'http', await failureAttributionFor({ message: String(msg) }));
         throw new StreamAlreadyStarted();
       }
 
@@ -974,7 +974,7 @@ async function streamCompletion(
       if (text.length === 0) continue;
 
       if (dialectMode === 'passthrough') {
-        emitText(text);
+        await emitText(text);
       } else {
         heldText += text;
         if (dialectMode === 'undecided') {
@@ -983,7 +983,7 @@ async function streamCompletion(
             dialectMode = 'dialect';
           } else if (!couldBecomeDialectMarker(probe) || heldText.length > 256) {
             dialectMode = 'passthrough';
-            emitText(heldText);
+            await emitText(heldText);
             heldText = '';
           }
         }
@@ -1017,7 +1017,7 @@ async function streamCompletion(
         throw new Error(`unparseable inline tool-call dialect from ${route.displayName}: ${heldText.slice(0, 120)}`);
       }
       if (rescue.detected && rescue.calls) {
-        if (rescue.cleanText.length > 0) emitText(rescue.cleanText);
+        if (rescue.cleanText.length > 0) await emitText(rescue.cleanText);
         for (const c of rescue.calls) {
           const repaired = repairToolArguments(c.arguments, schemas.get(c.name));
           if (c.name.length === 0) continue;
@@ -1026,7 +1026,7 @@ async function streamCompletion(
         }
         console.log(`[Anthropic] Rescued ${rescue.calls.length} inline tool call(s) from ${route.displayName} into tool_use`);
       } else {
-        emitText(heldText);
+        await emitText(heldText);
       }
       heldText = '';
     }
@@ -1037,7 +1037,7 @@ async function streamCompletion(
     // call is judged too, and gated on `!messageStarted` — once message_start
     // has gone out there is no failing over, and tearing the SSE stream down
     // would be worse for the client than a tool_use the schema dislikes.
-    if (isToolArgumentValidationEnabled() && !messageStarted && completedCalls.length > 0) {
+    if (await isToolArgumentValidationEnabled() && !messageStarted && completedCalls.length > 0) {
       const invalid = invalidToolCallReasons(
         completedCalls.map(c => ({ function: { name: c.name, arguments: c.arguments } })),
         schemas,
@@ -1066,7 +1066,7 @@ async function streamCompletion(
       );
     }
 
-    ensureMessageStart();
+    await ensureMessageStart();
     if (textBlockOpen) writeSse(res, 'content_block_stop', { type: 'content_block_stop', index: textBlockIndex });
     // Residual reasoning: tool-only turns (no text block ever opened) and
     // reasoning that arrived after the text block was already streaming.
@@ -1096,9 +1096,9 @@ async function streamCompletion(
     writeSse(res, 'message_stop', { type: 'message_stop' });
     res.end();
 
-    recordUpstreamSuccess(route, ctx.estimatedInputTokens + outputTokens, ctx.state);
+    await recordUpstreamSuccess(route, ctx.estimatedInputTokens + outputTokens, ctx.state);
     if (!ctx.pinned || ctx.stickyScope) setStickyModel(messages, route.modelDbId, ctx.sessionId, ctx.stickyScope ?? ctx.strategyKey);
-    logRequest(route.platform, route.modelId, route.keyId, 'success', ctx.estimatedInputTokens, outputTokens, Date.now() - ctx.start, null, null, ctx.pinnedModelId, null, 'http');
+    await logRequest(route.platform, route.modelId, route.keyId, 'success', ctx.estimatedInputTokens, outputTokens, Date.now() - ctx.start, null, null, ctx.pinnedModelId, null, 'http');
   } catch (err: any) {
     if (err instanceof StreamAlreadyStarted) throw err;
     // Client abort mid-stream: the pump's own `if (ctx.clientGone()) break`
@@ -1112,7 +1112,7 @@ async function streamCompletion(
       // honestly instead of leaving Claude Code hanging, and stop the retry loop.
       writeSse(res, 'error', { type: 'error', error: { type: 'api_error', message: `Provider error (${route.displayName}): stream interrupted` } });
       try { res.end(); } catch { /* socket gone */ }
-      logRequest(route.platform, route.modelId, route.keyId, 'error', ctx.estimatedInputTokens, outputChars, Date.now() - ctx.start, sanitizeProviderErrorMessage(err.message), null, ctx.pinnedModelId, null, 'http', failureAttributionFor(err));
+      await logRequest(route.platform, route.modelId, route.keyId, 'error', ctx.estimatedInputTokens, outputChars, Date.now() - ctx.start, sanitizeProviderErrorMessage(err.message), null, ctx.pinnedModelId, null, 'http', await failureAttributionFor(err));
       throw new StreamAlreadyStarted();
     }
     // Headers never sent — bubble to the outer loop for failover.
@@ -1122,8 +1122,8 @@ async function streamCompletion(
 
 // Anthropic token-counting endpoint. Claude Code calls this to size context
 // windows; we return a heuristic estimate (the proxy doesn't run a tokenizer).
-anthropicRouter.post('/messages/count_tokens', (req: Request, res: Response) => {
-  if (!authenticate(req, res)) return;
+anthropicRouter.post('/messages/count_tokens', async (req: Request, res: Response) => {
+  if (!await authenticate(req, res)) return;
   const parsed = messagesSchema.safeParse(req.body);
   if (!parsed.success) {
     sendError(res, 400, 'invalid_request_error', 'Invalid request');
@@ -1138,7 +1138,7 @@ anthropicRouter.post('/messages/count_tokens', (req: Request, res: Response) => 
     return;
   }
   const { messages, tools } = converted;
-  const compressionResult = compressRequest(messages, {
+  const compressionResult = await compressRequest(messages, {
     header: req.headers['x-freellm-compress'],
     tools,
     recordStats: false,
@@ -1161,19 +1161,19 @@ anthropicRouter.post('/messages/count_tokens', (req: Request, res: Response) => 
 //
 // Optional `claude/<real-id>` aliases let Claude Code's gateway picker discover
 // the full catalog; /messages strips the synthetic prefix before routing.
-anthropicRouter.get('/models', (req: Request, res: Response, next: NextFunction) => {
+anthropicRouter.get('/models', async (req: Request, res: Response, next: NextFunction) => {
   if (!req.headers['anthropic-version']) return next(); // OpenAI client → proxyRouter
-  if (!authenticate(req, res)) return;
+  if (!await authenticate(req, res)) return;
 
-  const { models } = buildModelListing();
+  const { models } = await buildModelListing();
   const available = models.filter(m => m.available === 1);
-  const aliasesEnabled = getSetting('expose_cc_discovery_aliases') === '1';
+  const aliasesEnabled = await getSetting('expose_cc_discovery_aliases') === '1';
   const data = [
     { type: 'model' as const, id: 'auto', display_name: 'Auto (router picks the best available model)', created_at: MODEL_CREATED_AT },
     // Only when something can actually serve them: advertising a Sonnet slot
     // backed by an empty pool would trade "0 models" for a model that 503s.
     ...(available.length > 0
-      ? claudeFamilyDiscoveryEntries().map(a => ({
+      ? await (await claudeFamilyDiscoveryEntries()).map(a => ({
         type: 'model' as const,
         id: a.id,
         display_name: a.displayName,

@@ -217,7 +217,7 @@ function toPosixPath(value: string): string {
   return value.replaceAll(path.sep, '/');
 }
 
-main().catch((err: unknown) => {
+await main().catch((err: unknown) => {
   console.error(err);
   process.exit(1);
 });

@@ -44,7 +44,7 @@ export class CohereProvider extends BaseProvider {
       model: modelId,
       messages: flattenMessageContent(messages),
       temperature: options?.temperature,
-      max_tokens: resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
+      max_tokens: await resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
       top_p: options?.top_p,
       stop: options?.stop,
       tools: sanitizeCohereTools(options?.tools),
@@ -62,7 +62,7 @@ export class CohereProvider extends BaseProvider {
       // 'request' bounds: the deadline covers the body read too, so a 200
       // whose body hangs aborts instead of stalling res.json() forever.
     }, undefined, { signal: options?.signal, timeoutBounds: 'request' });
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -92,7 +92,7 @@ export class CohereProvider extends BaseProvider {
       model: modelId,
       messages: flattenMessageContent(messages),
       temperature: options?.temperature,
-      max_tokens: resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
+      max_tokens: await resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
       top_p: options?.top_p,
       stop: options?.stop,
       tools: sanitizeCohereTools(options?.tools),
@@ -111,7 +111,7 @@ export class CohereProvider extends BaseProvider {
       // Default 'headers' bounds: the deadline dies at response headers, and
       // the client signal + stall watchdog own the stream from there.
     }, undefined, { signal: options?.signal });
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -135,7 +135,7 @@ export class CohereProvider extends BaseProvider {
       method: 'GET',
       headers: { 'Authorization': `Bearer ${apiKey}` },
     }, 10000, { timeoutBounds: 'request' });
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -143,6 +143,6 @@ export class CohereProvider extends BaseProvider {
       quotaPoolKey: quotaContext?.quotaPoolKey,
       endpoint: 'models',
     });
-    return this.validationResult(res);
+    return await this.validationResult(res);
   }
 }

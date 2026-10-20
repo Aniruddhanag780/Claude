@@ -63,11 +63,11 @@ export interface RetirementRoute {
  * retired it. Never throws: it runs on the proxy's failure path, where a DB
  * hiccup must not turn a failover into a crash.
  */
-export function noteModelRetirementSignal(
+export async function noteModelRetirementSignal(
   route: RetirementRoute,
   err: unknown,
   requestToken?: unknown,
-): boolean {
+): Promise<boolean> {
   const confidence = modelRetirementSignal(err);
   if (!confidence) return false;
 
@@ -77,18 +77,18 @@ export function noteModelRetirementSignal(
   const reason = summarizeAttemptError((err as { message?: unknown })?.message);
   try {
     const db = getDb();
-    const row = db.get('SELECT id, platform, model_id, key_id, source FROM models WHERE id = ?', [route.modelDbId]) as
+    const row = await db.get('SELECT id, platform, model_id, key_id, source FROM models WHERE id = ?', [route.modelDbId]) as
       | { id: number; platform: string; model_id: string; key_id: number | null; source: string }
       | undefined;
     // Only catalog-managed rows: a model the user added by hand is their state,
     // not the catalog's, and the tombstone table has no meaning for it.
     if (!row || !isCatalogManagedModel(row)) return false;
-    if (!retireCatalogModelUpstream(db, row.id, row.platform, row.model_id, reason)) return false;
+    if (!await retireCatalogModelUpstream(db, row.id, row.platform, row.model_id, reason)) return false;
     observations.delete(key);
     // Retiring a model changes routing permanently, so it is a warn (which the
     // dashboard viewer persists across restarts) carrying the platform/model it
     // acted on. Still printed to stdout by providerLog.
-    providerLog(
+    await providerLog(
       'warn',
       `[ModelRetirement] ${row.platform}/${row.model_id} disabled — upstream reports it retired: ${reason}`,
       { provider: row.platform, model: row.model_id, event: 'model_retired' },

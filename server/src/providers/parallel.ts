@@ -28,7 +28,7 @@ export class ParallelProvider extends SearchOnlyProvider {
 
   async validateKey(apiKey: string): Promise<KeyValidationResult> {
     if (isAnonymousCredential(apiKey)) {
-      return this.probe(PARALLEL_MCP_URL, {
+      return await this.probe(PARALLEL_MCP_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
         body: JSON.stringify({
@@ -39,7 +39,7 @@ export class ParallelProvider extends SearchOnlyProvider {
         }),
       });
     }
-    return this.probe(`${PARALLEL_BASE_URL}/search`, {
+    return await this.probe(`${PARALLEL_BASE_URL}/search`, {
       method: 'POST',
       headers: { 'x-api-key': apiKey.trim(), 'Content-Type': 'application/json' },
       body: '{}',

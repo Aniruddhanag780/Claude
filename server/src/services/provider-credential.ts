@@ -21,14 +21,14 @@ interface KeyRow {
  * Bound custom models stay on their own key; ordinary providers may use any
  * healthy key with room in its budget. Callers release after logging the result.
  */
-export function reserveProviderCredential(
+export async function reserveProviderCredential(
   row: { platform: string; key_id: number | null },
   estimatedTokens: number,
-  skip: (keyId: number) => boolean = () => false,
-): { credential: ReservedProviderCredential | null; budgetBlocked: boolean } {
+  skip: (keyId: number) => boolean | Promise<boolean> = () => false,
+): Promise<{ credential: ReservedProviderCredential | null; budgetBlocked: boolean }> {
   if (row.platform === 'custom' && row.key_id == null) return { credential: null, budgetBlocked: false };
   const bound = row.key_id != null;
-  const keys = getDb().all(`
+  const keys = await getDb().all(`
     SELECT id, encrypted_key, iv, auth_tag, base_url FROM api_keys
     WHERE ${bound ? 'id' : 'platform'} = ? AND enabled = 1
       AND status IN ('healthy', 'unknown') ORDER BY RANDOM()
@@ -42,7 +42,7 @@ export function reserveProviderCredential(
     } catch {
       continue;
     }
-    const reservation = reserveMonthlyBudget(keyRow.id, estimatedTokens);
+    const reservation = await reserveMonthlyBudget(keyRow.id, estimatedTokens);
     if (!reservation.allowed) { budgetBlocked = true; continue; }
     return {
       credential: {

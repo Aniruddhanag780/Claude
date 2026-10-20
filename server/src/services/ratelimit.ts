@@ -39,9 +39,9 @@ function msSinceUtcMidnight(now: number): number {
   return now - new Date(now).setUTCHours(0, 0, 0, 0);
 }
 
-function withDb<T>(fn: (db: RateLimitDb) => T): T | undefined {
+async function withDb<T>(fn: (db: RateLimitDb) => T | Promise<T>): Promise<T | undefined> {
   try {
-    return fn(getDb());
+    return await fn(getDb());
   } catch {
     return undefined;
   }
@@ -205,16 +205,16 @@ let lastUsagePruneMs = 0;
 
 /** True when the row actually reached the DB. Callers use this to decide
  *  whether the in-memory windows have to carry the count instead. */
-function recordUsage(
+async function recordUsage(
   platform: string,
   modelId: string,
   keyId: number,
   kind: UsageKind,
   tokens: number,
   now: number,
-): boolean {
-  return withDb(db => {
-    db.run(`
+): Promise<boolean> {
+  return await withDb(async db => {
+    await db.run(`
       INSERT INTO rate_limit_usage (platform, model_id, key_id, kind, tokens, created_at_ms)
       VALUES (?, ?, ?, ?, ?, ?)
     `, [platform, modelId, keyId, kind, tokens, now]);
@@ -223,21 +223,21 @@ function recordUsage(
     // prune off until real time caught up again.
     if (now - lastUsagePruneMs >= USAGE_PRUNE_INTERVAL_MS || now < lastUsagePruneMs) {
       lastUsagePruneMs = now;
-      db.run('DELETE FROM rate_limit_usage WHERE created_at_ms <= ?', [now - DAY]);
+      await db.run('DELETE FROM rate_limit_usage WHERE created_at_ms <= ?', [now - DAY]);
     }
     return true;
   }) ?? false;
 }
 
-function countPersistedRequests(
+async function countPersistedRequests(
   platform: string,
   modelId: string,
   keyId: number,
   windowMs: number,
   now: number,
-): number | undefined {
-  return withDb(db => {
-    const row = db.get(`
+): Promise<number | undefined> {
+  return await withDb(async db => {
+    const row = await db.get(`
       SELECT COUNT(*) AS used
         FROM rate_limit_usage
        WHERE platform = ?
@@ -250,15 +250,15 @@ function countPersistedRequests(
   });
 }
 
-function sumPersistedTokens(
+async function sumPersistedTokens(
   platform: string,
   modelId: string,
   keyId: number,
   windowMs: number,
   now: number,
-): number | undefined {
-  return withDb(db => {
-    const row = db.get(`
+): Promise<number | undefined> {
+  return await withDb(async db => {
+    const row = await db.get(`
       SELECT COALESCE(SUM(tokens), 0) AS used
         FROM rate_limit_usage
        WHERE platform = ?
@@ -283,72 +283,72 @@ function memoryTokenCount(key: string, windowMs: number, now: number): number {
   return w.tokenTimestamps.reduce((sum, t) => sum + t.tokens, 0);
 }
 
-function requestCount(
+async function requestCount(
   platform: string,
   modelId: string,
   keyId: number,
   windowMs: number,
   now: number,
-): number {
-  const persisted = countPersistedRequests(platform, modelId, keyId, windowMs, now);
+): Promise<number> {
+  const persisted = await countPersistedRequests(platform, modelId, keyId, windowMs, now);
   if (persisted !== undefined) return persisted;
   const type = windowMs === MINUTE ? 'rpm' : 'rpd';
   return memoryRequestCount(`${platform}:${modelId}:${keyId}:${type}`, windowMs, now);
 }
 
-function tokenCount(
+async function tokenCount(
   platform: string,
   modelId: string,
   keyId: number,
   windowMs: number,
   now: number,
-): number {
-  const persisted = sumPersistedTokens(platform, modelId, keyId, windowMs, now);
+): Promise<number> {
+  const persisted = await sumPersistedTokens(platform, modelId, keyId, windowMs, now);
   if (persisted !== undefined) return persisted;
   const type = windowMs === MINUTE ? 'tpm' : 'tpd';
   return memoryTokenCount(`${platform}:${modelId}:${keyId}:${type}`, windowMs, now);
 }
 
-export function canMakeRequest(
+export async function canMakeRequest(
   platform: string,
   modelId: string,
   keyId: number,
   limits: { rpm: number | null; rpd: number | null; tpm: number | null; tpd: number | null },
-): boolean {
+): Promise<boolean> {
   const now = Date.now();
   // In-flight requests count against both windows: a lease means the request is
   // happening now, so it belongs to this minute and to today.
   const inFlight = provisionalRequests(platform, modelId, keyId, now);
 
   if (limits.rpm !== null) {
-    if (requestCount(platform, modelId, keyId, MINUTE, now) + inFlight >= limits.rpm) return false;
+    if (await requestCount(platform, modelId, keyId, MINUTE, now) + inFlight >= limits.rpm) return false;
   }
 
   if (limits.rpd !== null) {
-    if (requestCount(platform, modelId, keyId, DAY, now) + inFlight >= limits.rpd) return false;
+    if (await requestCount(platform, modelId, keyId, DAY, now) + inFlight >= limits.rpd) return false;
   }
 
   return true;
 }
 
-export function canUseTokens(
+export async function canUseTokens(
   platform: string,
   modelId: string,
   keyId: number,
   estimatedTokens: number,
   limits: { tpm: number | null; tpd: number | null },
-): boolean {
+): Promise<boolean> {
   const now = Date.now();
   // Tokens already promised to in-flight attempts on this model+key.
   const inFlight = provisionalTokens(platform, modelId, keyId, now);
 
   if (limits.tpm !== null) {
-    const used = tokenCount(platform, modelId, keyId, MINUTE, now);
+    const used = await tokenCount(platform, modelId, keyId, MINUTE, now);
     if (used + inFlight + estimatedTokens > limits.tpm) return false;
   }
 
   if (limits.tpd !== null) {
-    const used = tokenCount(platform, modelId, keyId, DAY, now);
+    const used = await tokenCount(platform, modelId, keyId, DAY, now);
     if (used + inFlight + estimatedTokens > limits.tpd) return false;
   }
 
@@ -405,13 +405,13 @@ function usageCacheKey(platform: string, modelId: string, keyId: number): string
   return `${platform}\u0000${modelId}\u0000${keyId}`;
 }
 
-function buildWindowUsageSnapshot(now: number): WindowUsageSnapshot | null {
-  return withDb(db => {
+async function buildWindowUsageSnapshot(now: number): Promise<WindowUsageSnapshot | null> {
+  return await withDb(async db => {
     // One grouped scan replaces four counts per model × key. Same windows the
     // gates above enforce: a sliding minute for rpm/tpm, a sliding day for
     // rpd/tpd. Rows older than a day are pruned on write, but the WHERE keeps
     // this correct even when a prune has not run yet.
-    const rows = db.all(`
+    const rows = await db.all(`
       SELECT platform, model_id, key_id,
              SUM(CASE WHEN kind = 'request' AND created_at_ms > ? THEN 1 ELSE 0 END) AS rpm_used,
              SUM(CASE WHEN kind = 'request' THEN 1 ELSE 0 END) AS rpd_used,
@@ -436,7 +436,7 @@ function buildWindowUsageSnapshot(now: number): WindowUsageSnapshot | null {
     // healthy/unknown, and the model scope must admit the model. The custom
     // endpoint check needs base_url for every row, disabled ones included, so
     // that map is built from the unfiltered read.
-    const keyRows = db.all('SELECT id, platform, base_url, model_scope_json, enabled, status FROM api_keys') as Array<{
+    const keyRows = await db.all('SELECT id, platform, base_url, model_scope_json, enabled, status FROM api_keys') as Array<{
       id: number; platform: string; base_url: string | null;
       model_scope_json: string | null; enabled: number; status: string;
     }>;
@@ -455,7 +455,7 @@ function buildWindowUsageSnapshot(now: number): WindowUsageSnapshot | null {
   }) ?? null;
 }
 
-function getWindowUsageSnapshot(now: number): WindowUsageSnapshot | null {
+async function getWindowUsageSnapshot(now: number): Promise<WindowUsageSnapshot | null> {
   let db;
   try {
     db = getDb();
@@ -466,7 +466,7 @@ function getWindowUsageSnapshot(now: number): WindowUsageSnapshot | null {
   if (cached && cached.db === db && now - cached.at < WINDOW_USAGE_TTL_MS && now >= cached.at) {
     return cached;
   }
-  const built = buildWindowUsageSnapshot(now);
+  const built = await buildWindowUsageSnapshot(now);
   windowUsageSnapshot = built;
   return built;
 }
@@ -513,13 +513,13 @@ function keyWindowPressure(usage: KeyWindowUsage, limits: WindowLimits): number 
  * a whole window, and folding a per-request quantity into a cached snapshot
  * would buy noise, not accuracy.
  */
-export function modelWindowUsedFraction(
+export async function modelWindowUsedFraction(
   model: { platform: string; modelId: string; keyId?: number | null },
   limits: WindowLimits,
   now = Date.now(),
-): number | null {
+): Promise<number | null> {
   if (limits.rpm == null && limits.rpd == null && limits.tpm == null && limits.tpd == null) return null;
-  const snap = getWindowUsageSnapshot(now);
+  const snap = await getWindowUsageSnapshot(now);
   if (!snap) return null;
 
   const pool = snap.keysByPlatform.get(model.platform);
@@ -619,14 +619,14 @@ export function getProviderDailyTokenCap(platform: string): number | null {
   return DEFAULT_PROVIDER_DAILY_TOKEN_CAPS[platform] ?? null;
 }
 
-function countPersistedProviderRequests(
+async function countPersistedProviderRequests(
   platform: string,
   keyId: number,
   windowMs: number,
   now: number,
-): number | undefined {
-  return withDb(db => {
-    const row = db.get(`
+): Promise<number | undefined> {
+  return await withDb(async db => {
+    const row = await db.get(`
       SELECT COUNT(*) AS used
         FROM rate_limit_usage
        WHERE platform = ?
@@ -643,9 +643,9 @@ function countPersistedProviderRequests(
 // account caps (OpenRouter, NVIDIA) reset on a wall-clock day boundary, so a
 // sliding window keeps a provider benched well past its actual reset — a burst
 // at 23:00 UTC would still be counted against the account at 22:00 the next day.
-export function providerDailyRequestCount(platform: string, keyId: number, now = Date.now()): number {
+export async function providerDailyRequestCount(platform: string, keyId: number, now = Date.now()): Promise<number> {
   const windowMs = msSinceUtcMidnight(now);
-  const persisted = countPersistedProviderRequests(platform, keyId, windowMs, now);
+  const persisted = await countPersistedProviderRequests(platform, keyId, windowMs, now);
   if (persisted !== undefined) return persisted;
   // DB-unavailable fallback: sum the per-model rpd windows for this platform+key.
   // Window key format is "platform:modelId:keyId:rpd" (modelId may contain ':').
@@ -660,16 +660,16 @@ export function providerDailyRequestCount(platform: string, keyId: number, now =
 
 // False when this provider account+key has hit its shared daily request cap, so
 // the router skips every model on that provider for this key until UTC-ish reset.
-export function canUseProvider(platform: string, keyId: number, now = Date.now()): boolean {
+export async function canUseProvider(platform: string, keyId: number, now = Date.now()): Promise<boolean> {
   const cap = getProviderDailyRequestCap(platform);
   if (cap === null) return true;
-  const used = providerDailyRequestCount(platform, keyId, now) + provisionalProviderRequests(platform, keyId, now);
+  const used = await providerDailyRequestCount(platform, keyId, now) + provisionalProviderRequests(platform, keyId, now);
   return used < cap;
 }
 
 /** Requests in the last minute for a provider account+key, across every model. */
-export function providerMinuteRequestCount(platform: string, keyId: number, now = Date.now()): number {
-  const persisted = countPersistedProviderRequests(platform, keyId, MINUTE, now);
+export async function providerMinuteRequestCount(platform: string, keyId: number, now = Date.now()): Promise<number> {
+  const persisted = await countPersistedProviderRequests(platform, keyId, MINUTE, now);
   if (persisted !== undefined) return persisted;
   // DB-unavailable fallback: sum the per-model rpm windows for this platform+key.
   let total = 0;
@@ -684,10 +684,10 @@ export function providerMinuteRequestCount(platform: string, keyId: number, now 
 // False when this provider account+key has spent its shared per-minute request
 // budget, so the router skips every model on that provider rather than learning
 // the limit again from a 429 on each one in turn.
-export function canUseProviderMinute(platform: string, keyId: number, now = Date.now()): boolean {
+export async function canUseProviderMinute(platform: string, keyId: number, now = Date.now()): Promise<boolean> {
   const cap = getProviderMinuteRequestCap(platform);
   if (cap === null) return true;
-  const used = providerMinuteRequestCount(platform, keyId, now) + provisionalProviderRequests(platform, keyId, now);
+  const used = await providerMinuteRequestCount(platform, keyId, now) + provisionalProviderRequests(platform, keyId, now);
   return used < cap;
 }
 
@@ -707,10 +707,10 @@ function multiplierFromQuotaRow(row: ModelQuotaRow | undefined, dailyCap: number
   return 1;
 }
 
-function getProviderTokenMultiplier(platform: string, modelId: string, dailyCap: number): number {
+async function getProviderTokenMultiplier(platform: string, modelId: string, dailyCap: number): Promise<number> {
   if (platform !== 'navy') return 1;
-  return withDb(db => {
-    const row = db.get(`
+  return await withDb(async db => {
+    const row = await db.get(`
       SELECT tpd_limit, monthly_token_budget
         FROM models
        WHERE platform = ? AND model_id = ?
@@ -720,25 +720,25 @@ function getProviderTokenMultiplier(platform: string, modelId: string, dailyCap:
   }) ?? 1;
 }
 
-function providerBilledTokens(platform: string, modelId: string, rawTokens: number): number {
+async function providerBilledTokens(platform: string, modelId: string, rawTokens: number): Promise<number> {
   if (rawTokens <= 0) return 0;
   const dailyCap = getProviderDailyTokenCap(platform);
   if (dailyCap === null) return rawTokens;
-  const multiplier = getProviderTokenMultiplier(platform, modelId, dailyCap);
+  const multiplier = await getProviderTokenMultiplier(platform, modelId, dailyCap);
   return Math.ceil(rawTokens * multiplier);
 }
 
-function sumPersistedProviderTokens(
+async function sumPersistedProviderTokens(
   platform: string,
   keyId: number,
   windowMs: number,
   now: number,
-): number | undefined {
+): Promise<number | undefined> {
   const dailyCap = getProviderDailyTokenCap(platform);
   if (dailyCap === null) return 0;
 
-  return withDb(db => {
-    const rows = db.all(`
+  return await withDb(async db => {
+    const rows = await db.all(`
       SELECT rlu.model_id, COALESCE(SUM(rlu.tokens), 0) AS used,
              m.tpd_limit, m.monthly_token_budget
         FROM rate_limit_usage rlu
@@ -758,9 +758,9 @@ function sumPersistedProviderTokens(
 }
 
 // Midnight-UTC boundary, for the same reason as providerDailyRequestCount.
-export function providerDailyTokenCount(platform: string, keyId: number, now = Date.now()): number {
+export async function providerDailyTokenCount(platform: string, keyId: number, now = Date.now()): Promise<number> {
   const windowMs = msSinceUtcMidnight(now);
-  const persisted = sumPersistedProviderTokens(platform, keyId, windowMs, now);
+  const persisted = await sumPersistedProviderTokens(platform, keyId, windowMs, now);
   if (persisted !== undefined) return persisted;
 
   let total = 0;
@@ -773,23 +773,23 @@ export function providerDailyTokenCount(platform: string, keyId: number, now = D
     const raw = w.tokenTimestamps
       .filter(t => t.ts > now - windowMs)
       .reduce((sum, t) => sum + t.tokens, 0);
-    total += providerBilledTokens(platform, modelId, raw);
+    total += await providerBilledTokens(platform, modelId, raw);
   }
   return total;
 }
 
-export function canUseProviderTokens(
+export async function canUseProviderTokens(
   platform: string,
   keyId: number,
   modelId: string,
   estimatedTokens: number,
   now = Date.now(),
-): boolean {
+): Promise<boolean> {
   const cap = getProviderDailyTokenCap(platform);
   if (cap === null) return true;
-  const used = providerDailyTokenCount(platform, keyId, now)
-    + providerBilledTokens(platform, modelId, provisionalProviderTokens(platform, keyId, now));
-  return used + providerBilledTokens(platform, modelId, estimatedTokens) <= cap;
+  const used = await providerDailyTokenCount(platform, keyId, now)
+    + await providerBilledTokens(platform, modelId, provisionalProviderTokens(platform, keyId, now));
+  return used + await providerBilledTokens(platform, modelId, estimatedTokens) <= cap;
 }
 
 // ── Degraded-mode memory windows ─────────────────────────────────────────────
@@ -816,10 +816,10 @@ function pushMemoryTokens(key: string, windowMs: number, now: number, tokens: nu
   w.tokenTimestamps.push({ ts: now, tokens });
 }
 
-export function recordRequest(platform: string, modelId: string, keyId: number) {
+export async  function recordRequest(platform: string, modelId: string, keyId: number) {
   const now = Date.now();
 
-  if (!recordUsage(platform, modelId, keyId, 'request', 0, now)) {
+  if (!await recordUsage(platform, modelId, keyId, 'request', 0, now)) {
     pushMemoryRequest(`${platform}:${modelId}:${keyId}:rpm`, MINUTE, now);
     pushMemoryRequest(`${platform}:${modelId}:${keyId}:rpd`, DAY, now);
   }
@@ -828,7 +828,7 @@ export function recordRequest(platform: string, modelId: string, keyId: number) 
   clearCooldownHits(platform, modelId, keyId);
 }
 
-export function recordTokens(
+export async  function recordTokens(
   platform: string,
   modelId: string,
   keyId: number,
@@ -836,7 +836,7 @@ export function recordTokens(
 ) {
   const now = Date.now();
 
-  if (!recordUsage(platform, modelId, keyId, 'tokens', tokens, now)) {
+  if (!await recordUsage(platform, modelId, keyId, 'tokens', tokens, now)) {
     pushMemoryTokens(`${platform}:${modelId}:${keyId}:tpm`, MINUTE, now, tokens);
     pushMemoryTokens(`${platform}:${modelId}:${keyId}:tpd`, DAY, now, tokens);
   }
@@ -898,9 +898,9 @@ export const MAX_COOLDOWN_CEILING_MS = DAY;
 /** The configured ceiling in ms, or null when unset/invalid (no cap). Read
  *  through a try/catch like every other DB touch in this module so a failure
  *  before the DB is ready degrades to "no cap" instead of throwing mid-route. */
-export function getCooldownCeilingMs(): number | null {
+export async function getCooldownCeilingMs(): Promise<number | null> {
   let raw: string | undefined;
-  try { raw = getSetting(COOLDOWN_CEILING_KEY); } catch { return null; }
+  try { raw = await getSetting(COOLDOWN_CEILING_KEY); } catch { return null; }
   if (raw === undefined || raw.trim() === '') return null;
   const n = Number(raw);
   if (!Number.isInteger(n) || n < MIN_COOLDOWN_CEILING_MS || n > MAX_COOLDOWN_CEILING_MS) return null;
@@ -908,31 +908,31 @@ export function getCooldownCeilingMs(): number | null {
 }
 
 /** null clears the ceiling (back to the uncapped ladder). */
-export function setCooldownCeilingMs(value: number | null): void {
+export async function setCooldownCeilingMs(value: number | null): Promise<void> {
   if (value === null) {
-    getDb().run('DELETE FROM settings WHERE key = ?', [COOLDOWN_CEILING_KEY]);
+    await getDb().run('DELETE FROM settings WHERE key = ?', [COOLDOWN_CEILING_KEY]);
     return;
   }
   if (!Number.isInteger(value) || value < MIN_COOLDOWN_CEILING_MS || value > MAX_COOLDOWN_CEILING_MS) {
     throw new Error(`cooldown ceiling must be an integer between ${MIN_COOLDOWN_CEILING_MS} and ${MAX_COOLDOWN_CEILING_MS} ms`);
   }
-  setSetting(COOLDOWN_CEILING_KEY, String(value));
+  await setSetting(COOLDOWN_CEILING_KEY, String(value));
 }
 
 /** Apply the operator ceiling to one of OUR heuristic bench durations. */
-export function capCooldownMs(durationMs: number): number {
-  const ceiling = getCooldownCeilingMs();
+export async function capCooldownMs(durationMs: number): Promise<number> {
+  const ceiling = await getCooldownCeilingMs();
   return ceiling === null ? durationMs : Math.min(durationMs, ceiling);
 }
 
-export function getNextCooldownDuration(platform: string, modelId: string, keyId: number): number {
+export async function getNextCooldownDuration(platform: string, modelId: string, keyId: number): Promise<number> {
   const key = `${platform}:${modelId}:${keyId}`;
   const now = Date.now();
   const hits = (cooldownHits.get(key) ?? []).filter(t => t > now - DAY);
   hits.push(now);
   cooldownHits.set(key, hits);
   const idx = Math.min(hits.length - 1, COOLDOWN_DURATIONS.length - 1);
-  return capCooldownMs(COOLDOWN_DURATIONS[idx]!);
+  return await capCooldownMs(COOLDOWN_DURATIONS[idx]!);
 }
 
 function clearCooldownHits(platform: string, modelId: string, keyId: number): void {
@@ -961,8 +961,8 @@ const UNKNOWN_LIMIT_MAX_COOLDOWN_MS = 10 * MINUTE;
 export const PAYMENT_REQUIRED_COOLDOWN_MS = DAY;
 
 /** The 402 bench with the operator ceiling applied (#952). */
-export function getPaymentRequiredCooldownMs(): number {
-  return capCooldownMs(PAYMENT_REQUIRED_COOLDOWN_MS);
+export async function getPaymentRequiredCooldownMs(): Promise<number> {
+  return await capCooldownMs(PAYMENT_REQUIRED_COOLDOWN_MS);
 }
 
 // Long cooldown for a 403 Forbidden on a key that already passed validateKey
@@ -974,8 +974,8 @@ export function getPaymentRequiredCooldownMs(): number {
 export const MODEL_FORBIDDEN_COOLDOWN_MS = DAY;
 
 /** The 403 tier bench with the operator ceiling applied (#952). */
-export function getModelForbiddenCooldownMs(): number {
-  return capCooldownMs(MODEL_FORBIDDEN_COOLDOWN_MS);
+export async function getModelForbiddenCooldownMs(): Promise<number> {
+  return await capCooldownMs(MODEL_FORBIDDEN_COOLDOWN_MS);
 }
 
 // When RPD/TPD limits are NULL (provider's published daily quota is unknown or
@@ -1057,11 +1057,11 @@ export const LOCAL_ENDPOINT_COOLDOWN_MS = 5_000;
 // still decide properly.
 const keyLocality = new Map<number, boolean>(); // keyId -> is local endpoint
 
-export function isLocalEndpointKey(keyId: number): boolean {
+export async function isLocalEndpointKey(keyId: number): Promise<boolean> {
   const cached = keyLocality.get(keyId);
   if (cached !== undefined) return cached;
-  const baseUrl = withDb(db => {
-    const row = db.get('SELECT base_url FROM api_keys WHERE id = ?', [keyId]) as { base_url: string | null } | undefined;
+  const baseUrl = await withDb(async db => {
+    const row = await db.get('SELECT base_url FROM api_keys WHERE id = ?', [keyId]) as { base_url: string | null } | undefined;
     return row?.base_url ?? '';
   });
   if (baseUrl === undefined) return false; // DB not ready — don't cache
@@ -1087,15 +1087,15 @@ export interface CooldownLimitOptions {
   quotaSignal?: boolean;
 }
 
-export function getCooldownDurationForLimit(
+export async function getCooldownDurationForLimit(
   platform: string,
   modelId: string,
   keyId: number,
   limits: { rpd: number | null; tpd: number | null },
   retryAfterMs?: number | null,
   opts?: CooldownLimitOptions,
-): number {
-  return getCooldownDecisionForLimit(platform, modelId, keyId, limits, retryAfterMs, opts).durationMs;
+): Promise<number> {
+  return await (await getCooldownDecisionForLimit(platform, modelId, keyId, limits, retryAfterMs, opts)).durationMs;
 }
 
 /**
@@ -1106,29 +1106,29 @@ export function getCooldownDurationForLimit(
  * eligible). A Retry-After SHORTER than our bench does not make the cooldown
  * authoritative: everything past the provider's own retry time is our guess.
  */
-export function getCooldownDecisionForLimit(
+export async function getCooldownDecisionForLimit(
   platform: string,
   modelId: string,
   keyId: number,
   limits: { rpd: number | null; tpd: number | null },
   retryAfterMs?: number | null,
   opts?: CooldownLimitOptions,
-): CooldownDecision {
+): Promise<CooldownDecision> {
   // Local inference endpoint (loopback/RFC1918 base_url): no quota exists, so
   // neither the transient 90s bench nor the escalation ladder applies — a
   // failure there means "busy right now", and a few seconds is all the pool
   // needs before retrying the user's (usually only) local route. Applies even
   // to a literal 429 (local servers emit them under concurrent load) and
   // ignores any Retry-After: both describe momentary busyness, not a quota.
-  if (isLocalEndpointKey(keyId)) {
+  if (await isLocalEndpointKey(keyId)) {
     return { durationMs: LOCAL_ENDPOINT_COOLDOWN_MS, source: 'heuristic' };
   }
   const quotaSignal = opts?.quotaSignal ?? true;
   const now = Date.now();
   const rpdExhausted =
-    limits.rpd !== null && requestCount(platform, modelId, keyId, DAY, now) >= limits.rpd;
+    limits.rpd !== null && await requestCount(platform, modelId, keyId, DAY, now) >= limits.rpd;
   const tpdExhausted =
-    limits.tpd !== null && tokenCount(platform, modelId, keyId, DAY, now) >= limits.tpd;
+    limits.tpd !== null && await tokenCount(platform, modelId, keyId, DAY, now) >= limits.tpd;
   // No daily quota published → use repeated-429 heuristic: 2+ 429s in the
   // last hour is treated as effectively daily-exhausted. This unsticks
   // providers that publish no daily cap (ollama, cloudflare, etc.) from the
@@ -1151,7 +1151,7 @@ export function getCooldownDecisionForLimit(
     // The ladder step is taken either way, so a route whose real limits get
     // seeded (or learned) later resumes escalating where it left off rather
     // than restarting at 2 minutes.
-    base = getNextCooldownDuration(platform, modelId, keyId);
+    base = await getNextCooldownDuration(platform, modelId, keyId);
     // Guessed exhaustion (no published RPD/TPD) never benches past the cap.
     if (!dailyExhausted) base = Math.min(base, UNKNOWN_LIMIT_MAX_COOLDOWN_MS);
   }
@@ -1164,13 +1164,13 @@ export function getCooldownDecisionForLimit(
   return { durationMs: base, source: 'heuristic' };
 }
 
-function persistedCooldownExpiry(
+async function persistedCooldownExpiry(
   platform: string,
   modelId: string,
   keyId: number,
-): number | null | undefined {
-  return withDb(db => {
-    const row = db.get(`
+): Promise<number | null | undefined> {
+  return await withDb(async db => {
+    const row = await db.get(`
       SELECT expires_at_ms
         FROM rate_limit_cooldowns
        WHERE platform = ?
@@ -1189,8 +1189,8 @@ function persistCooldown(
   source: CooldownSource,
   setAtMs: number,
 ) {
-  withDb(db => {
-    db.run(`
+  void withDb(async db => {
+    await db.run(`
       INSERT INTO rate_limit_cooldowns (platform, model_id, key_id, expires_at_ms, source, set_at_ms)
       VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(platform, model_id, key_id)
@@ -1202,8 +1202,8 @@ function persistCooldown(
 }
 
 function clearPersistedCooldown(platform: string, modelId: string, keyId: number) {
-  withDb(db => {
-    db.run(`
+  void withDb(async db => {
+    await db.run(`
       DELETE FROM rate_limit_cooldowns
        WHERE platform = ?
          AND model_id = ?
@@ -1221,9 +1221,9 @@ function clearPersistedCooldown(platform: string, modelId: string, keyId: number
  * every cooldown query (status rollups, the probe scan, penalty inspector) pays
  * for the dead rows. Called once at boot (index.ts) so a restart starts clean.
  */
-export function cleanupExpiredCooldowns(now = Date.now()): number {
-  const cleared = withDb(db => {
-    const result = db.run('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms <= ?', [now]);
+export async function cleanupExpiredCooldowns(now = Date.now()): Promise<number> {
+  const cleared = await withDb(async db => {
+    const result = await db.run('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms <= ?', [now]);
     return Number(result.changes ?? 0);
   }) ?? 0;
 
@@ -1249,10 +1249,10 @@ export function setCooldown(
   persistCooldown(platform, modelId, keyId, expiresAtMs, source, now);
 }
 
-export function isOnCooldown(platform: string, modelId: string, keyId: number): boolean {
+export async function isOnCooldown(platform: string, modelId: string, keyId: number): Promise<boolean> {
   const key = `${platform}:${modelId}:${keyId}:cooldown`;
   const now = Date.now();
-  const persistedExpiry = persistedCooldownExpiry(platform, modelId, keyId);
+  const persistedExpiry = await persistedCooldownExpiry(platform, modelId, keyId);
   if (persistedExpiry !== undefined && persistedExpiry !== null) {
     if (now > persistedExpiry) {
       cooldowns.delete(key);
@@ -1286,10 +1286,10 @@ export interface ActiveCooldown {
  * Without this, a key benched by an escalated cooldown (up to 24h) is invisible:
  * it reads as healthy and enabled while the router silently skips it.
  */
-export function getActiveCooldownsForKeys(
+export async function getActiveCooldownsForKeys(
   keyIds: number[],
   now = Date.now(),
-): Map<number, ActiveCooldown[]> {
+): Promise<Map<number, ActiveCooldown[]>> {
   const grouped = new Map<number, ActiveCooldown[]>();
   if (keyIds.length === 0) return grouped;
 
@@ -1297,7 +1297,7 @@ export function getActiveCooldownsForKeys(
   if (unique.length === 0) return grouped;
 
   const placeholders = unique.map(() => '?').join(', ');
-  const rows = withDb(db => db.all( `
+  const rows = await withDb(async db => await db.all( `
     SELECT platform, model_id, key_id, expires_at_ms
       FROM rate_limit_cooldowns
      WHERE expires_at_ms > ?
@@ -1325,11 +1325,11 @@ export function getActiveCooldownsForKeys(
  * bad window; an operator who has fixed the cause (raised a quota, waited out a
  * provider incident) otherwise has no way back except restarting and waiting.
  */
-export function clearCooldownsForKey(keyId: number): number {
+export async function clearCooldownsForKey(keyId: number): Promise<number> {
   if (!Number.isInteger(keyId)) return 0;
 
-  const cleared = withDb(db => {
-    const result = db.run('DELETE FROM rate_limit_cooldowns WHERE key_id = ?', [keyId]);
+  const cleared = await withDb(async db => {
+    const result = await db.run('DELETE FROM rate_limit_cooldowns WHERE key_id = ?', [keyId]);
     return Number(result.changes ?? 0);
   }) ?? 0;
 
@@ -1356,11 +1356,11 @@ export function clearCooldownsForKey(keyId: number): number {
  * model-failure windows live elsewhere; services/penalty-inspector.ts
  * composes all three into one clear.
  */
-export function clearAllCooldowns(now = Date.now()): number {
-  const cleared = withDb(db => {
-    const result = db.run('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms > ?', [now]);
+export async function clearAllCooldowns(now = Date.now()): Promise<number> {
+  const cleared = await withDb(async db => {
+    const result = await db.run('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms > ?', [now]);
     // Expired rows are dead weight either way; sweep them in the same pass.
-    db.run('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms <= ?', [now]);
+    await db.run('DELETE FROM rate_limit_cooldowns WHERE expires_at_ms <= ?', [now]);
     return Number(result.changes ?? 0);
   }) ?? 0;
   let memoryCleared = 0;
@@ -1390,8 +1390,8 @@ export interface ProbeableCooldown {
  * DB-only, no in-memory fallback: the probe job is a best-effort optimisation,
  * and when the DB is unavailable the right amount of probing is none.
  */
-export function getProbeableCooldowns(now = Date.now()): ProbeableCooldown[] {
-  const rows = withDb(db => db.all(`
+export async function getProbeableCooldowns(now = Date.now()): Promise<ProbeableCooldown[]> {
+  const rows = await withDb(async db => await db.all(`
     SELECT platform, model_id, key_id, expires_at_ms, set_at_ms
       FROM rate_limit_cooldowns
      WHERE expires_at_ms > ?
@@ -1425,9 +1425,9 @@ export function clearCooldownEarly(platform: string, modelId: string, keyId: num
  * nothing is cooling down. Used to tell an exhausted caller roughly when to
  * retry (#423) instead of the bare "wait for rate limits to reset".
  */
-export function getSoonestCooldownExpiry(now = Date.now()): number | null {
-  return withDb(db => {
-    const row = db.get(`
+export async function getSoonestCooldownExpiry(now = Date.now()): Promise<number | null> {
+  return await withDb(async db => {
+    const row = await db.get(`
       SELECT MIN(expires_at_ms) AS soonest
         FROM rate_limit_cooldowns
        WHERE expires_at_ms > ?
@@ -1436,7 +1436,7 @@ export function getSoonestCooldownExpiry(now = Date.now()): number | null {
   }) ?? null;
 }
 
-export function getRateLimitStatus(
+export async function getRateLimitStatus(
   platform: string,
   modelId: string,
   keyId: number,
@@ -1445,9 +1445,9 @@ export function getRateLimitStatus(
   const now = Date.now();
 
   return {
-    rpm: { used: requestCount(platform, modelId, keyId, MINUTE, now), limit: limits.rpm },
-    rpd: { used: requestCount(platform, modelId, keyId, DAY, now), limit: limits.rpd },
-    tpm: { used: tokenCount(platform, modelId, keyId, MINUTE, now), limit: limits.tpm },
+    rpm: { used: await requestCount(platform, modelId, keyId, MINUTE, now), limit: limits.rpm },
+    rpd: { used: await requestCount(platform, modelId, keyId, DAY, now), limit: limits.rpd },
+    tpm: { used: await tokenCount(platform, modelId, keyId, MINUTE, now), limit: limits.tpm },
   };
 }
 
@@ -1504,12 +1504,12 @@ const LIMIT_COLUMN: Record<LearnedLimitKind, string> = {
  * Returns the learned limit when a row was actually changed, else null.
  * DB-guarded (no-op when the DB is unavailable), like the rest of this module.
  */
-export function learnLimitFromError(modelDbId: number, err: { message?: string }): LearnedLimit | null {
+export async function learnLimitFromError(modelDbId: number, err: { message?: string }): Promise<LearnedLimit | null> {
   const parsed = parseProviderLimit(err?.message);
   if (!parsed) return null;
   const col = LIMIT_COLUMN[parsed.kind];
-  const result = withDb(db =>
-    db.run(`UPDATE models SET ${col} = ? WHERE id = ? AND (${col} IS NULL OR ${col} > ?)`, [parsed.limit, modelDbId, parsed.limit]),
+  const result = await withDb(async db =>
+    await db.run(`UPDATE models SET ${col} = ? WHERE id = ? AND (${col} IS NULL OR ${col} > ?)`, [parsed.limit, modelDbId, parsed.limit]),
   );
   return result && result.changes > 0 ? parsed : null;
 }
@@ -1559,11 +1559,11 @@ export function parseProviderContextWindow(message: string | undefined | null): 
  * then size the model out of prompts it cannot hold before they dispatch.
  * Returns the learned window when the row changed, else null.
  */
-export function learnContextWindowFromError(modelDbId: number, err: { message?: string }): number | null {
+export async function learnContextWindowFromError(modelDbId: number, err: { message?: string }): Promise<number | null> {
   const window = parseProviderContextWindow(err?.message);
   if (window == null) return null;
-  const result = withDb(db =>
-    db.run('UPDATE models SET context_window = ? WHERE id = ? AND (context_window IS NULL OR context_window > ?)', [window, modelDbId, window]),
+  const result = await withDb(async db =>
+    await db.run('UPDATE models SET context_window = ? WHERE id = ? AND (context_window IS NULL OR context_window > ?)', [window, modelDbId, window]),
   );
-  return result && result.changes > 0 ? window : null;
+  return result && (await result).changes > 0 ? window : null;
 }

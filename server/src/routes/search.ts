@@ -8,8 +8,8 @@ import { listSearchEngines, updateSearchEngine } from '../services/search.js';
 // usage counts and lets the operator switch one off or change the order.
 export const searchRouter = Router();
 
-searchRouter.get('/engines', (_req: Request, res: Response) => {
-  res.json(listSearchEngines());
+searchRouter.get('/engines', async (_req: Request, res: Response) => {
+  res.json(await listSearchEngines());
 });
 
 const patchSchema = z.object({
@@ -19,7 +19,7 @@ const patchSchema = z.object({
   message: 'Provide enabled and/or priority',
 });
 
-searchRouter.patch('/engines/:id', (req: Request, res: Response) => {
+searchRouter.patch('/engines/:id', async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: { message: 'Invalid engine id' } });
@@ -30,10 +30,10 @@ searchRouter.patch('/engines/:id', (req: Request, res: Response) => {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
-  if (!updateSearchEngine(id, parsed.data)) {
+  if (!await updateSearchEngine(id, parsed.data)) {
     res.status(404).json({ error: { message: 'Search engine not found' } });
     return;
   }
-  const engine = listSearchEngines().find(e => e.id === id);
+  const engine = await (await listSearchEngines()).find(e => e.id === id);
   res.json(engine);
 });

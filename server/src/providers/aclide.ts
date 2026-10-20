@@ -87,8 +87,8 @@ export class AclideProvider extends BaseProvider {
     return input;
   }
 
-  private body(messages: ChatMessage[], modelId: string, options?: CompletionOptions): Record<string, unknown> {
-    const maxOutput = resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget);
+  private async body(messages: ChatMessage[], modelId: string, options?: CompletionOptions): Promise<Record<string, unknown>> {
+    const maxOutput = await resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget);
     const format = options?.response_format;
     const body: Record<string, unknown> = { model: modelId, input: this.input(messages), store: false, stream: false };
     if (maxOutput !== undefined) body.max_output_tokens = maxOutput;
@@ -104,15 +104,15 @@ export class AclideProvider extends BaseProvider {
     return body;
   }
 
-  private record(res: Response, endpoint: string, context?: QuotaObservationContext, modelId?: string): void {
-    recordQuotaObservationsFromResponse(res, { ...context, platform: this.platform, modelId, endpoint });
+  private async  record(res: Response, endpoint: string, context?: QuotaObservationContext, modelId?: string): Promise<void> {
+    await recordQuotaObservationsFromResponse(res, { ...context, platform: this.platform, modelId, endpoint });
   }
 
   async validateKey(apiKey: string, quotaContext?: QuotaObservationContext): Promise<KeyValidationResult> {
     const res = await this.fetchWithTimeout(`${BASE_URL}/models`, { headers: this.headers(apiKey) },
       providerTimeoutMs(this.platform, 30_000), { timeoutBounds: 'request' });
-    this.record(res, 'models', quotaContext);
-    if ([401, 403].includes(res.status)) return this.validationResult(res);
+    await this.record(res, 'models', quotaContext);
+    if ([401, 403].includes(res.status)) return await this.validationResult(res);
     if (!res.ok) throw providerHttpError(res, 'ACLIDE key validation is temporarily inconclusive');
     const roster = await res.json() as { data?: unknown };
     if (!Array.isArray(roster.data)) throw upstreamError('returned an invalid model roster');
@@ -122,9 +122,9 @@ export class AclideProvider extends BaseProvider {
   async chatCompletion(apiKey: string, messages: ChatMessage[], modelId: string,
     options?: CompletionOptions, quotaContext?: QuotaObservationContext): Promise<ChatCompletionResponse> {
     const res = await this.fetchWithTimeout(`${BASE_URL}/responses`, {
-      method: 'POST', headers: this.headers(apiKey), body: JSON.stringify(this.body(messages, modelId, options)),
+      method: 'POST', headers: this.headers(apiKey), body: JSON.stringify(await this.body(messages, modelId, options)),
     }, options?.timeoutMs ?? providerTimeoutMs(this.platform, 120_000), { signal: options?.signal, timeoutBounds: 'request' });
-    this.record(res, 'responses', quotaContext, modelId);
+    await this.record(res, 'responses', quotaContext, modelId);
     // Preserve HTTP status/backoff even for a non-JSON error page.
     if (!res.ok) {
       const body = await res.text();

@@ -18,7 +18,7 @@ export class SpeechifyProvider extends BaseProvider {
     if (!response.ok && ![401, 403].includes(response.status)) {
       throw providerHttpError(response, 'Speechify key validation is temporarily inconclusive');
     }
-    return this.validationResult(response);
+    return await this.validationResult(response);
   }
 
   async chatCompletion(): Promise<ChatCompletionResponse> {

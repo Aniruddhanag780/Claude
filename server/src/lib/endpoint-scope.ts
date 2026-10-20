@@ -36,9 +36,9 @@ export function endpointScopeForBaseUrl(baseUrl: string | null | undefined): str
  * carries no base_url — a legacy custom row that predates per-endpoint binding
  * keeps the un-scoped identity it has always had, so nothing about it changes.
  */
-export function endpointScopeOfKey(db: Db, keyId: number | null | undefined): string {
+export async function endpointScopeOfKey(db: Db, keyId: number | null | undefined): Promise<string> {
   if (keyId == null) return '';
-  const row = db.get("SELECT base_url FROM api_keys WHERE id = ? AND platform = 'custom'", [keyId]) as { base_url: string | null } | undefined;
+  const row = await db.get("SELECT base_url FROM api_keys WHERE id = ? AND platform = 'custom'", [keyId]) as { base_url: string | null } | undefined;
   return endpointScopeForBaseUrl(row?.base_url);
 }
 

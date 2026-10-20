@@ -74,7 +74,7 @@ export class CloudflareProvider extends BaseProvider {
         model: modelId,
         messages: this.normalizeMessages(messages),
         temperature: options?.temperature,
-        max_tokens: resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
+        max_tokens: await resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
         top_p: options?.top_p,
         stop: options?.stop,
         tools: options?.tools,
@@ -85,7 +85,7 @@ export class CloudflareProvider extends BaseProvider {
       // 'request' bounds: the deadline covers the body read too, so a 200
       // whose body hangs aborts instead of stalling res.json() forever.
     }, this.timeoutFor(modelId, options?.timeoutMs), { signal: options?.signal, timeoutBounds: 'request' });
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -130,7 +130,7 @@ export class CloudflareProvider extends BaseProvider {
         model: modelId,
         messages: this.normalizeMessages(messages),
         temperature: options?.temperature,
-        max_tokens: resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
+        max_tokens: await resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
         top_p: options?.top_p,
         stop: options?.stop,
         tools: options?.tools,
@@ -142,7 +142,7 @@ export class CloudflareProvider extends BaseProvider {
       // Default 'headers' bounds: the deadline dies at response headers, and
       // the client signal + stall watchdog own the stream from there.
     }, this.timeoutFor(modelId, options?.timeoutMs), { signal: options?.signal });
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -197,7 +197,7 @@ export class CloudflareProvider extends BaseProvider {
       10000,
       { timeoutBounds: 'request' },
     );
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,

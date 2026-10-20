@@ -8,13 +8,13 @@ import { listDecisionModels, runDecision, setDecisionModelEnabled, DecisionError
 // operator switch one off, and runs a test decision from the page.
 export const decisionsRouter = Router();
 
-decisionsRouter.get('/models', (_req: Request, res: Response) => {
-  res.json(listDecisionModels());
+decisionsRouter.get('/models', async (_req: Request, res: Response) => {
+  res.json(await listDecisionModels());
 });
 
 const patchSchema = z.object({ enabled: z.boolean() });
 
-decisionsRouter.patch('/models/:id', (req: Request, res: Response) => {
+decisionsRouter.patch('/models/:id', async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: { message: 'Invalid model id' } });
@@ -25,11 +25,11 @@ decisionsRouter.patch('/models/:id', (req: Request, res: Response) => {
     res.status(400).json({ error: { message: 'Provide enabled' } });
     return;
   }
-  if (!setDecisionModelEnabled(id, parsed.data.enabled)) {
+  if (!await setDecisionModelEnabled(id, parsed.data.enabled)) {
     res.status(404).json({ error: { message: 'Decision model not found' } });
     return;
   }
-  res.json(listDecisionModels().find(m => m.id === id));
+  res.json(await (await listDecisionModels()).find(m => m.id === id));
 });
 
 // "Try it" on the page: one choice question over the text the user typed.

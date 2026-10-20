@@ -48,7 +48,7 @@ export class PollinationsProvider extends OpenAICompatProvider {
       headers: { 'Authorization': `Bearer ${apiKey}` },
     }, 30000, { timeoutBounds: 'request' });
 
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -56,7 +56,7 @@ export class PollinationsProvider extends OpenAICompatProvider {
       endpoint: 'account/key',
     });
 
-    if (res.status === 401) return this.validationResult(res);
+    if (res.status === 401) return await this.validationResult(res);
     if (res.ok || res.status === 402) return true;
 
     if (res.status === 403) {

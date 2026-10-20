@@ -163,7 +163,7 @@ export class OpenAICompatProvider extends BaseProvider {
    * applies to streamed text: parse `failed_generation` into structured
    * tool_calls so the turn succeeds instead of failing over (or exhausting the
    * chain when every enabled tool model behaves the same way). See issue #264. */
-  private rescueFailedGeneration(errBody: unknown, options?: CompletionOptions): ChatToolCall[] | null {
+  private async rescueFailedGeneration(errBody: unknown, options?: CompletionOptions): Promise<ChatToolCall[] | null> {
     const failed = (errBody as { error?: { failed_generation?: unknown } })?.error?.failed_generation;
     if (typeof failed !== 'string' || failed.length === 0) return null;
     const toolNames = new Set((options?.tools ?? []).map(t => t.function.name));
@@ -182,7 +182,7 @@ export class OpenAICompatProvider extends BaseProvider {
     // fails over exactly as it did before the rescue existed. Declining is the
     // right shape here rather than throwing our own error — we are inside the
     // provider's error path already.
-    if (isToolArgumentValidationEnabled() && invalidToolCallReasons(rescued, schemas).length > 0) {
+    if (await isToolArgumentValidationEnabled() && invalidToolCallReasons(rescued, schemas).length > 0) {
       return null;
     }
     return rescued;
@@ -338,7 +338,7 @@ export class OpenAICompatProvider extends BaseProvider {
         model: modelId,
         messages: this.messagesForPlatform(messages, modelId),
         temperature: sampling.temperature,
-        max_tokens: resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
+        max_tokens: await resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
         top_p: sampling.topP,
         stop: options?.stop,
         tools: options?.tools,
@@ -350,7 +350,7 @@ export class OpenAICompatProvider extends BaseProvider {
       // whose body hangs aborts instead of stalling res.json() forever.
     }, options?.timeoutMs ?? this.timeoutMs, { signal: options?.signal, timeoutBounds: 'request' });
 
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -361,7 +361,7 @@ export class OpenAICompatProvider extends BaseProvider {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      const rescued = this.rescueFailedGeneration(err, options);
+      const rescued = await this.rescueFailedGeneration(err, options);
       if (rescued) {
         console.log(`[${this.name}] Rescued ${rescued.length} inline tool call(s) from a ${res.status} tool_use_failed (#264)`);
         const out: ChatCompletionResponse = {
@@ -376,7 +376,7 @@ export class OpenAICompatProvider extends BaseProvider {
         return out;
       }
       const retry = this.pinnedToolChoiceRetryFor(res.status, options);
-      if (retry) return this.chatCompletion(apiKey, messages, modelId, retry, quotaContext);
+      if (retry) return await this.chatCompletion(apiKey, messages, modelId, retry, quotaContext);
       throw providerHttpError(res, `${this.name} API error ${res.status}: ${this.upstreamErrorText(err, res)}`, err);
     }
 
@@ -469,7 +469,7 @@ export class OpenAICompatProvider extends BaseProvider {
         model: modelId,
         messages: this.messagesForPlatform(messages, modelId),
         temperature: sampling.temperature,
-        max_tokens: resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
+        max_tokens: await resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
         top_p: sampling.topP,
         stop: options?.stop,
         tools: options?.tools,
@@ -483,7 +483,7 @@ export class OpenAICompatProvider extends BaseProvider {
       // the client signal + stall watchdog own the stream from there.
     }, options?.timeoutMs ?? this.timeoutMs, { signal: options?.signal });
 
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -494,7 +494,7 @@ export class OpenAICompatProvider extends BaseProvider {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      const rescued = this.rescueFailedGeneration(err, options);
+      const rescued = await this.rescueFailedGeneration(err, options);
       if (rescued) {
         console.log(`[${this.name}] Rescued ${rescued.length} inline tool call(s) from a ${res.status} tool_use_failed (stream, #264)`);
         const base = { id: `chatcmpl-rescued-${Date.now()}`, object: 'chat.completion.chunk' as const, created: Math.floor(Date.now() / 1000), model: modelId };
@@ -567,13 +567,13 @@ export class OpenAICompatProvider extends BaseProvider {
    * health.ts catches them and marks status='error' WITHOUT incrementing the
    * consecutive-failure counter — only confirmed 401/403 disables a key.
    */
-  protected fetchCatalogEndpoint(url: string, apiKey: string, quotaContext?: QuotaObservationContext): Promise<Response> {
+  protected async fetchCatalogEndpoint(url: string, apiKey: string, quotaContext?: QuotaObservationContext): Promise<Response> {
     // 30s (not 10s): some upstreams return a large /v1/models catalog that
     // takes >10s from high-latency regions (e.g. NVIDIA NIM measured ~11.2s
     // from India). A 10s cap aborted those calls and health.ts marked a
     // perfectly good key status='error'. 30s aligns with chatCompletion's
     // own slow-upstream allowance and costs nothing for fast providers.
-    return this.fetchWithTimeout(url, {
+    return await this.fetchWithTimeout(url, {
       method: 'GET',
       headers: {
         ...this.authHeader(apiKey),
@@ -581,8 +581,8 @@ export class OpenAICompatProvider extends BaseProvider {
       },
       // 'request' bounds: a catalog body that hangs mid-transfer must not
       // stall the health cycle past the deadline.
-    }, 30000, { timeoutBounds: 'request' }).then(res => {
-      recordQuotaObservationsFromResponse(res, {
+    }, 30000, { timeoutBounds: 'request' }).then(async res => {
+      await recordQuotaObservationsFromResponse(res, {
         platform: this.platform,
         keyId: quotaContext?.keyId,
         providerAccountId: quotaContext?.providerAccountId,
@@ -596,8 +596,8 @@ export class OpenAICompatProvider extends BaseProvider {
   /** The raw `${baseUrl}/models` response, body unread. Used by custom-endpoint
    *  model discovery (#488); unlike validateKey it always hits /models, never a
    *  provider-specific validateUrl, because the caller wants the catalog. */
-  fetchModelCatalog(apiKey: string, quotaContext?: QuotaObservationContext): Promise<Response> {
-    return this.fetchCatalogEndpoint(this.modelsUrl, apiKey, quotaContext);
+  async fetchModelCatalog(apiKey: string, quotaContext?: QuotaObservationContext): Promise<Response> {
+    return await this.fetchCatalogEndpoint(this.modelsUrl, apiKey, quotaContext);
   }
 
   async validateKey(apiKey: string, quotaContext?: QuotaObservationContext): Promise<KeyValidationResult> {
@@ -616,7 +616,7 @@ export class OpenAICompatProvider extends BaseProvider {
       }
       return true;
     }
-    return this.validationResult(res);
+    return await this.validationResult(res);
   }
 
   /**
@@ -667,7 +667,7 @@ export class OpenAICompatProvider extends BaseProvider {
       const limit = pick(spec.limitFields);
       const remaining = pick(spec.remainingFields);
       if (limit === null && remaining === null) return false;
-      const record = recordQuotaObservation({
+      const record = await recordQuotaObservation({
         platform: this.platform,
         keyId: quotaContext?.keyId,
         providerAccountId: quotaContext?.providerAccountId,

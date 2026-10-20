@@ -90,8 +90,8 @@ function modelRowValue(row: Record<string, unknown> | undefined, key: keyof Mode
   return value ?? null;
 }
 
-function cachedCatalogDefaults(db: Db, platform: string, modelId: string): StoredOverrides {
-  const row = db.get("SELECT value FROM settings WHERE key = 'catalog_applied_json'") as { value: string } | undefined;
+async function cachedCatalogDefaults(db: Db, platform: string, modelId: string): Promise<StoredOverrides> {
+  const row = await db.get("SELECT value FROM settings WHERE key = 'catalog_applied_json'") as { value: string } | undefined;
   if (!row) return {};
   try {
     const catalog = JSON.parse(row.value) as { models?: Parameters<typeof applyCatalog>[1]['models'] };
@@ -111,17 +111,17 @@ function cachedCatalogDefaults(db: Db, platform: string, modelId: string): Store
 }
 
 /** Called after catalog metadata is written, before local overrides are applied. */
-export function refreshModelOverrideBaselines(db: Db, platform: string, modelId: string): void {
-  const existing = db.get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]) as { overrides_json: string } | undefined;
+export async function refreshModelOverrideBaselines(db: Db, platform: string, modelId: string): Promise<void> {
+  const existing = await db.get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]) as { overrides_json: string } | undefined;
   if (!existing) return;
   const { overrides } = parseOverridesBlob(existing.overrides_json);
-  const row = db.get('SELECT * FROM models WHERE platform = ? AND model_id = ?', [platform, modelId]) as Record<string, unknown> | undefined;
+  const row = await db.get('SELECT * FROM models WHERE platform = ? AND model_id = ?', [platform, modelId]) as Record<string, unknown> | undefined;
   const baselines: StoredOverrides = {};
   for (const key of Object.keys(cleanPatch(overrides)) as Array<keyof ModelOverridePatch>) {
     const value = modelRowValue(row, key);
     if (value !== undefined) baselines[key] = value as never;
   }
-  db.run('UPDATE model_overrides SET overrides_json = ? WHERE platform = ? AND model_id = ?', [JSON.stringify({ ...overrides, [CATALOG_BASELINE_KEY]: baselines }), platform, modelId]);
+  await db.run('UPDATE model_overrides SET overrides_json = ? WHERE platform = ? AND model_id = ?', [JSON.stringify({ ...overrides, [CATALOG_BASELINE_KEY]: baselines }), platform, modelId]);
 }
 
 /**
@@ -162,13 +162,13 @@ export interface CatalogModelTombstone {
   createdAt: string;
 }
 
-export function getCatalogModelTombstone(
+export async function getCatalogModelTombstone(
   db: Db,
   kind: CatalogModelKind,
   platform: string,
   modelId: string,
-): CatalogModelTombstone | undefined {
-  const row = db.get('SELECT source, reason, created_at FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?', [kind, platform, modelId]) as { source: string; reason: string | null; created_at: string } | undefined;
+): Promise<CatalogModelTombstone | undefined> {
+  const row = await db.get('SELECT source, reason, created_at FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?', [kind, platform, modelId]) as { source: string; reason: string | null; created_at: string } | undefined;
   if (!row) return undefined;
   return {
     source: row.source === 'upstream_eol' ? 'upstream_eol' : 'user',
@@ -183,34 +183,34 @@ export function getCatalogModelTombstone(
  * count: those models stay in the catalog's write path so a refreshed catalog
  * can reinstate them (see reinstateUpstreamRetiredCatalogModel).
  */
-export function isCatalogModelTombstoned(
+export async function isCatalogModelTombstoned(
   db: Db,
   kind: CatalogModelKind,
   platform: string,
   modelId: string,
-): boolean {
-  return getCatalogModelTombstone(db, kind, platform, modelId)?.source === 'user';
+): Promise<boolean> {
+  return await (await getCatalogModelTombstone(db, kind, platform, modelId))?.source === 'user';
 }
 
-export function recordCatalogModelTombstone(
+export async function recordCatalogModelTombstone(
   db: Db,
   kind: CatalogModelKind,
   platform: string,
   modelId: string,
   options: { source?: CatalogTombstoneSource; reason?: string | null } = {},
-): void {
+): Promise<void> {
   const source: CatalogTombstoneSource = options.source ?? 'user';
-  db.run(`
+  await db.run(`
     INSERT INTO catalog_model_tombstones (kind, platform, model_id, source, reason)
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(kind, platform, model_id)
-    DO UPDATE SET created_at = datetime('now'), source = excluded.source, reason = excluded.reason
+    DO UPDATE SET created_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS'), source = excluded.source, reason = excluded.reason
   `, [kind, platform, modelId, source, options.reason ?? null]);
   // A user deletion drops their local metadata edits with the row. An upstream
   // retirement keeps the row, so it keeps the overrides too — they must survive
   // if the model is reinstated.
   if (kind === 'chat' && source === 'user') {
-    db.run('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]);
+    await db.run('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]);
   }
 }
 
@@ -225,18 +225,18 @@ export function recordCatalogModelTombstone(
  * Returns true when this call performed the retirement (false when it was
  * already retired, or the user had deleted the model outright).
  */
-export function retireCatalogModelUpstream(
+export async function retireCatalogModelUpstream(
   db: Db,
   modelDbId: number,
   platform: string,
   modelId: string,
   reason: string,
-): boolean {
-  const existing = getCatalogModelTombstone(db, 'chat', platform, modelId);
+): Promise<boolean> {
+  const existing = await getCatalogModelTombstone(db, 'chat', platform, modelId);
   if (existing) return false;
-  recordCatalogModelTombstone(db, 'chat', platform, modelId, { source: 'upstream_eol', reason });
-  db.run('UPDATE fallback_config SET enabled = 0 WHERE model_db_id = ?', [modelDbId]);
-  db.run('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?', [modelDbId]);
+  await recordCatalogModelTombstone(db, 'chat', platform, modelId, { source: 'upstream_eol', reason });
+  await db.run('UPDATE fallback_config SET enabled = 0 WHERE model_db_id = ?', [modelDbId]);
+  await db.run('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?', [modelDbId]);
   return true;
 }
 
@@ -245,43 +245,43 @@ export function retireCatalogModelUpstream(
  * it enabled — is newer and better evidence than one provider's 404. Returns
  * true when a retirement was actually lifted.
  */
-export function reinstateUpstreamRetiredCatalogModel(
+export async function reinstateUpstreamRetiredCatalogModel(
   db: Db,
   platform: string,
   modelId: string,
-): boolean {
-  if (getCatalogModelTombstone(db, 'chat', platform, modelId)?.source !== 'upstream_eol') return false;
-  clearCatalogModelTombstone(db, 'chat', platform, modelId);
-  const row = db.get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [platform, modelId]) as { id: number } | undefined;
+): Promise<boolean> {
+  if (await (await getCatalogModelTombstone(db, 'chat', platform, modelId))?.source !== 'upstream_eol') return false;
+  await clearCatalogModelTombstone(db, 'chat', platform, modelId);
+  const row = await db.get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [platform, modelId]) as { id: number } | undefined;
   if (row) {
-    db.run('UPDATE fallback_config SET enabled = 1 WHERE model_db_id = ?', [row.id]);
-    db.run('UPDATE profile_models SET enabled = 1 WHERE model_db_id = ?', [row.id]);
+    await db.run('UPDATE fallback_config SET enabled = 1 WHERE model_db_id = ?', [row.id]);
+    await db.run('UPDATE profile_models SET enabled = 1 WHERE model_db_id = ?', [row.id]);
   }
   return true;
 }
 
-export function clearCatalogModelTombstone(
+export async function clearCatalogModelTombstone(
   db: Db,
   kind: CatalogModelKind,
   platform: string,
   modelId: string,
-): void {
-  db.run('DELETE FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?', [kind, platform, modelId]);
+): Promise<void> {
+  await db.run('DELETE FROM catalog_model_tombstones WHERE kind = ? AND platform = ? AND model_id = ?', [kind, platform, modelId]);
 }
 
-export function upsertModelOverrides(
+export async function upsertModelOverrides(
   db: Db,
   platform: string,
   modelId: string,
   patch: ModelOverridePatch,
   options: { baselineRow?: Record<string, unknown> } = {},
-): StoredOverrides {
+): Promise<StoredOverrides> {
   const cleaned = cleanPatch(patch);
   if (Object.keys(cleaned).length === 0) return {};
-  const existing = db.get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]) as { overrides_json: string } | undefined;
+  const existing = await db.get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]) as { overrides_json: string } | undefined;
   const { overrides: stored, baselines } = parseOverridesBlob(existing?.overrides_json);
 
-  const catalogDefaults = options.baselineRow ? cachedCatalogDefaults(db, platform, modelId) : {};
+  const catalogDefaults = options.baselineRow ? await cachedCatalogDefaults(db, platform, modelId) : {};
   const merged: StoredOverrides = { ...stored };
   const mergedBaselines: StoredOverrides = { ...baselines };
   for (const key of Object.keys(cleaned) as Array<keyof ModelOverridePatch>) {
@@ -307,25 +307,25 @@ export function upsertModelOverrides(
   if (Object.keys(merged).length === 0) {
     // Nothing left to pin: drop the row so has_overrides goes false and the
     // dashboard's badge clears.
-    db.run('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]);
+    await db.run('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]);
     return {};
   }
   const blob = { ...merged, [CATALOG_BASELINE_KEY]: mergedBaselines };
-  db.run(`
+  await db.run(`
     INSERT INTO model_overrides (platform, model_id, overrides_json, updated_at)
-    VALUES (?, ?, ?, datetime('now'))
+    VALUES (?, ?, ?, to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS'))
     ON CONFLICT(platform, model_id)
     DO UPDATE SET overrides_json = excluded.overrides_json, updated_at = excluded.updated_at
   `, [platform, modelId, JSON.stringify(blob)]);
   return merged;
 }
 
-export function getModelOverrides(
+export async function getModelOverrides(
   db: Db,
   platform: string,
   modelId: string,
-): StoredOverrides {
-  const row = db.get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]) as { overrides_json: string } | undefined;
+): Promise<StoredOverrides> {
+  const row = await db.get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [platform, modelId]) as { overrides_json: string } | undefined;
   return parseOverrides(row?.overrides_json);
 }
 
@@ -339,11 +339,11 @@ export function getModelOverrides(
  * override row but has said nothing about its speed_rank, so a derived value
  * may still fill that column (#619).
  */
-export function modelsWithOverriddenField(
+export async function modelsWithOverriddenField(
   db: Db,
   field: keyof ModelOverridePatch,
-): Set<string> {
-  const rows = db.all('SELECT platform, model_id, overrides_json FROM model_overrides') as { platform: string; model_id: string; overrides_json: string }[];
+): Promise<Set<string>> {
+  const rows = await db.all('SELECT platform, model_id, overrides_json FROM model_overrides') as { platform: string; model_id: string; overrides_json: string }[];
   const pinned = new Set<string>();
   for (const row of rows) {
     const overrides = parseOverrides(row.overrides_json);
@@ -352,12 +352,12 @@ export function modelsWithOverriddenField(
   return pinned;
 }
 
-export function applyModelOverrides(
+export async function applyModelOverrides(
   db: Db,
   platform: string,
   modelId: string,
-): boolean {
-  const overrides = getModelOverrides(db, platform, modelId);
+): Promise<boolean> {
+  const overrides = await getModelOverrides(db, platform, modelId);
   const keys = (Object.keys(overrides) as Array<keyof ModelOverridePatch>).filter(k => k in OVERRIDE_COLUMNS);
   if (keys.length === 0) return false;
 
@@ -368,15 +368,15 @@ export function applyModelOverrides(
     values.push(toDbValue(key, overrides[key]));
   }
   values.push(platform, modelId);
-  db.run( `UPDATE models SET ${assignments.join(', ')} WHERE platform = ? AND model_id = ?`, [...values]);
+  await db.run( `UPDATE models SET ${assignments.join(', ')} WHERE platform = ? AND model_id = ?`, [...values]);
   return true;
 }
 
-export function applyAllModelOverrides(db: Db): number {
-  const rows = db.all('SELECT platform, model_id FROM model_overrides') as { platform: string; model_id: string }[];
+export async function applyAllModelOverrides(db: Db): Promise<number> {
+  const rows = await db.all('SELECT platform, model_id FROM model_overrides') as { platform: string; model_id: string }[];
   let applied = 0;
   for (const row of rows) {
-    if (applyModelOverrides(db, row.platform, row.model_id)) applied++;
+    if (await applyModelOverrides(db, row.platform, row.model_id)) applied++;
   }
   return applied;
 }
@@ -384,15 +384,15 @@ export function applyAllModelOverrides(db: Db): number {
 // Only USER tombstones delete rows. An upstream-retirement tombstone disables
 // its model and keeps it (see retireCatalogModelUpstream), so deleting here
 // would throw away both the row and the reason the dashboard shows for it.
-export function deleteTombstonedCatalogModels(db: Db): number {
-  const chatRows = db.all(`
+export async function deleteTombstonedCatalogModels(db: Db): Promise<number> {
+  const chatRows = await db.all(`
     SELECT m.id, m.platform, m.model_id
       FROM models m
       JOIN catalog_model_tombstones t
         ON t.kind = 'chat' AND t.platform = m.platform AND t.model_id = m.model_id
      WHERE t.source = 'user' AND m.platform != 'custom' AND m.key_id IS NULL AND m.source != 'user'
   `) as { id: number; platform: string; model_id: string }[];
-  const mediaRows = db.all(`
+  const mediaRows = await db.all(`
     SELECT mm.id
       FROM media_models mm
       JOIN catalog_model_tombstones t
@@ -402,11 +402,11 @@ export function deleteTombstonedCatalogModels(db: Db): number {
 
 
   for (const row of chatRows) {
-    db.run('DELETE FROM fallback_config WHERE model_db_id = ?', [row.id]);
-    db.run('DELETE FROM models WHERE id = ?', [row.id]);
+    await db.run('DELETE FROM fallback_config WHERE model_db_id = ?', [row.id]);
+    await db.run('DELETE FROM models WHERE id = ?', [row.id]);
   }
   for (const row of mediaRows) {
-    db.run('DELETE FROM media_models WHERE id = ?', [row.id]);
+    await db.run('DELETE FROM media_models WHERE id = ?', [row.id]);
   }
 
   return chatRows.length + mediaRows.length;

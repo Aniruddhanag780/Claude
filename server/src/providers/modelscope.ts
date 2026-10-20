@@ -131,7 +131,7 @@ export class ModelScopeProvider extends OpenAICompatProvider {
       }),
     }, 30000, { timeoutBounds: 'request' });
 
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,

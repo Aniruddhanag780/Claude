@@ -77,9 +77,11 @@ function isBackupableTable(name: string): boolean {
 }
 
 /** Every table a dump may contain, in a stable order. */
-export function listTables(db: Db = getDb()): string[] {
-  const rows = db.all("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name") as { name: string }[];
-  return rows.map((row) => row.name).filter(isBackupableTable);
+export async function listTables(db: Db = getDb()): Promise<string[]> {
+  const rows = await db.all<{ table_name: string }>(
+    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name",
+  );
+  return rows.map((row) => row.table_name).filter(isBackupableTable);
 }
 
 /* ------------------------------------------------------------------ */
@@ -89,11 +91,7 @@ export function listTables(db: Db = getDb()): string[] {
 /** The directory that holds the database file. Dumps live beside the data they
  *  came from — never relative to process.cwd(), which depends on how the server
  *  happened to be launched and can sit anywhere on the disk. */
-function dataDir(db: Db): string {
-  const name = db.name;
-  if (name && name !== ':memory:' && db.memory !== true) {
-    return path.resolve(path.dirname(path.resolve(name)));
-  }
+function dataDir(_db: Db): string {
   return getDataDir();
 }
 
@@ -145,8 +143,8 @@ export function assertBackupPathAllowed(db: Db, backupPath: string): void {
 /* Schedule                                                           */
 /* ------------------------------------------------------------------ */
 
-export function readBackupSchedule(): BackupSchedule {
-  const raw = getSetting(SCHEDULE_SETTING);
+export async function readBackupSchedule(): Promise<BackupSchedule> {
+  const raw = await getSetting(SCHEDULE_SETTING);
   if (!raw) return { ...DEFAULT_SCHEDULE };
   try {
     const parsed = JSON.parse(raw) as Partial<BackupSchedule>;
@@ -161,8 +159,8 @@ export function readBackupSchedule(): BackupSchedule {
   }
 }
 
-export function writeBackupSchedule(schedule: BackupSchedule): BackupSchedule {
-  setSetting(SCHEDULE_SETTING, JSON.stringify(schedule));
+export async function writeBackupSchedule(schedule: BackupSchedule): Promise<BackupSchedule> {
+  await setSetting(SCHEDULE_SETTING, JSON.stringify(schedule));
   return schedule;
 }
 
@@ -174,8 +172,8 @@ export function writeBackupSchedule(schedule: BackupSchedule): BackupSchedule {
  *  migrations plus the latest filename. Restoring a dump into a database at a
  *  different schema silently drops columns added since, or fails halfway; the
  *  header lets restore refuse instead. */
-export function schemaVersion(db: Db): string {
-  const rows = db.all('SELECT filename FROM migrations ORDER BY filename') as { filename: string }[];
+export async function schemaVersion(db: Db): Promise<string> {
+  const rows = await db.all('SELECT filename FROM migrations ORDER BY filename') as { filename: string }[];
   const latest = rows.length > 0 ? rows[rows.length - 1].filename : '(none)';
   return `${rows.length} migrations, latest ${latest}`;
 }
@@ -191,12 +189,12 @@ interface DumpHeader {
   tables: string[];
 }
 
-function renderHeader(db: Db, tables: string[], createdAt: string): string {
+async function renderHeader(db: Db, tables: string[], createdAt: string): Promise<string> {
   return [
     '-- freellmapi database backup',
     `-- format: ${DUMP_FORMAT}`,
     `-- created: ${createdAt}`,
-    `-- schema: ${schemaVersion(db)}`,
+    `-- schema: ${await schemaVersion(db)}`,
     `-- key-fingerprint: ${currentKeyFingerprint()}`,
     `-- tables: ${tables.join(', ')}`,
     '-- excluded by policy: ' + [...EXCLUDED_TABLES].join(', '),
@@ -238,15 +236,20 @@ function sqliteEscape(value: unknown): string {
   return `'${s.replace(/'/g, "''")}'`;
 }
 
-function sqliteCreateTable(db: Db, table: string): string | null {
-  const row = db.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", [table]) as { sql: string } | undefined;
-  if (!row?.sql) return null;
-  return `${row.sql.replace(/^CREATE TABLE/i, 'CREATE TABLE IF NOT EXISTS')};`;
+// PostgreSQL has no "show me the CREATE TABLE" catalog entry, and the dump
+// only has to carry rows: restore targets a database whose schema the
+// migrations already own. The schema is pinned by the dump header instead (the
+// migration ledger), which restore checks before replaying anything.
+async function createTable(_db: Db, _table: string): Promise<string | null> {
+  return null;
 }
 
-function sqliteDumpTable(db: Db, table: string): string {
-  const columns = (db.all(`PRAGMA table_info("${table}")`) as { name: string }[]).map((c) => c.name);
-  const rows = db.all(`SELECT * FROM "${table}"`) as Record<string, unknown>[];
+async function sqliteDumpTable(db: Db, table: string): Promise<string> {
+  const columns = (await db.all<{ column_name: string }>(
+    'SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position',
+    ['public', table],
+  )).map((c) => c.column_name);
+  const rows = await db.all(`SELECT * FROM "${table}"`) as Record<string, unknown>[];
   const lines: string[] = [`DELETE FROM "${table}";`];
   if (rows.length > 0) {
     const columnList = columns.map((c) => `"${c}"`).join(', ');
@@ -259,12 +262,12 @@ function sqliteDumpTable(db: Db, table: string): string {
 // No BEGIN/COMMIT in the body: restore runs the whole file inside one
 // db.transaction() so a failure halfway through rolls the database back to
 // where it started, and a nested BEGIN would abort that.
-function sqliteDump(db: Db, tables: string[], createdAt: string): string {
-  const lines = [renderHeader(db, tables, createdAt)];
+async function sqliteDump(db: Db, tables: string[], createdAt: string): Promise<string> {
+  const lines = [await renderHeader(db, tables, createdAt)];
   for (const table of tables) {
-    const create = sqliteCreateTable(db, table);
+    const create = await createTable(db, table);
     if (create) lines.push(create);
-    lines.push(sqliteDumpTable(db, table));
+    lines.push(await sqliteDumpTable(db, table));
   }
   return `${lines.join('\n')}\n`;
 }
@@ -273,11 +276,11 @@ function sqliteDump(db: Db, tables: string[], createdAt: string): string {
 /* Backup creation                                                    */
 /* ------------------------------------------------------------------ */
 
-export function createBackup(
+export async function createBackup(
   db: Db,
   opts: { tables?: string[]; source?: BackupSource; backupPath?: string } = {},
-): BackupMeta {
-  const available = listTables(db);
+): Promise<BackupMeta> {
+  const available = await listTables(db);
   const requested = (opts.tables ?? []).filter((t) => available.includes(t));
   const isFull = requested.length === 0;
   const tables = isFull ? available : requested;
@@ -293,14 +296,14 @@ export function createBackup(
   const prefix = source === 'scheduled' ? 'auto-backup' : source === 'manual' ? 'backup' : source;
   const filename = `${prefix}-${stamp}-${crypto.randomBytes(3).toString('hex')}.sql`;
 
-  const dir = resolveBackupDir(db, opts.backupPath ?? readBackupSchedule().backupPath);
+  const dir = resolveBackupDir(db, opts.backupPath ?? await (await readBackupSchedule()).backupPath);
   const filepath = path.join(dir, filename);
 
-  fs.writeFileSync(filepath, sqliteDump(db, tables, createdAt), { encoding: 'utf8', mode: 0o600 });
+  fs.writeFileSync(filepath, await sqliteDump(db, tables, createdAt), { encoding: 'utf8', mode: 0o600 });
   restrictToOwner(filepath);
 
   const filesize = fs.statSync(filepath).size;
-  const result = db.run('INSERT INTO backups (filename, filepath, filesize, is_full, source, created_at, tables_json) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id', [filename, filepath, filesize, isFull ? 1 : 0, source, createdAt, JSON.stringify(tables)]);
+  const result = await db.run('INSERT INTO backups (filename, filepath, filesize, is_full, source, created_at, tables_json) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id', [filename, filepath, filesize, isFull ? 1 : 0, source, createdAt, JSON.stringify(tables)]);
 
   return { id: Number(result.lastInsertRowid), filename, filesize, isFull, source, createdAt, tables };
 }
@@ -344,16 +347,16 @@ function toMeta(row: BackupRow): BackupMeta {
   };
 }
 
-export function listBackups(db: Db, opts: { page?: number; pageSize?: number } = {}): { items: BackupMeta[]; total: number } {
+export async function listBackups(db: Db, opts: { page?: number; pageSize?: number } = {}): Promise<{ items: BackupMeta[]; total: number }> {
   const page = Math.max(1, opts.page ?? 1);
   const pageSize = Math.min(200, Math.max(1, opts.pageSize ?? 20));
-  const total = (db.get('SELECT COUNT(*) AS n FROM backups') as { n: number }).n;
-  const rows = db.all(`SELECT ${SELECT_COLUMNS} FROM backups ORDER BY id DESC LIMIT ? OFFSET ?`, [pageSize, (page - 1) * pageSize]) as BackupRow[];
+  const total = (await db.get('SELECT COUNT(*) AS n FROM backups') as { n: number }).n;
+  const rows = await db.all(`SELECT ${SELECT_COLUMNS} FROM backups ORDER BY id DESC LIMIT ? OFFSET ?`, [pageSize, (page - 1) * pageSize]) as BackupRow[];
   return { items: rows.map(toMeta), total };
 }
 
-function readBackupRecord(db: Db, id: number): BackupRow {
-  const row = db.get(`SELECT ${SELECT_COLUMNS} FROM backups WHERE id = ?`, [id]) as BackupRow | undefined;
+async function readBackupRecord(db: Db, id: number): Promise<BackupRow> {
+  const row = await db.get(`SELECT ${SELECT_COLUMNS} FROM backups WHERE id = ?`, [id]) as BackupRow | undefined;
   if (!row) throw httpError('Backup not found', 404);
   return row;
 }
@@ -361,35 +364,35 @@ function readBackupRecord(db: Db, id: number): BackupRow {
 /** The recorded path, re-checked against the data directory on every read: a
  *  row written before the directory moved (or edited by hand) must not become
  *  a way to read or delete a file elsewhere on the disk. */
-function backupFilePath(db: Db, row: BackupRow): string {
+async function backupFilePath(db: Db, row: BackupRow): Promise<string> {
   const root = dataDir(db);
   const candidate = row.filepath
     ? path.resolve(row.filepath)
-    : path.join(resolveBackupDir(db, readBackupSchedule().backupPath), row.filename);
+    : path.join(resolveBackupDir(db, await (await readBackupSchedule()).backupPath), row.filename);
   if (!isInside(root, candidate)) {
     throw httpError('Backup file lies outside the database directory', 400);
   }
   return candidate;
 }
 
-export function getBackupFile(db: Db, id: number): { path: string; filename: string } {
-  const row = readBackupRecord(db, id);
-  const filePath = backupFilePath(db, row);
+export async function getBackupFile(db: Db, id: number): Promise<{ path: string; filename: string }> {
+  const row = await readBackupRecord(db, id);
+  const filePath = await backupFilePath(db, row);
   if (!fs.existsSync(filePath)) {
     throw httpError('Backup file is missing', 404);
   }
   return { path: filePath, filename: row.filename };
 }
 
-export function deleteBackup(db: Db, id: number): void {
-  const row = readBackupRecord(db, id);
-  const filePath = backupFilePath(db, row);
+export async function deleteBackup(db: Db, id: number): Promise<void> {
+  const row = await readBackupRecord(db, id);
+  const filePath = await backupFilePath(db, row);
   try {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   } catch {
     // Metadata removal below still succeeds; a missing file is not fatal.
   }
-  db.run('DELETE FROM backups WHERE id = ?', [id]);
+  await db.run('DELETE FROM backups WHERE id = ?', [id]);
 }
 
 /** Statements naming a table the dump policy excludes. A dump this server
@@ -407,9 +410,9 @@ export interface RestoreResult {
   snapshot: BackupMeta;
 }
 
-export function restoreBackup(db: Db, id: number): RestoreResult {
-  const row = readBackupRecord(db, id);
-  const filePath = backupFilePath(db, row);
+export async function restoreBackup(db: Db, id: number): Promise<RestoreResult> {
+  const row = await readBackupRecord(db, id);
+  const filePath = await backupFilePath(db, row);
   if (!fs.existsSync(filePath)) {
     throw httpError('Backup file is missing', 404);
   }
@@ -424,7 +427,7 @@ export function restoreBackup(db: Db, id: number): RestoreResult {
   // A dump only carries rows, not the schema evolution around them. Restoring
   // one taken at a different migration state would drop columns added since,
   // or insert into columns that no longer exist.
-  const current = schemaVersion(db);
+  const current = await schemaVersion(db);
   if (header.schema !== current) {
     throw httpError(
       `This backup was taken at a different schema version (backup: ${header.schema}; database: ${current}). ` +
@@ -456,28 +459,46 @@ export function restoreBackup(db: Db, id: number): RestoreResult {
 
   // Written before a single row changes, so a restore that turns out to be the
   // wrong file is one restore away from being undone.
-  const snapshot = createBackup(db, { source: 'pre-restore' });
+  const snapshot = await createBackup(db, { source: 'pre-restore' });
 
-  // SQLite ignores `PRAGMA foreign_keys` inside a transaction, so it has to be
-  // flipped out here. The dump deletes and reloads whole tables, which
-  // transiently breaks references between them.
-  const foreignKeysWereOn = readForeignKeysPragma(db);
   try {
-    db.pragma('foreign_keys = OFF');
-    // One transaction for the whole file: better-sqlite3 rolls it back if any
-    // statement throws, so a bad dump leaves the database exactly as it was.
-    db.transaction(() => {
+    // One transaction for the whole file: a bad dump leaves the database
+    // exactly as it was.
+    await db.transaction(async (tx) => {
       // Replaying historical log rows is not new provider usage. In a full
       // restore the ledger is restored separately; in a partial log restore
-      // the existing ledger remains authoritative. Keep DDL in this same
-      // transaction so a failed restore also restores the trigger.
-      const usageTrigger = header.tables.includes('requests')
-        ? db.get("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'requests_key_monthly_usage'") as { sql: string } | undefined
-        : undefined;
-      if (usageTrigger) db.exec('DROP TRIGGER requests_key_monthly_usage');
-      db.exec(sql);
-      if (usageTrigger) db.exec(usageTrigger.sql);
-    })();
+      // the existing ledger remains authoritative. The trigger is dropped and
+      // recreated inside the same transaction so a failed restore also
+      // restores the trigger.
+      const hasUsageTrigger = header.tables.includes('requests');
+      if (hasUsageTrigger) {
+        await tx.exec('DROP TRIGGER IF EXISTS requests_key_monthly_usage ON requests');
+      }
+      await tx.exec(sql);
+      if (hasUsageTrigger) {
+        await tx.exec(`
+          CREATE OR REPLACE FUNCTION requests_key_monthly_usage_fn()
+          RETURNS TRIGGER LANGUAGE plpgsql AS $fn$
+          BEGIN
+            IF NEW.key_id IS NOT NULL AND NEW.status = 'success'
+               AND to_char(NEW.created_at::timestamp, 'YYYY-MM') IS NOT NULL THEN
+              INSERT INTO key_monthly_usage (key_id, month, requests, tokens)
+              VALUES (NEW.key_id, to_char(NEW.created_at::timestamp, 'YYYY-MM'), 1,
+                      GREATEST(0, NEW.input_tokens) + GREATEST(0, NEW.output_tokens))
+              ON CONFLICT(key_id, month) DO UPDATE SET
+                requests = key_monthly_usage.requests + 1,
+                tokens = key_monthly_usage.tokens + EXCLUDED.tokens;
+            END IF;
+            RETURN NEW;
+          END;
+          $fn$;
+          DROP TRIGGER IF EXISTS requests_key_monthly_usage ON requests;
+          CREATE TRIGGER requests_key_monthly_usage
+          AFTER INSERT ON requests FOR EACH ROW
+          EXECUTE FUNCTION requests_key_monthly_usage_fn();
+        `);
+      }
+    });
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     throw httpError(
@@ -485,45 +506,20 @@ export function restoreBackup(db: Db, id: number): RestoreResult {
       `A snapshot of the current data was saved as ${snapshot.filename}.`,
       400,
     );
-  } finally {
-    if (foreignKeysWereOn) {
-      try {
-        db.pragma('foreign_keys = ON');
-      } catch {
-        // The restore itself already succeeded or rolled back; the pragma is
-        // re-applied on the next connection either way.
-      }
-    }
   }
 
   return { backup: toMeta(row), snapshot };
-}
-
-function readForeignKeysPragma(db: Db): boolean {
-  try {
-    const result = db.pragma('foreign_keys') as unknown;
-    if (Array.isArray(result) && result[0] && typeof result[0] === 'object') {
-      return (result[0] as Record<string, unknown>).foreign_keys === 1;
-    }
-    if (typeof result === 'object' && result !== null) {
-      return (result as Record<string, unknown>).foreign_keys === 1;
-    }
-  } catch {
-    // Drivers without pragma introspection: assume it was on, which is the
-    // stricter of the two states to put back.
-  }
-  return true;
 }
 
 /* ------------------------------------------------------------------ */
 /* Auto-backup scheduler                                              */
 /* ------------------------------------------------------------------ */
 
-export function startBackupScheduler(scheduler: Scheduler): () => void {
-  let lastRunDay: string | null = getSetting(LAST_RUN_SETTING) ?? null;
+export async function startBackupScheduler(scheduler: Scheduler): Promise<() => void> {
+  let lastRunDay: string | null = await getSetting(LAST_RUN_SETTING) ?? null;
 
-  const tick = (): void => {
-    const schedule = readBackupSchedule();
+  const tick = async (): Promise<void> => {
+    const schedule = await readBackupSchedule();
     if (!schedule.enabled) return;
 
     const now = new Date();
@@ -540,15 +536,15 @@ export function startBackupScheduler(scheduler: Scheduler): () => void {
     }
 
     lastRunDay = today;
-    setSetting(LAST_RUN_SETTING, today);
+    await setSetting(LAST_RUN_SETTING, today);
     try {
-      createBackup(getDb(), { tables: [], source: 'scheduled', backupPath: schedule.backupPath });
+      await createBackup(getDb(), { tables: [], source: 'scheduled', backupPath: schedule.backupPath });
     } catch (err) {
       console.error('[backups] scheduled backup failed:', err);
     }
   };
 
   const stop = scheduler.every(60_000, tick);
-  tick();
+  await tick();
   return stop;
 }

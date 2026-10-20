@@ -20,7 +20,7 @@ export class ApinexProvider extends OpenAICompatProvider {
   }
 
   protected override async validationResult(response: Response): Promise<KeyValidationResult> {
-    if ([401, 403].includes(response.status)) return super.validationResult(response);
+    if ([401, 403].includes(response.status)) return await super.validationResult(response);
     if (!response.ok) throw providerHttpError(response, 'APINex key validation is temporarily inconclusive');
     const body = await response.json().catch(() => null) as { object?: unknown; balance_usd?: unknown; error?: unknown } | null;
     if (body?.object !== 'balance' || body.error || typeof body.balance_usd !== 'number' || !Number.isFinite(body.balance_usd)) {

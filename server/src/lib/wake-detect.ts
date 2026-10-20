@@ -40,15 +40,15 @@ let installed = false;
 // Kept so stopWakeDetect can remove exactly the listeners this module added —
 // removeAllListeners would silently unhook any OTHER module's SIGUSR2 handler
 // (log rotation, heap-dump triggers).
-const sigcontHandler = () => handleSignal('SIGCONT');
-const sigusr2Handler = () => handleSignal('SIGUSR2');
+const sigcontHandler = async () => await handleSignal('SIGCONT');
+const sigusr2Handler = async () => await handleSignal('SIGUSR2');
 
-function tick(): void {
+async function tick(): Promise<void> {
   const now = Date.now();
   if (lastTickAt > 0) {
     const drift = now - lastTickAt - TICK_MS;
     if (drift > DRIFT_THRESHOLD_MS) {
-      invokeHooks({ reason: 'drift', idleMs: drift });
+      await invokeHooks({ reason: 'drift', idleMs: drift });
     }
   }
   lastTickAt = now;
@@ -57,21 +57,21 @@ function tick(): void {
   if (timer.unref) timer.unref();
 }
 
-function handleSignal(name: string): void {
+async function handleSignal(name: string): Promise<void> {
   const idleMs = lastTickAt > 0 ? Math.max(0, Date.now() - lastTickAt - TICK_MS) : 0;
-  invokeHooks({ reason: 'signal', idleMs, signal: name });
+  await invokeHooks({ reason: 'signal', idleMs, signal: name });
   lastTickAt = Date.now();
 }
 
 // The recovery pass must never take the server down: a throwing handler is
 // logged and swallowed, sync or async.
-function invokeHooks(event: WakeEvent): void {
+async function invokeHooks(event: WakeEvent): Promise<void> {
   if (!hooks) return;
   const now = Date.now();
   if (now - lastWakeAt < WAKE_DEBOUNCE_MS) return;
   lastWakeAt = now;
   try {
-    Promise.resolve(hooks.onWake(event)).catch((err) => {
+    await Promise.resolve(hooks.onWake(event)).catch((err) => {
       console.error(`[wake-detect] onWake handler error: ${err?.message ?? err}`);
     });
   } catch (err: any) {

@@ -1,11 +1,11 @@
 import type { Db } from '../db/types.js';
 
-export function getActiveProfileId(db: Db): number | null {
-  const setting = db.get("SELECT value FROM settings WHERE key = 'active_profile_id'") as { value: string } | undefined;
+export async function getActiveProfileId(db: Db): Promise<number | null> {
+  const setting = await db.get("SELECT value FROM settings WHERE key = 'active_profile_id'") as { value: string } | undefined;
   if (!setting) return null;
   const profileId = parseInt(setting.value, 10);
   if (!Number.isInteger(profileId)) return null;
-  const profile = db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as { id: number } | undefined;
+  const profile = await db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as { id: number } | undefined;
   return profile ? profileId : null;
 }
 
@@ -16,21 +16,21 @@ const AUTO_INCLUDING_PROFILES_SQL = `
   SELECT id FROM profiles WHERE auto_include_new_models = 1 ORDER BY id ASC
 `;
 
-export function ensureModelInProfiles(db: Db, modelDbId: number): void {
-  const profiles = db.all(AUTO_INCLUDING_PROFILES_SQL) as { id: number }[];
-  const fallback = db.get('SELECT enabled FROM fallback_config WHERE model_db_id = ?', [modelDbId]) as { enabled: number } | undefined;
+export async function ensureModelInProfiles(db: Db, modelDbId: number): Promise<void> {
+  const profiles = await db.all(AUTO_INCLUDING_PROFILES_SQL) as { id: number }[];
+  const fallback = await db.get('SELECT enabled FROM fallback_config WHERE model_db_id = ?', [modelDbId]) as { enabled: number } | undefined;
   if (!fallback) return;
 
 
   for (const profile of profiles) {
-    if (db.get('SELECT 1 FROM profile_models WHERE profile_id = ? AND model_db_id = ?', [profile.id, modelDbId])) continue;
-    const max = db.get('SELECT COALESCE(MAX(priority), 0) AS max_priority FROM profile_models WHERE profile_id = ?', [profile.id]) as { max_priority: number };
-    db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profile.id, modelDbId, max.max_priority + 1, fallback.enabled]);
+    if (await db.get('SELECT 1 FROM profile_models WHERE profile_id = ? AND model_db_id = ?', [profile.id, modelDbId])) continue;
+    const max = await db.get('SELECT COALESCE(MAX(priority), 0) AS max_priority FROM profile_models WHERE profile_id = ?', [profile.id]) as { max_priority: number };
+    await db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profile.id, modelDbId, max.max_priority + 1, fallback.enabled]);
   }
 }
 
-export function ensureAllModelsInProfiles(db: Db): void {
-  const profiles = db.all(AUTO_INCLUDING_PROFILES_SQL) as { id: number }[];
+export async function ensureAllModelsInProfiles(db: Db): Promise<void> {
+  const profiles = await db.all(AUTO_INCLUDING_PROFILES_SQL) as { id: number }[];
   if (profiles.length === 0) return;
 
 
@@ -38,9 +38,9 @@ export function ensureAllModelsInProfiles(db: Db): void {
   // insert.run() is its own commit + fsync, and profiles × missing models of
   // those, run on the event loop, is how a catalog sync froze every request
   // on the box for minutes on slow storage.
-  db.transaction(() => {
+  await db.transaction(async (tx) => {
     for (const profile of profiles) {
-      const rows = db.all(`
+      const rows = await tx.all(`
     SELECT m.id, f.enabled
       FROM fallback_config f
       JOIN models m ON m.id = f.model_db_id
@@ -49,10 +49,10 @@ export function ensureAllModelsInProfiles(db: Db): void {
      ORDER BY f.priority, m.id
   `, [profile.id]) as { id: number; enabled: number }[];
       if (rows.length === 0) continue;
-      const max = db.get('SELECT COALESCE(MAX(priority), 0) AS max_priority FROM profile_models WHERE profile_id = ?', [profile.id]) as { max_priority: number };
-      rows.forEach((row, index) => {
-        db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profile.id, row.id, max.max_priority + index + 1, row.enabled]);
+      const max = await tx.get('SELECT COALESCE(MAX(priority), 0) AS max_priority FROM profile_models WHERE profile_id = ?', [profile.id]) as { max_priority: number };
+      rows.forEach(async (row, index) => {
+        await tx.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profile.id, row.id, max.max_priority + index + 1, row.enabled]);
       });
     }
-  })();
+  });
 }

@@ -576,7 +576,7 @@ export class GoogleProvider extends BaseProvider {
       contents: request.contents,
       generationConfig: {
         temperature: options?.temperature,
-        maxOutputTokens: resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
+        maxOutputTokens: await resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
         topP: options?.top_p,
         stopSequences: toGeminiStopSequences(options?.stop),
         ...toGeminiExtendedConfig(options),
@@ -597,7 +597,7 @@ export class GoogleProvider extends BaseProvider {
       // whose body hangs aborts instead of stalling res.json() forever.
     }, options?.timeoutMs ?? this.timeoutMs, { signal: options?.signal, timeoutBounds: 'request' });
 
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -659,7 +659,7 @@ export class GoogleProvider extends BaseProvider {
       contents: request.contents,
       generationConfig: {
         temperature: options?.temperature,
-        maxOutputTokens: resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
+        maxOutputTokens: await resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
         topP: options?.top_p,
         stopSequences: toGeminiStopSequences(options?.stop),
         ...toGeminiExtendedConfig(options),
@@ -678,7 +678,7 @@ export class GoogleProvider extends BaseProvider {
       // the client signal + stall watchdog own the stream from there.
     }, options?.timeoutMs ?? this.timeoutMs, { signal: options?.signal });
 
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -715,8 +715,8 @@ export class GoogleProvider extends BaseProvider {
     try {
       while (true) {
         const { done, value } = awaitingFirstByte
-          ? await this.readWithStallTimeout(() => reader.read(), firstByteMs, this.firstByteTimeoutMessage(firstByteMs))
-          : await this.readWithStallTimeout(() => reader.read(), inactivityTimeoutMs);
+          ? await this.readWithStallTimeout(async () => await reader.read(), firstByteMs, this.firstByteTimeoutMessage(firstByteMs))
+          : await this.readWithStallTimeout(async () => await reader.read(), inactivityTimeoutMs);
         awaitingFirstByte = false;
         if (done) break;
 
@@ -811,7 +811,7 @@ export class GoogleProvider extends BaseProvider {
       // point). Without it the Gemini generation kept running upstream —
       // quota burning with nobody reading — because this adapter reads the
       // body itself instead of going through readSseStream's shared cleanup.
-      reader.cancel().catch(() => { /* upstream already gone */ });
+      await reader.cancel().catch(() => { /* upstream already gone */ });
     }
 
     // Reaching here means the body ended with neither `[DONE]` nor any
@@ -844,7 +844,7 @@ export class GoogleProvider extends BaseProvider {
       10000,
       { timeoutBounds: 'request' },
     );
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,

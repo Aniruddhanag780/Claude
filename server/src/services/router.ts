@@ -380,32 +380,32 @@ const COMMUNITY_PRIOR_ENABLED_KEY = 'routing_community_prior_enabled';
 export const HEADROOM_RAMP_START_KEY = 'routing_headroom_ramp_start';
 export const HEADROOM_FLOOR_KEY = 'routing_headroom_floor';
 
-export function getHeadroomThresholds(): { rampStart: number | undefined; floor: number | undefined } {
-  const read = (key: string): number | undefined => {
-    const raw = getSetting(key);
+export async function getHeadroomThresholds(): Promise<{ rampStart: number | undefined; floor: number | undefined }> {
+  const read = async (key: string): Promise<number | undefined> => {
+    const raw = await getSetting(key);
     if (raw === undefined || raw.trim() === '') return undefined;
     const n = Number(raw);
     return Number.isFinite(n) && n >= 0 && n <= 1 ? n : undefined;
   };
-  return { rampStart: read(HEADROOM_RAMP_START_KEY), floor: read(HEADROOM_FLOOR_KEY) };
+  return { rampStart: await read(HEADROOM_RAMP_START_KEY), floor: await read(HEADROOM_FLOOR_KEY) };
 }
 
 // null clears a threshold back to the default; undefined leaves it untouched.
-export function setHeadroomThresholds(rampStart?: number | null, floor?: number | null): void {
+export async function setHeadroomThresholds(rampStart?: number | null, floor?: number | null): Promise<void> {
   const db = getDb();
-  const apply = (key: string, value: number | null | undefined): void => {
+  const apply = async (key: string, value: number | null | undefined): Promise<void> => {
     if (value === undefined) return;
     if (value === null) {
-      db.run('DELETE FROM settings WHERE key = ?', [key]); // back to default
+      await db.run('DELETE FROM settings WHERE key = ?', [key]); // back to default
       return;
     }
     if (!Number.isFinite(value) || value < 0 || value > 1) {
       throw new Error(`Invalid value ${value} for ${key} (must be 0..1)`);
     }
-    setSetting(key, String(value));
+    await setSetting(key, String(value));
   };
-  apply(HEADROOM_RAMP_START_KEY, rampStart);
-  apply(HEADROOM_FLOOR_KEY, floor);
+  await apply(HEADROOM_RAMP_START_KEY, rampStart);
+  await apply(HEADROOM_FLOOR_KEY, floor);
 }
 
 // ── Minimum reliability floor (#filter) ─────────────────────────────────────
@@ -416,24 +416,24 @@ export function setHeadroomThresholds(rampStart?: number | null, floor?: number 
 // values disable the filter (existing installs untouched).
 export const MIN_RELIABILITY_FLOOR_KEY = 'routing_min_reliability_floor';
 
-export function getMinReliabilityFloor(): number | undefined {
-  const raw = getSetting(MIN_RELIABILITY_FLOOR_KEY);
+export async function getMinReliabilityFloor(): Promise<number | undefined> {
+  const raw = await getSetting(MIN_RELIABILITY_FLOOR_KEY);
   if (raw === undefined || raw.trim() === '') return undefined;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 && n <= 1 ? n : undefined;
 }
 
 // null clears the floor back to the default (disabled); undefined leaves it untouched.
-export function setMinReliabilityFloor(floor?: number | null): void {
+export async function setMinReliabilityFloor(floor?: number | null): Promise<void> {
   if (floor === undefined) return;
   if (floor === null) {
-    getDb().run('DELETE FROM settings WHERE key = ?', [MIN_RELIABILITY_FLOOR_KEY]);
+    await getDb().run('DELETE FROM settings WHERE key = ?', [MIN_RELIABILITY_FLOOR_KEY]);
     return;
   }
   if (!Number.isFinite(floor) || floor < 0 || floor > 1) {
     throw new Error(`Invalid value ${floor} for ${MIN_RELIABILITY_FLOOR_KEY} (must be 0..1)`);
   }
-  setSetting(MIN_RELIABILITY_FLOOR_KEY, String(floor));
+  await setSetting(MIN_RELIABILITY_FLOOR_KEY, String(floor));
 }
 
 // ── Provider-moment failure attribution (opt-in, #1347) ────────────────────
@@ -446,32 +446,32 @@ export function setMinReliabilityFloor(floor?: number | null): void {
 // dashboard setting so a self-host can pin the behaviour without the UI.
 export const PROVIDER_MOMENT_ATTRIBUTION_KEY = 'routing_provider_moment_attribution';
 
-export function isProviderMomentAttributionEnabled(): boolean {
+export async function isProviderMomentAttributionEnabled(): Promise<boolean> {
   const env = process.env.ROUTER_PROVIDER_MOMENT_ATTRIBUTION;
   if (env !== undefined && env.trim() !== '') {
     const v = env.trim().toLowerCase();
     if (v === '1' || v === 'true' || v === 'on') return true;
     if (v === '0' || v === 'false' || v === 'off') return false;
   }
-  return getSetting(PROVIDER_MOMENT_ATTRIBUTION_KEY) === '1';
+  return await getSetting(PROVIDER_MOMENT_ATTRIBUTION_KEY) === '1';
 }
 
-export function setProviderMomentAttribution(enabled: boolean): void {
+export async function setProviderMomentAttribution(enabled: boolean): Promise<void> {
   if (enabled) {
-    setSetting(PROVIDER_MOMENT_ATTRIBUTION_KEY, '1');
+    await setSetting(PROVIDER_MOMENT_ATTRIBUTION_KEY, '1');
   } else {
-    getDb().run('DELETE FROM settings WHERE key = ?', [PROVIDER_MOMENT_ATTRIBUTION_KEY]);
+    await getDb().run('DELETE FROM settings WHERE key = ?', [PROVIDER_MOMENT_ATTRIBUTION_KEY]);
   }
   // The stats cache bakes the attribution filter into its SQL, so a toggle
   // must not wait for the cache TTL to change routing.
-  refreshStatsCache(getDb(), true);
+  await refreshStatsCache(getDb(), true);
 }
 
 // The failure_attribution value for one attempt error, or null when the
 // feature is off or the error is not a provider-moment failure. Route call
 // sites pass this straight through to logRequest.
-export function failureAttributionFor(err: any): string | null {
-  if (!isProviderMomentAttributionEnabled()) return null;
+export async function failureAttributionFor(err: any): Promise<string | null> {
+  if (!await isProviderMomentAttributionEnabled()) return null;
   return isProviderMomentFailure(err) ? 'provider_moment' : null;
 }
 
@@ -483,23 +483,23 @@ export function failureAttributionFor(err: any): string | null {
 // values fall back to the constant so existing installs are untouched.
 export const TASK_WEIGHT_SHARE_KEY = 'routing_task_weight_share';
 
-export function getTaskWeightShare(): number {
-  const raw = getSetting(TASK_WEIGHT_SHARE_KEY);
+export async function getTaskWeightShare(): Promise<number> {
+  const raw = await getSetting(TASK_WEIGHT_SHARE_KEY);
   if (raw === undefined || raw.trim() === '') return TASK_WEIGHT_SHARE;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 && n <= 1 ? n : TASK_WEIGHT_SHARE;
 }
 
 // null clears back to the default; a value outside 0..1 throws.
-export function setTaskWeightShare(value: number | null): void {
+export async function setTaskWeightShare(value: number | null): Promise<void> {
   if (value === null) {
-    getDb().run('DELETE FROM settings WHERE key = ?', [TASK_WEIGHT_SHARE_KEY]);
+    await getDb().run('DELETE FROM settings WHERE key = ?', [TASK_WEIGHT_SHARE_KEY]);
     return;
   }
   if (!Number.isFinite(value) || value < 0 || value > 1) {
     throw new Error(`Invalid value ${value} for ${TASK_WEIGHT_SHARE_KEY} (must be 0..1)`);
   }
-  setSetting(TASK_WEIGHT_SHARE_KEY, String(value));
+  await setSetting(TASK_WEIGHT_SHARE_KEY, String(value));
 }
 
 /** Chance per request that an unmeasured model gets tried first when the
@@ -512,30 +512,30 @@ export const EXPLORE_CHANCE = 0.1;
 export const EXPLORE_MIN_SAMPLES = 5;
 const VALID_STRATEGIES: RoutingStrategy[] = ['priority', 'balanced', 'smartest', 'fastest', 'reliable', 'custom', 'decision'];
 
-export function getRoutingStrategy(): RoutingStrategy {
-  const raw = getSetting(STRATEGY_KEY);
+export async function getRoutingStrategy(): Promise<RoutingStrategy> {
+  const raw = await getSetting(STRATEGY_KEY);
   return (raw && VALID_STRATEGIES.includes(raw as RoutingStrategy))
     ? (raw as RoutingStrategy)
     : DEFAULT_STRATEGY;
 }
 
-export function setRoutingStrategy(strategy: RoutingStrategy): void {
+export async function setRoutingStrategy(strategy: RoutingStrategy): Promise<void> {
   if (!VALID_STRATEGIES.includes(strategy)) {
     throw new Error(`Unknown routing strategy: ${strategy}`);
   }
-  setSetting(STRATEGY_KEY, strategy);
+  await setSetting(STRATEGY_KEY, strategy);
 }
 
 // ── Exploration toggle (persisted) ─────────────────────────────────────────
 // Off by default: existing routing behavior unchanged. When on, routeRequest
 // gives unmeasured models a guaranteed chance to be tried (EXPLORE_CHANCE) so
 // they acquire reliability/speed samples instead of losing every bandit draw.
-export function getExploreEnabled(): boolean {
-  return getSetting(EXPLORE_KEY) === '1';
+export async function getExploreEnabled(): Promise<boolean> {
+  return await getSetting(EXPLORE_KEY) === '1';
 }
 
-export function setExploreEnabled(enabled: boolean): void {
-  setSetting(EXPLORE_KEY, enabled ? '1' : '0');
+export async function setExploreEnabled(enabled: boolean): Promise<void> {
+  await setSetting(EXPLORE_KEY, enabled ? '1' : '0');
 }
 
 // ── Peak-hours adjustment (persisted, off by default) ──────────────────────
@@ -543,12 +543,12 @@ export function setExploreEnabled(enabled: boolean): void {
 // whether it runs at all, the window, and the timezone the window is read in.
 // With the flag off, weightsFor returns the presets byte-for-byte, so an
 // install that never touches this setting routes exactly as it did before.
-export function getPeakHoursConfig(): PeakHoursConfig {
-  const startRaw = Number.parseInt(getSetting(PEAK_START_KEY) ?? '', 10);
-  const endRaw = Number.parseInt(getSetting(PEAK_END_KEY) ?? '', 10);
-  const tzRaw = getSetting(PEAK_TZ_KEY);
+export async function getPeakHoursConfig(): Promise<PeakHoursConfig> {
+  const startRaw = Number.parseInt(await getSetting(PEAK_START_KEY) ?? '', 10);
+  const endRaw = Number.parseInt(await getSetting(PEAK_END_KEY) ?? '', 10);
+  const tzRaw = await getSetting(PEAK_TZ_KEY);
   return {
-    enabled: getSetting(PEAK_ADJUST_KEY) === '1',
+    enabled: await getSetting(PEAK_ADJUST_KEY) === '1',
     startHour: isValidPeakHour(startRaw) ? startRaw : DEFAULT_PEAK_HOURS.startHour,
     endHour: isValidPeakHour(endRaw) ? endRaw : DEFAULT_PEAK_HOURS.endHour,
     timezone: isValidTimezone(tzRaw) ? tzRaw : DEFAULT_PEAK_HOURS.timezone,
@@ -558,7 +558,7 @@ export function getPeakHoursConfig(): PeakHoursConfig {
 /** Persist any subset of the peak-hours settings. Throws on an out-of-range
  *  hour or an unknown IANA timezone so a bad PUT is rejected at the API rather
  *  than silently stored and then ignored on read. */
-export function setPeakHoursConfig(patch: Partial<PeakHoursConfig>): void {
+export async function setPeakHoursConfig(patch: Partial<PeakHoursConfig>): Promise<void> {
   if (patch.startHour !== undefined && !isValidPeakHour(patch.startHour)) {
     throw new Error('peakStartHour must be an integer between 0 and 23');
   }
@@ -568,10 +568,10 @@ export function setPeakHoursConfig(patch: Partial<PeakHoursConfig>): void {
   if (patch.timezone !== undefined && !isValidTimezone(patch.timezone)) {
     throw new Error('peakTimezone must be a valid IANA timezone name');
   }
-  if (patch.enabled !== undefined) setSetting(PEAK_ADJUST_KEY, patch.enabled ? '1' : '0');
-  if (patch.startHour !== undefined) setSetting(PEAK_START_KEY, String(patch.startHour));
-  if (patch.endHour !== undefined) setSetting(PEAK_END_KEY, String(patch.endHour));
-  if (patch.timezone !== undefined) setSetting(PEAK_TZ_KEY, patch.timezone);
+  if (patch.enabled !== undefined) await setSetting(PEAK_ADJUST_KEY, patch.enabled ? '1' : '0');
+  if (patch.startHour !== undefined) await setSetting(PEAK_START_KEY, String(patch.startHour));
+  if (patch.endHour !== undefined) await setSetting(PEAK_END_KEY, String(patch.endHour));
+  if (patch.timezone !== undefined) await setSetting(PEAK_TZ_KEY, patch.timezone);
 }
 
 // ── Key selection strategy (persisted) ─────────────────────────────────────
@@ -588,18 +588,18 @@ const KEY_SELECTION_KEY = 'key_selection_strategy';
 const VALID_KEY_SELECTIONS: KeySelectionStrategy[] = ['auto', 'least-remaining'];
 export const DEFAULT_KEY_SELECTION: KeySelectionStrategy = 'auto';
 
-export function getKeySelectionStrategy(): KeySelectionStrategy {
-  const raw = getSetting(KEY_SELECTION_KEY);
+export async function getKeySelectionStrategy(): Promise<KeySelectionStrategy> {
+  const raw = await getSetting(KEY_SELECTION_KEY);
   return (raw && VALID_KEY_SELECTIONS.includes(raw as KeySelectionStrategy))
     ? (raw as KeySelectionStrategy)
     : DEFAULT_KEY_SELECTION;
 }
 
-export function setKeySelectionStrategy(strategy: KeySelectionStrategy): void {
+export async function setKeySelectionStrategy(strategy: KeySelectionStrategy): Promise<void> {
   if (!VALID_KEY_SELECTIONS.includes(strategy)) {
     throw new Error(`Unknown key selection strategy: ${strategy}`);
   }
-  setSetting(KEY_SELECTION_KEY, strategy);
+  await setSetting(KEY_SELECTION_KEY, strategy);
 }
 
 // ── Custom weights (persisted) ──────────────────────────────────────────────
@@ -607,8 +607,8 @@ export function setKeySelectionStrategy(strategy: KeySelectionStrategy): void {
 // to 1) so the dashboard percentages read cleanly; combineScore would tolerate
 // any non-negative vector regardless. Falls back to the balanced preset until
 // the user has saved their own.
-export function getCustomWeights(): RoutingWeights {
-  const raw = getSetting(CUSTOM_WEIGHTS_KEY);
+export async function getCustomWeights(): Promise<RoutingWeights> {
+  const raw = await getSetting(CUSTOM_WEIGHTS_KEY);
   if (raw) {
     try {
       const w = JSON.parse(raw) as RoutingWeights;
@@ -623,7 +623,7 @@ export function getCustomWeights(): RoutingWeights {
   return { ...BANDIT_PRESETS.balanced };
 }
 
-export function setCustomWeights(weights: RoutingWeights): void {
+export async function setCustomWeights(weights: RoutingWeights): Promise<void> {
   const { reliability, speed, intelligence } = weights;
   if (![reliability, speed, intelligence].every(v => Number.isFinite(v) && v >= 0)) {
     throw new Error('Custom weights must be non-negative numbers');
@@ -632,7 +632,7 @@ export function setCustomWeights(weights: RoutingWeights): void {
   if (sum <= 0) {
     throw new Error('Custom weights must not all be zero');
   }
-  setSetting(CUSTOM_WEIGHTS_KEY, JSON.stringify({
+  await setSetting(CUSTOM_WEIGHTS_KEY, JSON.stringify({
     reliability: reliability / sum,
     speed: speed / sum,
     intelligence: intelligence / sum,
@@ -692,17 +692,17 @@ function sanitizeCommunityPriors(priors: unknown): CommunityPriorMap {
 let communityPriorCache: { map: CommunityPriorMap; enabled: boolean } | null = null;
 let communityPriorCacheTime = 0;
 
-function communityPriorState(): { map: CommunityPriorMap; enabled: boolean } {
+async function communityPriorState(): Promise<{ map: CommunityPriorMap; enabled: boolean }> {
   const now = Date.now();
   if (communityPriorCache && now - communityPriorCacheTime < CACHE_TTL_MS) return communityPriorCache;
   let map: CommunityPriorMap = {};
-  const raw = getSetting(COMMUNITY_PRIOR_KEY);
+  const raw = await getSetting(COMMUNITY_PRIOR_KEY);
   if (raw) {
     try {
       map = sanitizeCommunityPriors(JSON.parse(raw));
     } catch { /* corrupt setting → no priors */ }
   }
-  communityPriorCache = { map, enabled: getSetting(COMMUNITY_PRIOR_ENABLED_KEY) === '1' };
+  communityPriorCache = { map, enabled: await getSetting(COMMUNITY_PRIOR_ENABLED_KEY) === '1' };
   communityPriorCacheTime = now;
   return communityPriorCache;
 }
@@ -712,35 +712,35 @@ function invalidateCommunityPriorCache(): void {
 }
 
 /** Whether stored community priors are folded into the posterior. Default off. */
-export function getCommunityPriorEnabled(): boolean {
-  return communityPriorState().enabled;
+export async function getCommunityPriorEnabled(): Promise<boolean> {
+  return await (await communityPriorState()).enabled;
 }
 
-export function setCommunityPriorEnabled(enabled: boolean): void {
-  setSetting(COMMUNITY_PRIOR_ENABLED_KEY, enabled ? '1' : '0');
+export async function setCommunityPriorEnabled(enabled: boolean): Promise<void> {
+  await setSetting(COMMUNITY_PRIOR_ENABLED_KEY, enabled ? '1' : '0');
   invalidateCommunityPriorCache();
 }
 
 /** Community prior for one model, or undefined when none is stored.
  *  Raw read — ignores the enabled flag; routing goes through
  *  activeCommunityPrior, which honors it. */
-export function getCommunityPrior(platform: string, modelId: string, endpointScope?: string):
-  { successes: number; failures: number } | undefined {
-  return communityPriorState().map[modelStatsKey(platform, modelId, endpointScope)];
+export async function getCommunityPrior(platform: string, modelId: string, endpointScope?: string):
+  Promise<{ successes: number; failures: number } | undefined> {
+  return await (await communityPriorState()).map[modelStatsKey(platform, modelId, endpointScope)];
 }
 
 /** Gated read for routing: undefined unless the opt-in flag is on. */
-function activeCommunityPrior(platform: string, modelId: string, endpointScope?: string):
-  { successes: number; failures: number } | undefined {
-  const state = communityPriorState();
+async function activeCommunityPrior(platform: string, modelId: string, endpointScope?: string):
+  Promise<{ successes: number; failures: number } | undefined> {
+  const state = await communityPriorState();
   return state.enabled ? state.map[modelStatsKey(platform, modelId, endpointScope)] : undefined;
 }
 
 /** Replace the whole community-prior map (e.g. after an aggregation fetch).
  *  Invalid entries are dropped and oversized ones capped, never stored raw. */
-export function setCommunityPriors(priors: CommunityPriorMap): number {
+export async function setCommunityPriors(priors: CommunityPriorMap): Promise<number> {
   const clean = sanitizeCommunityPriors(priors);
-  setSetting(COMMUNITY_PRIOR_KEY, JSON.stringify(clean));
+  await setSetting(COMMUNITY_PRIOR_KEY, JSON.stringify(clean));
   invalidateCommunityPriorCache();
   return Object.keys(clean).length;
 }
@@ -749,33 +749,33 @@ export function setCommunityPriors(priors: CommunityPriorMap): number {
  *  With the setting off (the default) `weights` is the preset itself and
  *  `adjusted` is false, so nothing about routing moves with the clock.
  *  priority/custom are the operator's explicit choice and are never rewritten. */
-function weightsWithPeak(strategy: RoutingStrategy): { weights: RoutingWeights | null; adjusted: boolean } {
+async function weightsWithPeak(strategy: RoutingStrategy): Promise<{ weights: RoutingWeights | null; adjusted: boolean }> {
   if (strategy === 'priority') return { weights: null, adjusted: false };
-  if (strategy === 'custom') return { weights: getCustomWeights(), adjusted: false };
+  if (strategy === 'custom') return { weights: await getCustomWeights(), adjusted: false };
   // 'decision' outside a picked request (display, fusion, background) scores
   // as Balanced, the same preset an unsure or unavailable decision falls to.
-  if (strategy === 'decision') return weightsWithPeak('balanced');
-  return peakAdjustedWeights(BANDIT_PRESETS[strategy], strategy, getPeakHoursConfig());
+  if (strategy === 'decision') return await weightsWithPeak('balanced');
+  return peakAdjustedWeights(BANDIT_PRESETS[strategy], strategy, await getPeakHoursConfig());
 }
 
 /** The strategy THIS request routes with. Under 'decision' (#1354) that is the
  *  preset the decision model picked for the request, else Balanced; every
  *  other strategy is used as set. */
-export function effectiveRoutingStrategy(): RoutingStrategy {
-  const strategy = getRoutingStrategy();
+export async function effectiveRoutingStrategy(): Promise<RoutingStrategy> {
+  const strategy = await getRoutingStrategy();
   if (strategy !== 'decision') return strategy;
   return getClientContext().routingStrategy ?? 'balanced';
 }
 
-function weightsFor(strategy: RoutingStrategy): RoutingWeights | null {
-  return weightsWithPeak(strategy).weights;
+async function weightsFor(strategy: RoutingStrategy): Promise<RoutingWeights | null> {
+  return await (await weightsWithPeak(strategy)).weights;
 }
 
 /** The weight vector routing will use right now for the active strategy, and
  *  whether the peak-hours adjustment moved it. Cheap (settings reads only) —
  *  for the PUT /routing echo, which must not pay for a full score sweep. */
-export function getActiveRoutingWeights(): { weights: RoutingWeights | null; adjusted: boolean } {
-  return weightsWithPeak(getRoutingStrategy());
+export async function getActiveRoutingWeights(): Promise<{ weights: RoutingWeights | null; adjusted: boolean }> {
+  return await weightsWithPeak(await getRoutingStrategy());
 }
 
 // ── Analytics stats cache (decay-weighted) ──────────────────────────────────
@@ -839,12 +839,12 @@ const IS_TIMEOUT_SQL = `(status != 'success' AND (${
 }))`;
 
 /** api_keys.id → endpoint scope, for every custom credential on record (#651). */
-function customEndpointScopes(db: Db): Map<number, string> {
-  const rows = db.all("SELECT id, base_url FROM api_keys WHERE platform = 'custom'") as { id: number; base_url: string | null }[];
+async function customEndpointScopes(db: Db): Promise<Map<number, string>> {
+  const rows = await db.all("SELECT id, base_url FROM api_keys WHERE platform = 'custom'") as { id: number; base_url: string | null }[];
   return new Map(rows.map(r => [r.id, endpointScopeForBaseUrl(r.base_url)]));
 }
 
-export function refreshStatsCache(db: Db, force = false): void {
+export async function refreshStatsCache(db: Db, force = false): Promise<void> {
   if (!force && statsCache && Date.now() - statsCacheTime < CACHE_TTL_MS) return;
 
   // Re-read the community priors alongside the stats they season, so a forced
@@ -860,12 +860,12 @@ export function refreshStatsCache(db: Db, force = false): void {
   // provider's bad minute, not the model — keep them out of every aggregate
   // here (reliability denominator, timeouts, speed) exactly like 'canceled'
   // rows are kept out today.
-  const pmExcluded = isProviderMomentAttributionEnabled()
+  const pmExcluded = await isProviderMomentAttributionEnabled()
     ? " AND (failure_attribution IS NULL OR failure_attribution <> 'provider_moment')"
     : '';
-  const buckets = db.all(`
+  const buckets = await db.all(`
     SELECT platform, model_id, key_id,
-      CAST((julianday('now') - julianday(created_at)) AS INTEGER) AS age_days,
+      CAST((EXTRACT(EPOCH FROM ((now() at time zone 'utc') - created_at::timestamp)) / 86400) AS INTEGER) AS age_days,
       COUNT(*) AS total,
       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successes,
       SUM(CASE WHEN status = 'success' THEN output_tokens ELSE 0 END) AS succ_out,
@@ -908,7 +908,7 @@ export function refreshStatsCache(db: Db, force = false): void {
   // `requests` has always recorded key_id, so pre-migration history splits
   // correctly too; rows whose key is gone (or that never had one) fall into the
   // un-scoped bucket, which only un-scoped rows read.
-  const scopeByKeyId = customEndpointScopes(db);
+  const scopeByKeyId = await customEndpointScopes(db);
   const scopeOf = (platform: string, keyId: number | null): string =>
     platform === 'custom' && keyId != null ? (scopeByKeyId.get(keyId) ?? '') : '';
 
@@ -929,10 +929,10 @@ export function refreshStatsCache(db: Db, force = false): void {
   }
 
   // Calendar-month token usage per model, for the headroom guardrail.
-  const usageRows = db.all(`
+  const usageRows = await db.all(`
     SELECT platform, model_id, key_id, COALESCE(SUM(input_tokens + output_tokens), 0) AS used
     FROM requests
-    WHERE created_at >= datetime('now', 'start of month')
+    WHERE created_at >= to_char(date_trunc('month', now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS')
       AND request_type = 'chat'
     GROUP BY platform, model_id, key_id
   `) as Array<{ platform: string; model_id: string; key_id: number | null; used: number }>;
@@ -981,7 +981,7 @@ export function refreshStatsCache(db: Db, force = false): void {
   if (Date.now() - speedRankWriteTime >= SPEED_RANK_WRITE_INTERVAL_MS) {
     speedRankWriteTime = Date.now();
     try {
-      writeObservedSpeedRanks(db);
+      await writeObservedSpeedRanks(db);
     } catch (e) {
       console.error('Failed to write observed speed ranks:', e);
     }
@@ -1022,14 +1022,14 @@ export function resetSpeedRankWriteback(): void {
  * Reads the stats cache as-is — callers refresh it first (refreshStatsCache
  * calls this from its own tail).
  */
-export function writeObservedSpeedRanks(db: Db): number {
+export async function writeObservedSpeedRanks(db: Db): Promise<number> {
   if (!statsCache || statsCache.size === 0) return 0;
 
-  const pinned = modelsWithOverriddenField(db, 'speedRank');
-  const rows = db.all('SELECT id, platform, model_id, speed_rank, endpoint_scope FROM models') as { id: number; platform: string; model_id: string; speed_rank: number; endpoint_scope: string }[];
+  const pinned = await modelsWithOverriddenField(db, 'speedRank');
+  const rows = await db.all('SELECT id, platform, model_id, speed_rank, endpoint_scope FROM models') as { id: number; platform: string; model_id: string; speed_rank: number; endpoint_scope: string }[];
 
   let written = 0;
-  const tx = db.transaction(() => {
+  await db.transaction(async (tx) => {
     for (const row of rows) {
       // Overrides are keyed (platform, model_id) — they only exist for
       // catalog-managed rows, which are never endpoint-scoped — while the
@@ -1040,11 +1040,10 @@ export function writeObservedSpeedRanks(db: Db): number {
       if (!stats || stats.speedSamples < SPEED_RANK_MIN_SAMPLES) continue;
       const rank = observedSpeedRank(speedScore(stats.tokPerSec, stats.avgTtfbMs));
       if (rank === row.speed_rank) continue;
-      db.run('UPDATE models SET speed_rank = ? WHERE id = ?', [rank, row.id]);
+      await tx.run('UPDATE models SET speed_rank = ? WHERE id = ?', [rank, row.id]);
       written++;
     }
   });
-  tx();
   return written;
 }
 
@@ -1067,7 +1066,7 @@ interface ScoredEntry {
 // capacity. `monthlyUsedTokens` is already summed across all keys, so budget
 // must scale to match or the headroom guardrail damps a multi-key model to the
 // floor after just one account's worth of tokens.
-function usableKeyCountsByPlatform(db: Db): Map<string, number> {
+async function usableKeyCountsByPlatform(db: Db): Promise<Map<string, number>> {
   // Per-request GROUP BY on api_keys; only changes on key writes. Real-time
   // correctness is backed by selectKeyForModel's live per-key checks — a stale
   // count can at worst walk one extra candidate, never route to a dead key.
@@ -1075,7 +1074,7 @@ function usableKeyCountsByPlatform(db: Db): Map<string, number> {
   if (cachesEnabled() && keyCountsCache && keyCountsCache.db === db && Date.now() - keyCountsCache.at < KEY_COUNTS_TTL_MS) {
     return keyCountsCache.map;
   }
-  const rows = db.all("SELECT platform, COUNT(*) AS count FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; count: number }[];
+  const rows = await db.all("SELECT platform, COUNT(*) AS count FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; count: number }[];
   const map = new Map(rows.map(r => [r.platform, r.count]));
   keyCountsCache = { db, at: Date.now(), map };
   return map;
@@ -1083,7 +1082,7 @@ function usableKeyCountsByPlatform(db: Db): Map<string, number> {
 const KEY_COUNTS_TTL_MS = 5_000;
 let keyCountsCache: { db: Db; at: number; map: Map<string, number> } | null = null;
 
-function scoreChainEntry(
+async function scoreChainEntry(
   entry: ChainRow,
   weights: RoutingWeights,
   intelMin: number,
@@ -1091,12 +1090,12 @@ function scoreChainEntry(
   sampled: boolean,
   keyCounts: Map<string, number>,
   headroomCfg: HeadroomThresholds,
-): ScoredEntry {
+): Promise<ScoredEntry> {
   const stats = statsCache?.get(modelStatsKey(entry.platform, entry.model_id, entry.endpoint_scope));
   const successes = stats?.successes ?? 0;
   const failures = stats?.failures ?? 0;
 
-  const community = activeCommunityPrior(entry.platform, entry.model_id, entry.endpoint_scope);
+  const community = await activeCommunityPrior(entry.platform, entry.model_id, entry.endpoint_scope);
   let reliability: number;
   if (sampled) {
     const { alpha, beta } = reliabilityPosterior(successes, failures, community);
@@ -1127,7 +1126,7 @@ function scoreChainEntry(
   // until the request that finally 429s it. Reads a snapshot memoised inside
   // ratelimit.ts, so this costs no query per model per request.
   const windowHeadroom = rateWindowHeadroomFactor(
-    modelWindowUsedFraction(
+    await modelWindowUsedFraction(
       { platform: entry.platform, modelId: entry.model_id, keyId: entry.key_id },
       { rpm: entry.rpm_limit, rpd: entry.rpd_limit, tpm: entry.tpm_limit, tpd: entry.tpd_limit },
     ),
@@ -1159,8 +1158,8 @@ function scoreChainEntry(
  * empty the whole chain, the filter is skipped entirely — better a possibly-flaky
  * model than no model at all. #filter.
  */
-export function applyReliabilityFloor(chain: ChainRow[]): ChainRow[] {
-  const floor = getMinReliabilityFloor();
+export async function applyReliabilityFloor(chain: ChainRow[]): Promise<ChainRow[]> {
+  const floor = await getMinReliabilityFloor();
   if (floor === undefined) return chain;
 
   const kept: ChainRow[] = [];
@@ -1174,7 +1173,7 @@ export function applyReliabilityFloor(chain: ChainRow[]): ChainRow[] {
     }
     const rel = expectedReliability(
       stats!.successes, stats!.failures,
-      activeCommunityPrior(e.platform, e.model_id, e.endpoint_scope),
+      await activeCommunityPrior(e.platform, e.model_id, e.endpoint_scope),
     );
     if (rel < floor) dropped.push(e);
     else kept.push(e);
@@ -1196,12 +1195,12 @@ export function applyReliabilityFloor(chain: ChainRow[]): ChainRow[] {
  * faithful reflection of the user's picked strategy, not a re-sampled draw each
  * request. Priority mode is deterministic either way.
  */
-function orderChain(chain: ChainRow[], strategy: RoutingStrategy, sampled = true, task?: 'code' | 'chat'): ChainRow[] {
+async function orderChain(chain: ChainRow[], strategy: RoutingStrategy, sampled = true, task?: 'code' | 'chat'): Promise<ChainRow[]> {
   // Tier first, always: it is the one ordering input that score must not be able
   // to override (see ChainRow.match_tier). Zero for every chain built anywhere
   // else, so this is a no-op outside slug-fallback resolution.
   const tier = (e: ChainRow) => e.match_tier ?? 0;
-  let weights = weightsFor(strategy);
+  let weights = await weightsFor(strategy);
   if (!weights) {
     // Legacy priority mode: manual chain order + the 429/failure penalty,
     // ascending.
@@ -1245,23 +1244,26 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy, sampled = true
   // `fastest`, `reliable` and `custom` are exempt (see TASK_EXEMPT_STRATEGIES),
   // and the share is operator-tunable via settings (0 disables the bias).
   if (task) {
-    const adjusted = taskAdjustedWeights(weights, task, strategy, getTaskWeightShare());
+    const adjusted = taskAdjustedWeights(weights, task, strategy, await getTaskWeightShare());
     weights = adjusted.adjusted ? adjusted.weights : weights;
   }
 
   // Reliability floor: drop chronically-failing models before scoring (#filter).
-  chain = applyReliabilityFloor(chain);
+  chain = await applyReliabilityFloor(chain);
 
   const composites = chain.map(e => intelligenceComposite(e.size_label, e.intelligence_rank));
   const intelMin = composites.length ? Math.min(...composites) : 0;
   const intelMax = composites.length ? Math.max(...composites) : 0;
-  const keyCounts = usableKeyCountsByPlatform(getDb());
-  const headroomCfg = getHeadroomThresholds();
+  const keyCounts = await usableKeyCountsByPlatform(getDb());
+  const headroomCfg = await getHeadroomThresholds();
 
-  return chain
-    .map(e => ({ e, s: scoreChainEntry(e, weights, intelMin, intelMax, sampled, keyCounts, headroomCfg).score }))
-    // Higher score first WITHIN a tier; manual priority breaks ties so the chain
-    // still matters.
+  const scored = await Promise.all(chain.map(async e => ({
+    e,
+    s: (await scoreChainEntry(e, weights, intelMin, intelMax, sampled, keyCounts, headroomCfg)).score,
+  })));
+  // Higher score first WITHIN a tier; manual priority breaks ties so the chain
+  // still matters.
+  return scored
     .sort((a, b) => tier(a.e) - tier(b.e) || b.s - a.s || a.e.priority - b.e.priority)
     .map(x => x.e);
 }
@@ -1320,15 +1322,15 @@ function cachesEnabled(): boolean {
   return process.env.NODE_ENV !== 'test';
 }
 
-function getActiveChain(db: Db): ChainRow[] {
-  const profileId = getActiveProfileId(db);
+async function getActiveChain(db: Db): Promise<ChainRow[]> {
+  const profileId = await getActiveProfileId(db);
   if (cachesEnabled() && chainCache && chainCache.db === db && chainCache.profileId === profileId
       && Date.now() - chainCache.at < CHAIN_CACHE_TTL_MS) {
     return chainCache.rows.slice();
   }
   let rows: ChainRow[];
   if (profileId != null) {
-    rows = db.all(`
+    rows = await db.all(`
       SELECT pm.model_db_id, pm.priority, pm.enabled,
              m.platform, m.model_id, m.display_name, m.intelligence_rank,
              m.size_label, m.monthly_token_budget,
@@ -1340,7 +1342,7 @@ function getActiveChain(db: Db): ChainRow[] {
       ORDER BY pm.priority ASC
     `, [profileId]) as ChainRow[];
   } else {
-    rows = db.all(`
+    rows = await db.all(`
       SELECT fc.model_db_id, fc.priority, fc.enabled,
              m.platform, m.model_id, m.display_name, m.intelligence_rank,
              m.size_label, m.monthly_token_budget,
@@ -1355,11 +1357,11 @@ function getActiveChain(db: Db): ChainRow[] {
   return rows.slice();
 }
 
-function getChainByProfileName(db: Db, name: string): ChainRow[] | null {
-  const profile = db.get("SELECT id FROM profiles WHERE LOWER(name) = ?", [name.toLowerCase()]) as { id: number } | undefined;
+async function getChainByProfileName(db: Db, name: string): Promise<ChainRow[] | null> {
+  const profile = await db.get("SELECT id FROM profiles WHERE LOWER(name) = ?", [name.toLowerCase()]) as { id: number } | undefined;
   if (!profile) return null;
 
-  return db.all(`
+  return await db.all(`
     SELECT pm.model_db_id, pm.priority, pm.enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.size_label, m.monthly_token_budget,
@@ -1372,16 +1374,16 @@ function getChainByProfileName(db: Db, name: string): ChainRow[] | null {
   `, [profile.id]) as ChainRow[];
 }
 
-function getChainByGlobalSort(db: Db, globalAxis: string): ChainRow[] {
+async function getChainByGlobalSort(db: Db, globalAxis: string): Promise<ChainRow[]> {
   // A global sort ignores the chain's ORDER, not its enable flags: a model the
   // operator switched off — in the catalog or just for auto routing — stays off
   // here too (#634). Models with no chain row yet (fresh catalog rows) default
   // to in, so the sort still spans the whole catalog.
-  const profileId = getActiveProfileId(db);
+  const profileId = await getActiveProfileId(db);
   const chainEnabled = profileId != null
     ? 'COALESCE(pm.enabled, fc.enabled, 1) = 1'
     : 'COALESCE(fc.enabled, 1) = 1';
-  const allEnabled = db.all( `
+  const allEnabled = await db.all( `
     SELECT m.id as model_db_id, 0 as priority, 1 as enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.size_label, m.monthly_token_budget,
@@ -1402,7 +1404,7 @@ function getChainByGlobalSort(db: Db, globalAxis: string): ChainRow[] {
   };
   const strat = strategyMap[globalAxis] || 'balanced';
   
-  return orderChain(allEnabled, strat);
+  return await orderChain(allEnabled, strat);
 }
 
 /**
@@ -1413,14 +1415,14 @@ function getChainByGlobalSort(db: Db, globalAxis: string): ChainRow[] {
  * it. Only when a profile is active — a legacy install with none keeps the
  * ordinary "all models exhausted" exhaustion path.
  */
-function activeChainOrThrow(db: Db): ChainRow[] {
-  const chain = getActiveChain(db);
+async function activeChainOrThrow(db: Db): Promise<ChainRow[]> {
+  const chain = await getActiveChain(db);
   if (chain.some(entry => entry.enabled)) return chain;
 
-  const profileId = getActiveProfileId(db);
+  const profileId = await getActiveProfileId(db);
   if (profileId == null) return chain;
 
-  const profile = db.get('SELECT name FROM profiles WHERE id = ?', [profileId]) as { name: string } | undefined;
+  const profile = await db.get('SELECT name FROM profiles WHERE id = ?', [profileId]) as { name: string } | undefined;
   const err = new Error(
     `The active fallback chain${profile ? ` '${profile.name}'` : ''} has no enabled models. `
     + 'Enable models for it on the Models page, switch the active chain, or name another one with "auto:<chain>".',
@@ -1429,26 +1431,26 @@ function activeChainOrThrow(db: Db): ChainRow[] {
   throw err;
 }
 
-export function resolveRoutingChain(modelString: string | undefined): ResolvedChain {
+export async function resolveRoutingChain(modelString: string | undefined): Promise<ResolvedChain> {
   const db = getDb();
 
   if (!modelString || modelString.toLowerCase() === 'auto') {
-    return { chain: activeChainOrThrow(db), strategyKey: 'auto' };
+    return { chain: await activeChainOrThrow(db), strategyKey: 'auto' };
   }
 
   const lower = modelString.toLowerCase();
   if (!lower.startsWith('auto:')) {
-    return { chain: activeChainOrThrow(db), strategyKey: 'auto' };
+    return { chain: await activeChainOrThrow(db), strategyKey: 'auto' };
   }
 
   const suffix = lower.slice('auto:'.length).trim();
   if (!suffix) {
-    return { chain: activeChainOrThrow(db), strategyKey: 'auto' };
+    return { chain: await activeChainOrThrow(db), strategyKey: 'auto' };
   }
 
   const globalAxis = GLOBAL_SORT_ALIASES[suffix];
   if (globalAxis) {
-    const chain = getChainByGlobalSort(db, globalAxis);
+    const chain = await getChainByGlobalSort(db, globalAxis);
     if (chain.length === 0) {
       const err = new Error(`No enabled models available for global sort '${suffix}'`) as any;
       err.status = 400;
@@ -1457,7 +1459,7 @@ export function resolveRoutingChain(modelString: string | undefined): ResolvedCh
     return { chain, strategyKey: `auto:${globalAxis}` };
   }
 
-  const chain = getChainByProfileName(db, suffix);
+  const chain = await getChainByProfileName(db, suffix);
   if (!chain) {
     const err = new Error(`Profile '${suffix}' not found. Use 'auto' for the default profile, or call /v1/models for available options.`) as any;
     err.status = 400;
@@ -1488,13 +1490,13 @@ const KEY_SCORE_WEIGHTS = { reliability: 0.75, speed: 0.25 };
  * speed is deterministic. Returns null when NO key has recorded data, telling
  * the caller to keep the legacy round-robin rotation (no signal → no ranking).
  */
-function orderKeysByScore(entry: ChainRow, keys: KeyRow[]): KeyRow[] | null {
+async function orderKeysByScore(entry: ChainRow, keys: KeyRow[]): Promise<KeyRow[] | null> {
   if (keys.length < 2 || !keyStatsCache) return null;
   const prefix = `${modelStatsKey(entry.platform, entry.model_id, entry.endpoint_scope)}:`;
   if (!keys.some(k => keyStatsCache!.has(prefix + k.id))) return null;
 
   // The prior is per-model, not per-key: look it up once outside the loop.
-  const community = activeCommunityPrior(entry.platform, entry.model_id, entry.endpoint_scope);
+  const community = await activeCommunityPrior(entry.platform, entry.model_id, entry.endpoint_scope);
   return keys
     .map(k => {
       const stats = keyStatsCache!.get(prefix + k.id);
@@ -1523,8 +1525,8 @@ const UNKNOWN_QUOTA_HEADROOM = 0.5;
  * reports the same number, and reordering on it would only churn the rotation
  * for nothing (#919).
  */
-function quotaWeightingApplies(entry: ChainRow): boolean {
-  if (getKeySelectionStrategy() !== 'least-remaining') return false;
+async function quotaWeightingApplies(entry: ChainRow): Promise<boolean> {
+  if (await getKeySelectionStrategy() !== 'least-remaining') return false;
   return !inferQuotaPoolKey(entry.platform as Platform, entry.model_id).endsWith('::account');
 }
 
@@ -1540,8 +1542,8 @@ function quotaWeightingApplies(entry: ChainRow): boolean {
  * Every gate, the custom-endpoint filter and the skip tally stay in the one
  * walk that follows.
  */
-function orderKeysByRemainingQuota(entry: ChainRow, ordered: KeyRow[]): KeyRow[] {
-  const headroom = getKeyQuotaHeadroom(entry.platform as Platform);
+async function orderKeysByRemainingQuota(entry: ChainRow, ordered: KeyRow[]): Promise<KeyRow[]> {
+  const headroom = await getKeyQuotaHeadroom(entry.platform as Platform);
   if (headroom.size === 0) return ordered;
   // Hoisted out of the comparator: sort calls it O(n log n) times, and the
   // lookup below must not re-derive anything per comparison.
@@ -1574,7 +1576,7 @@ function cachedDecrypt(keyId: number, ct: string, iv: string, authTag: string): 
   return plain;
 }
 
-function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: Set<string>, diag?: string[]): RouteResult | null {
+async function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: Set<string>, diag?: string[]): Promise<RouteResult | null> {
   const db = getDb();
   const label = `${entry.platform}/${entry.model_id}`;
 
@@ -1584,7 +1586,7 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
   }
   const provider = getProvider(entry.platform as Platform)!;
 
-  const allKeys = db.all("SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [entry.platform]) as KeyRow[];
+  const allKeys = await db.all("SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [entry.platform]) as KeyRow[];
   if (allKeys.length === 0) {
     diag?.push(`${label}: no enabled+healthy key for platform`);
     return null;
@@ -1617,20 +1619,20 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
   // failing key stops soaking up every Nth request. The stats cache is the same
   // 60s-TTL aggregate the model-level bandit uses (refresh is a no-op when
   // fresh, and cheap when not). With no data at all, keep the legacy rotation.
-  refreshStatsCache(db);
+  await refreshStatsCache(db);
   // Scoped so two relays offering the same model id don't share one rotation
   // cursor over the platform's key list (#651).
   const rrKey = modelStatsKey(entry.platform, entry.model_id, entry.endpoint_scope);
   let idx = roundRobinIndex.get(rrKey) ?? 0;
-  let ranked = orderKeysByScore(entry, keys);
+  let ranked = await orderKeysByScore(entry, keys);
 
   // Remaining-quota weighting (#919) layers on top: it re-sorts whatever order
   // we were going to walk anyway — the bandit ranking when there is per-key
   // data, otherwise the round-robin rotation starting at the live cursor — so
   // ties fall back to that order instead of to rowid.
-  if (keys.length > 1 && quotaWeightingApplies(entry)) {
+  if (keys.length > 1 && await quotaWeightingApplies(entry)) {
     const base = ranked ?? Array.from({ length: keys.length }, (_, i) => keys[(idx + i) % keys.length]);
-    ranked = orderKeysByRemainingQuota(entry, base);
+    ranked = await orderKeysByRemainingQuota(entry, base);
   }
 
   // A custom model belongs to exactly one endpoint (#212), but an endpoint can
@@ -1638,7 +1640,7 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
   // rotated like any other platform's keys (#619). Legacy rows (key_id NULL)
   // keep the old any-key match.
   const endpointKeyIds = entry.platform === 'custom' && entry.key_id != null
-    ? customEndpointKeyIds(db, entry.key_id)
+    ? await customEndpointKeyIds(db, entry.key_id)
     : null;
 
   for (let attempt = 0; attempt < keys.length; attempt++) {
@@ -1650,30 +1652,30 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
     const skipId = `${entry.platform}:${entry.model_id}:${key.id}`;
     if (skipKeys?.has(skipId)) { note('already-failed-this-request'); continue; }
 
-    if (isOnCooldown(entry.platform, entry.model_id, key.id)) { note('cooldown'); continue; }
-    if (!canUseProvider(entry.platform, key.id)) { note('provider-daily-cap'); continue; }
+    if (await isOnCooldown(entry.platform, entry.model_id, key.id)) { note('cooldown'); continue; }
+    if (!await canUseProvider(entry.platform, key.id)) { note('provider-daily-cap'); continue; }
     // Account-wide per-minute budget, checked before the per-model gates: a model
     // with a NULL rpm_limit would otherwise sail past them and spend a budget its
     // siblings share.
-    if (!canUseProviderMinute(entry.platform, key.id)) { note('provider-minute-cap'); continue; }
+    if (!await canUseProviderMinute(entry.platform, key.id)) { note('provider-minute-cap'); continue; }
     // Skip a key that already has its allowed requests in the air. Without this,
     // parallel streams all pick the same key and 429 each other on providers that
     // meter concurrency per credential.
     if (!canUseKeyConcurrency(entry.platform, key.id)) { note('key-concurrency'); continue; }
-    if (!canMakeRequest(entry.platform, entry.model_id, key.id, limits)) { note('rpm/rpd-limit'); continue; }
-    if (!canUseTokens(entry.platform, entry.model_id, key.id, estimatedTokens, limits)) { note('tpm/tpd-limit'); continue; }
-    if (!canUseProviderTokens(entry.platform, key.id, entry.model_id, estimatedTokens)) { note('provider-daily-token-cap'); continue; }
+    if (!await canMakeRequest(entry.platform, entry.model_id, key.id, limits)) { note('rpm/rpd-limit'); continue; }
+    if (!await canUseTokens(entry.platform, entry.model_id, key.id, estimatedTokens, limits)) { note('tpm/tpd-limit'); continue; }
+    if (!await canUseProviderTokens(entry.platform, key.id, entry.model_id, estimatedTokens)) { note('provider-daily-token-cap'); continue; }
     // Monthly budget (#1158): a key whose request/token caps are spent for the
     // current UTC month is not a candidate — same skip semantics as the daily
     // gates above. The Retry-After (next-month boundary) surfaces through the
     // fallback exhaustion path rather than blocking here.
-    if (!checkMonthlyBudget(key.id, estimatedTokens).allowed) { note('monthly-budget-cap'); continue; }
+    if (!await (await checkMonthlyBudget(key.id, estimatedTokens)).allowed) { note('monthly-budget-cap'); continue; }
 
     let decryptedKey: string;
     try {
       decryptedKey = cachedDecrypt(key.id, key.encrypted_key, key.iv, key.auth_tag);
     } catch {
-      db.run("UPDATE api_keys SET status = 'error', last_checked_at = datetime('now') WHERE id = ?", [key.id]);
+      await db.run("UPDATE api_keys SET status = 'error', last_checked_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [key.id]);
       note('decrypt-error');
       continue;
     }
@@ -1687,7 +1689,7 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
     // Taken only once the key has cleared every gate and is definitely being
     // returned, so a rejected candidate never consumes concurrency budget.
     const proxyUrl = decryptProxyUrl(key);
-    const budget = reserveMonthlyBudget(key.id, estimatedTokens);
+    const budget = await reserveMonthlyBudget(key.id, estimatedTokens);
     if (!budget.allowed) { note('monthly-budget-cap'); continue; }
     const leaseId = acquireLease(entry.platform, entry.model_id, key.id, estimatedTokens);
     return {
@@ -1732,9 +1734,9 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
  * record the model-level hit when this returns false — i.e. the 429 exhausted the
  * model, not just one of its keys.
  */
-export function hasOtherUsableKey(modelDbId: number, excludingKeyId: number, skipKeys?: Set<string>): boolean {
+export async function hasOtherUsableKey(modelDbId: number, excludingKeyId: number, skipKeys?: Set<string>): Promise<boolean> {
   const db = getDb();
-  const m = db.get(`
+  const m = await db.get(`
     SELECT platform, model_id, rpm_limit, rpd_limit, tpm_limit, tpd_limit, key_id
       FROM models WHERE id = ?
   `, [modelDbId]) as {
@@ -1745,12 +1747,12 @@ export function hasOtherUsableKey(modelDbId: number, excludingKeyId: number, ski
   if (!m) return false;
 
   const limits = { rpm: m.rpm_limit, rpd: m.rpd_limit, tpm: m.tpm_limit, tpd: m.tpd_limit };
-  const keys = db.all("SELECT id, model_scope_json FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [m.platform]) as { id: number; model_scope_json: string | null }[];
+  const keys = await db.all("SELECT id, model_scope_json FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [m.platform]) as { id: number; model_scope_json: string | null }[];
 
   // Keys of the model's own custom endpoint (#212, #619); a key belonging to a
   // DIFFERENT endpoint cannot serve it, so it doesn't count as an alternative.
   const endpointKeyIds = m.platform === 'custom' && m.key_id != null
-    ? customEndpointKeyIds(db, m.key_id)
+    ? await customEndpointKeyIds(db, m.key_id)
     : null;
 
   for (const k of keys) {
@@ -1760,15 +1762,15 @@ export function hasOtherUsableKey(modelDbId: number, excludingKeyId: number, ski
     // it would wrongly suppress the model-level penalty this gate exists for.
     if (!scopeAllows(parseModelScope(k.model_scope_json), m.model_id)) continue;
     if (skipKeys?.has(`${m.platform}:${m.model_id}:${k.id}`)) continue;
-    if (isOnCooldown(m.platform, m.model_id, k.id)) continue;
-    if (!canUseProvider(m.platform, k.id)) continue;
-    if (!canUseProviderMinute(m.platform, k.id)) continue;
-    if (!canMakeRequest(m.platform, m.model_id, k.id, limits)) continue;
+    if (await isOnCooldown(m.platform, m.model_id, k.id)) continue;
+    if (!await canUseProvider(m.platform, k.id)) continue;
+    if (!await canUseProviderMinute(m.platform, k.id)) continue;
+    if (!await canMakeRequest(m.platform, m.model_id, k.id, limits)) continue;
     // A per-minute token spike on the failed key doesn't mean a fresh key lacks
     // headroom; a nominal 1-token probe only rules out a key already at its
     // TPM/TPD ceiling.
-    if (!canUseTokens(m.platform, m.model_id, k.id, 1, limits)) continue;
-    if (!canUseProviderTokens(m.platform, k.id, m.model_id, 1)) continue;
+    if (!await canUseTokens(m.platform, m.model_id, k.id, 1, limits)) continue;
+    if (!await canUseProviderTokens(m.platform, k.id, m.model_id, 1)) continue;
     return true;
   }
   return false;
@@ -1781,9 +1783,9 @@ export function hasOtherUsableKey(modelDbId: number, excludingKeyId: number, ski
  * model from an `exhausted` one (#1100), so the listing cannot claim a model
  * the router would immediately skip.
  */
-export function hasUsableKeyForModel(modelDbId: number): boolean {
+export async function hasUsableKeyForModel(modelDbId: number): Promise<boolean> {
   // Key ids are AUTOINCREMENT and start at 1, so -1 excludes nothing.
-  return hasOtherUsableKey(modelDbId, -1);
+  return await hasOtherUsableKey(modelDbId, -1);
 }
 
 /**
@@ -1794,15 +1796,15 @@ export function hasUsableKeyForModel(modelDbId: number): boolean {
  * model-level bench, which needs the full key set to take a sick model out of
  * rotation, not "who could serve the next request".
  */
-export function routableKeyIdsForModel(modelDbId: number): number[] {
+export async function routableKeyIdsForModel(modelDbId: number): Promise<number[]> {
   const db = getDb();
-  const m = db.get('SELECT platform, model_id, key_id FROM models WHERE id = ?', [modelDbId]) as { platform: string; model_id: string; key_id: number | null } | undefined;
+  const m = await db.get('SELECT platform, model_id, key_id FROM models WHERE id = ?', [modelDbId]) as { platform: string; model_id: string; key_id: number | null } | undefined;
   if (!m) return [];
 
-  const keys = db.all("SELECT id, model_scope_json FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [m.platform]) as { id: number; model_scope_json: string | null }[];
+  const keys = await db.all("SELECT id, model_scope_json FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [m.platform]) as { id: number; model_scope_json: string | null }[];
 
   const endpointKeyIds = m.platform === 'custom' && m.key_id != null
-    ? customEndpointKeyIds(db, m.key_id)
+    ? await customEndpointKeyIds(db, m.key_id)
     : null;
 
   return keys
@@ -1814,8 +1816,8 @@ export function routableKeyIdsForModel(modelDbId: number): number[] {
 /**
  * Fetch a single enabled model's chain row by its db id.
  */
-function getModelChainRow(db: Db, modelDbId: number): ChainRow | undefined {
-  return db.get(`
+async function getModelChainRow(db: Db, modelDbId: number): Promise<ChainRow | undefined> {
+  return await db.get(`
     SELECT m.id as model_db_id, 0 as priority, 1 as enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.size_label, m.monthly_token_budget,
@@ -1850,8 +1852,8 @@ export const CONTEXT_WINDOW_SAFETY_FACTOR = 1.25;
  * comparison /v1/models publishes and the soft-preference fallback tier.
  * The operator's min-context-window floor applies here too: the fallback tier
  * must not reintroduce a model the floor excluded from the main chain. */
-export function fitsContextWindowStrict(contextWindow: number | null | undefined, estimatedTokens: number): boolean {
-  if (!passesContextWindowFloor(contextWindow)) return false;
+export async function fitsContextWindowStrict(contextWindow: number | null | undefined, estimatedTokens: number): Promise<boolean> {
+  if (!await passesContextWindowFloor(contextWindow)) return false;
   return contextWindow == null || estimatedTokens <= contextWindow;
 }
 
@@ -1862,8 +1864,8 @@ export function fitsContextWindowStrict(contextWindow: number | null | undefined
  * the operator's min-context-window floor (lib/min-context-window.ts): a model
  * below the configured preset is excluded from every chain, while an unknown
  * window (null) always passes. */
-export function fitsContextWindow(_platform: string, contextWindow: number | null | undefined, estimatedTokens: number, exactOutputReserve = 0): boolean {
-  if (!passesContextWindowFloor(contextWindow)) return false;
+export async function fitsContextWindow(_platform: string, contextWindow: number | null | undefined, estimatedTokens: number, exactOutputReserve = 0): Promise<boolean> {
+  if (!await passesContextWindowFloor(contextWindow)) return false;
   if (contextWindow == null) return true;
   // Raw advertised comparison first — the margin can only shrink eligibility.
   if (estimatedTokens > contextWindow) return false;
@@ -1880,21 +1882,21 @@ export function fitsContextWindow(_platform: string, contextWindow: number | nul
  * silently collapsed onto whatever else is available. `skipKeys` lets a slot
  * exclude keys it already failed on this request.
  */
-export function routePinnedModel(modelDbId: number, estimatedTokens = 1000, skipKeys?: Set<string>): RouteResult | null {
+export async function routePinnedModel(modelDbId: number, estimatedTokens = 1000, skipKeys?: Set<string>): Promise<RouteResult | null> {
   const db = getDb();
-  const entry = getModelChainRow(db, modelDbId);
+  const entry = await getModelChainRow(db, modelDbId);
   if (!entry) return null;
   // Strict comparison only (#956 review): a pinned slot has no substitute, so
   // refusing on a margin violation would drop the slot outright where the
   // pre-margin behavior was one dispatch attempt (a mid-chain context_too_large
   // 400 is classified and retried downstream). Nothing is multiplied here —
   // estimatedTokens already carries the exact capped output reserve (#470).
-  if (!rowFitsRequestSize(entry, estimatedTokens)) return null;
-  return selectKeyForModel(entry, estimatedTokens, skipKeys);
+  if (!await rowFitsRequestSize(entry, estimatedTokens)) return null;
+  return await selectKeyForModel(entry, estimatedTokens, skipKeys);
 }
 
-function rowFitsRequestSize(entry: ChainRow, estimatedTokens: number): boolean {
-  if (!fitsContextWindowStrict(entry.context_window, estimatedTokens)) return false;
+async function rowFitsRequestSize(entry: ChainRow, estimatedTokens: number): Promise<boolean> {
+  if (!await fitsContextWindowStrict(entry.context_window, estimatedTokens)) return false;
   return entry.tpm_limit == null || estimatedTokens <= entry.tpm_limit;
 }
 
@@ -1904,9 +1906,9 @@ function rowFitsRequestSize(entry: ChainRow, estimatedTokens: number): boolean {
  * the request is too big" (permanent for this request) from "no key is free
  * right now" (transient). An unknown model is not a size problem.
  */
-export function pinnedModelFitsRequestSize(modelDbId: number, estimatedTokens: number): boolean {
-  const entry = getModelChainRow(getDb(), modelDbId);
-  return !entry || rowFitsRequestSize(entry, estimatedTokens);
+export async function pinnedModelFitsRequestSize(modelDbId: number, estimatedTokens: number): Promise<boolean> {
+  const entry = await getModelChainRow(getDb(), modelDbId);
+  return !entry || await rowFitsRequestSize(entry, estimatedTokens);
 }
 
 /**
@@ -1922,7 +1924,7 @@ export function pinnedModelFitsRequestSize(modelDbId: number, estimatedTokens: n
  * preferred-model injection in routeRequest would unshift an off-group model and
  * the pin would no longer be strict (it could answer with a different model).
  */
-export function resolveModelGroupCandidates(
+export async function resolveModelGroupCandidates(
   memberDbIds: number[],
   /**
    * Members that were reached only through a group's auto-derived slug, not the
@@ -1932,14 +1934,14 @@ export function resolveModelGroupCandidates(
    * which is what every other caller wants.
    */
   demotedDbIds?: ReadonlySet<number>,
-): ChainRow[] {
+): Promise<ChainRow[]> {
   const db = getDb();
-  const strategy = effectiveRoutingStrategy();
-  if (strategy !== 'priority') refreshStatsCache(db);
+  const strategy = await effectiveRoutingStrategy();
+  if (strategy !== 'priority') await refreshStatsCache(db);
 
-  const activeProfileId = getActiveProfileId(db);
-  const selectMember = activeProfileId == null
-    ? db.prepare(`
+  const activeProfileId = await getActiveProfileId(db);
+  const selectMemberSql = activeProfileId == null
+    ? `
       SELECT m.id as model_db_id, COALESCE(fc.priority, 0) as priority,
              1 as enabled,
              m.platform, m.model_id, m.display_name, m.intelligence_rank,
@@ -1949,8 +1951,8 @@ export function resolveModelGroupCandidates(
       FROM models m
       LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
       WHERE m.id = ? AND m.enabled = 1
-    `)
-    : db.prepare(`
+    `
+    : `
       SELECT m.id as model_db_id, COALESCE(pm.priority, fc.priority, 0) as priority,
              1 as enabled,
              m.platform, m.model_id, m.display_name, m.intelligence_rank,
@@ -1961,16 +1963,18 @@ export function resolveModelGroupCandidates(
       LEFT JOIN profile_models pm ON pm.profile_id = ? AND pm.model_db_id = m.id
       LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
       WHERE m.id = ? AND m.enabled = 1
-    `);
+    `;
 
   const rows: ChainRow[] = [];
   for (const id of memberDbIds) {
-    const row = (activeProfileId == null ? selectMember.get(id) : selectMember.get(activeProfileId, id)) as ChainRow | undefined;
+    const row = (activeProfileId == null
+      ? await db.get(selectMemberSql, [id])
+      : await db.get(selectMemberSql, [activeProfileId, id])) as ChainRow | undefined;
     if (!row) continue;
     row.match_tier = demotedDbIds?.has(id) ? 1 : 0;
     rows.push(row);
   }
-  return orderChain(rows, strategy);
+  return await orderChain(rows, strategy);
 }
 
 // A panel candidate surfaced to the fusion layer: enough to pick a diverse set
@@ -1991,7 +1995,7 @@ export interface FusionCandidate {
  * so the panel's auto-pick draws from the highest-scored models first and the
  * fusion layer just needs to apply provider-diversity on top.
  */
-export function getOrderedFusionChain(estimatedTokens: number, exactOutputReserve = 0): FusionCandidate[] {
+export async function getOrderedFusionChain(estimatedTokens: number, exactOutputReserve = 0): Promise<FusionCandidate[]> {
   const db = getDb();
   // effectiveRoutingStrategy, not getRoutingStrategy (#1354): under the
   // 'decision' strategy the fusion panel must draw from the same per-request
@@ -1999,9 +2003,9 @@ export function getOrderedFusionChain(estimatedTokens: number, exactOutputReserv
   // raw setting value scores every decision-strategy request as plain Balanced,
   // so a request the decision model routed 'smartest' got its chat answer from
   // the big model and its panel slots auto-picked from the Balanced order.
-  const strategy = effectiveRoutingStrategy();
-  if (strategy !== 'priority') refreshStatsCache(db);
-  const chain = getActiveChain(db).filter(e => e.enabled);
+  const strategy = await effectiveRoutingStrategy();
+  if (strategy !== 'priority') await refreshStatsCache(db);
+  const chain = await (await getActiveChain(db)).filter(e => e.enabled);
 
   // Only consider models that can ACTUALLY be served RIGHT NOW — applying the
   // same gate selectKeyForModel uses when the router walks the chain: the model
@@ -2019,7 +2023,7 @@ export function getOrderedFusionChain(estimatedTokens: number, exactOutputReserv
   // That leaves one panel slot dead on arrival and reports the failure as the
   // misleading "no available key for model". Passing a placeholder token count
   // here made both size gates no-ops.
-  const usableKeys = db.all("SELECT id, platform, model_scope_json FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown')") as { id: number; platform: string; model_scope_json: string | null }[];
+  const usableKeys = await db.all("SELECT id, platform, model_scope_json FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown')") as { id: number; platform: string; model_scope_json: string | null }[];
   // Scope parsed once per key row (#657); the servable filter below re-checks
   // membership per model.
   const keysByPlatform = new Map<string, { id: number; scope: Set<string> | null }[]>();
@@ -2034,29 +2038,29 @@ export function getOrderedFusionChain(estimatedTokens: number, exactOutputReserv
   // rather than handing back an empty chain — a request packed to the
   // advertised window keeps its one attempt (the mid-chain context_too_large
   // 400 is classified and retried downstream).
-  const passesContextGate = (e: ChainRow, allowMarginViolators: boolean) => {
+  const passesContextGate = async (e: ChainRow, allowMarginViolators: boolean) => {
     // A null context_window means "unknown", not "zero": same convention the
     // auto-router uses, so an unspecified window is never itself a reason to skip.
-    if (fitsContextWindow(e.platform, e.context_window, estimatedTokens, exactOutputReserve)) return true;
-    return allowMarginViolators && fitsContextWindowStrict(e.context_window, estimatedTokens);
+    if (await fitsContextWindow(e.platform, e.context_window, estimatedTokens, exactOutputReserve)) return true;
+    return allowMarginViolators && await fitsContextWindowStrict(e.context_window, estimatedTokens);
   };
-  const servableFilter = (allowMarginViolators: boolean) => chain.filter(e => {
-    if (!passesContextGate(e, allowMarginViolators)) return false;
+  const servableFilter = (allowMarginViolators: boolean) => chain.filter(async e => {
+    if (!await passesContextGate(e, allowMarginViolators)) return false;
     const keyIds = keysByPlatform.get(e.platform);
     if (!keyIds) return false;
     // Same endpoint-pool rule the router applies (#619).
     const endpointKeyIds = e.platform === 'custom' && e.key_id != null
-      ? customEndpointKeyIds(db, e.key_id)
+      ? await customEndpointKeyIds(db, e.key_id)
       : null;
     const limits = { rpm: e.rpm_limit, rpd: e.rpd_limit, tpm: e.tpm_limit, tpd: e.tpd_limit };
-    return keyIds.some(({ id: kid, scope }) =>
+    return keyIds.some(async ({ id: kid, scope }) =>
       scopeAllows(scope, e.model_id) &&
       (endpointKeyIds == null || endpointKeyIds.has(kid)) &&
-      !isOnCooldown(e.platform, e.model_id, kid) &&
-      canUseProvider(e.platform, kid) &&
-      canUseProviderMinute(e.platform, kid) &&
-      canMakeRequest(e.platform, e.model_id, kid, limits) &&
-      canUseProviderTokens(e.platform, kid, e.model_id, estimatedTokens),
+      !await isOnCooldown(e.platform, e.model_id, kid) &&
+      await canUseProvider(e.platform, kid) &&
+      await canUseProviderMinute(e.platform, kid) &&
+      await canMakeRequest(e.platform, e.model_id, kid, limits) &&
+      await canUseProviderTokens(e.platform, kid, e.model_id, estimatedTokens),
     );
   });
   let servable = servableFilter(false);
@@ -2064,7 +2068,7 @@ export function getOrderedFusionChain(estimatedTokens: number, exactOutputReserv
 
   // Deterministic (expected-score) ordering so the panel faithfully follows the
   // user's picked routing strategy instead of re-sampling a fresh draw each call.
-  const ordered = orderChain(servable, strategy, false);
+  const ordered = await orderChain(servable, strategy, false);
   return ordered.map(e => ({
     modelDbId: e.model_db_id,
     platform: e.platform,
@@ -2082,9 +2086,9 @@ export function getOrderedFusionChain(estimatedTokens: number, exactOutputReserv
  * row; dedupes a model id that exists on multiple platforms by intelligence
  * rank, matching how /v1/models picks a representative row.
  */
-export function resolveFusionCandidate(modelId: string): FusionCandidate | null {
+export async function resolveFusionCandidate(modelId: string): Promise<FusionCandidate | null> {
   const db = getDb();
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name,
            m.size_label, m.supports_vision, m.supports_tools
     FROM models m
@@ -2100,7 +2104,7 @@ export function resolveFusionCandidate(modelId: string): FusionCandidate | null 
     // ranking. Without this check a duplicate alias can pin fusion to a
     // keyless provider (for example a free relay) while a configured provider
     // for the same model is available.
-    const row = rows.find(candidate => routableKeyIdsForModel(candidate.model_db_id).length > 0) ?? rows[0];
+    const row = rows.find(async candidate => await (await routableKeyIdsForModel(candidate.model_db_id)).length > 0) ?? rows[0];
     return {
       modelDbId: row.model_db_id,
       platform: row.platform,
@@ -2117,13 +2121,13 @@ export function resolveFusionCandidate(modelId: string): FusionCandidate | null 
   // saved fusion configs that use canonical ids keep working. Exact model_id
   // match above always wins first, so OFF mode and legacy configs are untouched.
   if (isUnifyEnabled()) {
-    const resolved = resolveRequestedIdForDispatch(modelId, getModelGroups());
+    const resolved = resolveRequestedIdForDispatch(modelId, await getModelGroups());
     if (resolved && resolved.memberDbIds.length > 0) {
-      const candidates = resolveModelGroupCandidates(resolved.memberDbIds, resolved.demotedDbIds);
+      const candidates = await resolveModelGroupCandidates(resolved.memberDbIds, resolved.demotedDbIds);
       // Bare unified aliases may resolve to a provider row that is enabled in
       // the catalog but has no usable key. Select the first routable member so
       // an explicit fusion panel does not waste a slot on that dead end.
-      const top = candidates.find(candidate => routableKeyIdsForModel(candidate.model_db_id).length > 0) ?? candidates[0];
+      const top = candidates.find(async candidate => await (await routableKeyIdsForModel(candidate.model_db_id)).length > 0) ?? candidates[0];
       if (top) {
         return {
           modelDbId: top.model_db_id,
@@ -2140,15 +2144,15 @@ export function resolveFusionCandidate(modelId: string): FusionCandidate | null 
   return null;
 }
 
-export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requireVision = false, requireTools = false, skipModels?: Set<number>, prefetchedChain?: ChainRow[], requireStructured = false, skipPlatforms?: Set<string>, exactOutputReserve = 0, task?: 'code' | 'chat'): RouteResult {
+export async function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requireVision = false, requireTools = false, skipModels?: Set<number>, prefetchedChain?: ChainRow[], requireStructured = false, skipPlatforms?: Set<string>, exactOutputReserve = 0, task?: 'code' | 'chat'): Promise<RouteResult> {
   const db = getDb();
 
-  const strategy = effectiveRoutingStrategy();
-  if (strategy !== 'priority') refreshStatsCache(db);
+  const strategy = await effectiveRoutingStrategy();
+  if (strategy !== 'priority') await refreshStatsCache(db);
 
-  const chain = (prefetchedChain ?? getActiveChain(db)).filter(e => e.enabled);
+  const chain = (prefetchedChain ?? await getActiveChain(db)).filter(e => e.enabled);
 
-  const sortedChain = orderChain(chain, strategy, true, task);
+  const sortedChain = await orderChain(chain, strategy, true, task);
 
   // Exploration toggle (#685/#707 follow-up): when enabled, give a model with
   // no reliability/speed samples a guaranteed chance to be tried, so it stops
@@ -2166,12 +2170,12 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
   // entirely: probing unmeasured models during a fleet-wide outage just burns
   // retry budget on the same dead providers, and the scored order of known
   // survivors is the only thing worth trying.
-  if (strategy !== 'priority' && getExploreEnabled() && !isDegraded() && Math.random() < EXPLORE_CHANCE) {
+  if (strategy !== 'priority' && await getExploreEnabled() && !isDegraded() && Math.random() < EXPLORE_CHANCE) {
     // A model the operator zeroed out via MODEL_ROUTING_OVERRIDES never wins a
     // bandit draw, so it would stay under EXPLORE_MIN_SAMPLES forever and become
     // a perpetual probe target — the explicit ban outranks exploration.
     const overrides = getModelWeightOverrides();
-    const unmeasured = sortedChain.filter(e => {
+    const unmeasured = sortedChain.filter(async e => {
       if (overrides.get(e.model_id) === 0) return false;
       const stats = statsCache?.get(modelStatsKey(e.platform, e.model_id, e.endpoint_scope));
       if ((stats?.successes ?? 0) + (stats?.failures ?? 0) >= EXPLORE_MIN_SAMPLES) return false;
@@ -2185,7 +2189,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // requests (#1230); it stays reachable at the back of the main walk.
       if (requireTools && isToolBenched(e.platform, e.model_id, e.endpoint_scope)) return false;
       if (requireStructured && platformDropsResponseFormat(e.platform)) return false;
-      if (!fitsContextWindow(e.platform, e.context_window, estimatedTokens, exactOutputReserve)) return false;
+      if (!await fitsContextWindow(e.platform, e.context_window, estimatedTokens, exactOutputReserve)) return false;
       if (e.tpm_limit != null && estimatedTokens > e.tpm_limit) return false;
       return true;
     });
@@ -2211,7 +2215,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // The requested model is not in the current routing chain (e.g. it's a
       // custom model or not added to the active profile). We must fulfill the
       // explicit request by injecting it at the front.
-      const pinnedRow = db.get(`
+      const pinnedRow = await db.get(`
         SELECT m.id as model_db_id, 0 as priority, 1 as enabled,
                m.platform, m.model_id, m.display_name, m.intelligence_rank,
                m.size_label, m.monthly_token_budget,
@@ -2230,7 +2234,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // that deletion is dashboard-managed, and the user asking by name is
       // newer intent than their own earlier delete.
       const retiredUpstream = pinnedRow
-        && getCatalogModelTombstone(db, 'chat', pinnedRow.platform, pinnedRow.model_id)?.source === 'upstream_eol';
+        && await (await getCatalogModelTombstone(db, 'chat', pinnedRow.platform, pinnedRow.model_id))?.source === 'upstream_eol';
 
       if (pinnedRow && !retiredUpstream) {
         sortedChain.unshift(pinnedRow);
@@ -2248,7 +2252,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
   // An explicit pin is exempt: the client named that model, so it still gets
   // walked and still reports "no enabled+healthy key for platform" against its
   // own label rather than vanishing into an aggregate.
-  const keyCounts = usableKeyCountsByPlatform(db);
+  const keyCounts = await usableKeyCountsByPlatform(db);
   const isRoutable = (e: ChainRow) =>
     e.model_db_id === preferredModelDbId || (keyCounts.get(e.platform) ?? 0) > 0;
   const routableChain = sortedChain.filter(isRoutable);
@@ -2288,7 +2292,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       toolDeferred.push(e);
       continue;
     }
-    (fitsContextWindow(e.platform, e.context_window, estimatedTokens, exactOutputReserve) ? servingChain : marginDeferred).push(e);
+    (await fitsContextWindow(e.platform, e.context_window, estimatedTokens, exactOutputReserve) ? servingChain : marginDeferred).push(e);
   }
   servingChain.push(...marginDeferred, ...toolDeferred);
 
@@ -2337,7 +2341,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // put on cooldown — so this is a fast-path, not the only guard. If every
     // model is too small, the loop falls through and the caller gets the normal
     // "all models exhausted" error rather than a wasted sweep.
-    if (!fitsContextWindowStrict(entry.context_window, estimatedTokens)) {
+    if (!await fitsContextWindowStrict(entry.context_window, estimatedTokens)) {
       // Keep the `< estimated` substring — summarizeExhaustion buckets prompt
       // overflow off it. Emit the EFFECTIVE number so the line doesn't read as
       // false (#956 review): e.g. `context 131072 < estimated 106000 x1.25 = 132500`.
@@ -2358,14 +2362,14 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // first usable key's RouteResult, or null when the model has no key that
     // can serve right now — in which case we fall through to the next model in
     // the sorted chain for THIS request (no explicit penalty needed).
-    const route = selectKeyForModel(entry, estimatedTokens, skipKeys, diag);
+    const route = await selectKeyForModel(entry, estimatedTokens, skipKeys, diag);
     if (route) return route;
   }
 
   // The aggregate keyless line rides in diagnostics but NOT in the summary's
   // route count: those models were never candidates for this request.
   throw new RouteError(
-    summarizeExhaustion(diag, getSoonestCooldownExpiry(), Date.now(), keylessSkipped),
+    summarizeExhaustion(diag, await getSoonestCooldownExpiry(), Date.now(), keylessSkipped),
     429,
     keylessLine ? [...diag, keylessLine] : diag,
   );
@@ -2391,10 +2395,10 @@ export interface RoutingScore {
   totalRequests: number; // decay-weighted observations
 }
 
-export function getRoutingScores(): { strategy: RoutingStrategy; keySelectionStrategy: KeySelectionStrategy; weights: RoutingWeights | null; customWeights: RoutingWeights; exploreEnabled: boolean; peakAdjusted: boolean; peakHours: PeakHoursConfig; scores: RoutingScore[] } {
+export async function getRoutingScores(): Promise<{ strategy: RoutingStrategy; keySelectionStrategy: KeySelectionStrategy; weights: RoutingWeights | null; customWeights: RoutingWeights; exploreEnabled: boolean; peakAdjusted: boolean; peakHours: PeakHoursConfig; scores: RoutingScore[] }> {
   const db = getDb();
-  const strategy = getRoutingStrategy();
-  refreshStatsCache(db);
+  const strategy = await getRoutingStrategy();
+  await refreshStatsCache(db);
 
   // Score the whole enabled catalog, not just the active chain (#1047). Since
   // #1023 the dashboard table lists every catalog row through the chain, and
@@ -2403,8 +2407,8 @@ export function getRoutingScores(): { strategy: RoutingStrategy; keySelectionStr
   // scratch" even though the underlying per-model stats are global. Rows the
   // chain names keep its enabled flag; the rest score as disabled. Display
   // only: routeRequest still walks getActiveChain.
-  const profileId = getActiveProfileId(db);
-  const chain = db.all( `
+  const profileId = await getActiveProfileId(db);
+  const chain = await db.all( `
     SELECT m.id AS model_db_id, COALESCE(c.priority, 0) AS priority, COALESCE(c.enabled, 0) AS enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.size_label, m.monthly_token_budget,
@@ -2421,15 +2425,15 @@ export function getRoutingScores(): { strategy: RoutingStrategy; keySelectionStr
 
   // For display we score under 'balanced' weights when in priority mode, so the
   // table still shows a meaningful ranking even with the bandit turned off.
-  const weights = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
+  const weights = await weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
   const composites = chain.map(e => intelligenceComposite(e.size_label, e.intelligence_rank));
   const intelMin = composites.length ? Math.min(...composites) : 0;
   const intelMax = composites.length ? Math.max(...composites) : 0;
-  const keyCounts = usableKeyCountsByPlatform(db);
-  const headroomCfg = getHeadroomThresholds();
+  const keyCounts = await usableKeyCountsByPlatform(db);
+  const headroomCfg = await getHeadroomThresholds();
 
-  const scores: RoutingScore[] = chain.map(entry => {
-    const scored = scoreChainEntry(entry, weights, intelMin, intelMax, false, keyCounts, headroomCfg);
+  const scoredEntries = await Promise.all(chain.map(async entry => {
+    const scored = await scoreChainEntry(entry, weights, intelMin, intelMax, false, keyCounts, headroomCfg);
     const stats = statsCache?.get(modelStatsKey(entry.platform, entry.model_id, entry.endpoint_scope));
     return {
       modelDbId: entry.model_db_id,
@@ -2445,7 +2449,8 @@ export function getRoutingScores(): { strategy: RoutingStrategy; keySelectionStr
       score: scored.score,
       totalRequests: Math.round((stats?.successes ?? 0) + (stats?.failures ?? 0)),
     };
-  }).sort((a, b) => b.score - a.score);
+  }));
+  const scores: RoutingScore[] = scoredEntries.sort((a, b) => b.score - a.score);
 
   // customWeights is always present (the saved vector, or the balanced default)
   // so the dashboard's custom-weight sliders can render even before the user
@@ -2458,15 +2463,15 @@ export function getRoutingScores(): { strategy: RoutingStrategy; keySelectionStr
   // peakAdjusted tells the dashboard whether the weight summary it is about to
   // render is the raw preset or a peak-hours variant of it (#760) — without it
   // the numbers would change under the operator with nothing to explain why.
-  const active = weightsWithPeak(strategy);
+  const active = await weightsWithPeak(strategy);
   return {
     strategy,
-    keySelectionStrategy: getKeySelectionStrategy(),
+    keySelectionStrategy: await getKeySelectionStrategy(),
     weights: active.weights,
-    customWeights: getCustomWeights(),
-    exploreEnabled: getExploreEnabled(),
+    customWeights: await getCustomWeights(),
+    exploreEnabled: await getExploreEnabled(),
     peakAdjusted: active.adjusted,
-    peakHours: getPeakHoursConfig(),
+    peakHours: await getPeakHoursConfig(),
     scores,
   };
 }
@@ -2484,9 +2489,9 @@ export function getRoutingScores(): { strategy: RoutingStrategy; keySelectionStr
  * Pass the same chain the request will route over (the prefetched auto chain);
  * omit it to check the active chain, which is what routeRequest would use.
  */
-export function resolveStickyPreference(stickyModelDbId: number | undefined, chain?: ChainRow[]): number | undefined {
+export async function resolveStickyPreference(stickyModelDbId: number | undefined, chain?: ChainRow[]): Promise<number | undefined> {
   if (stickyModelDbId == null) return undefined;
-  const rows = chain ?? getActiveChain(getDb());
+  const rows = chain ?? await getActiveChain(getDb());
   return rows.some(entry => entry.model_db_id === stickyModelDbId && entry.enabled)
     ? stickyModelDbId
     : undefined;
@@ -2495,15 +2500,15 @@ export function resolveStickyPreference(stickyModelDbId: number | undefined, cha
 // Whether at least one vision-capable model is enabled in the fallback chain.
 // Used to give image requests a clear "enable a vision model" error instead of
 // the generic exhaustion message when none is configured (#118, #125).
-export function hasEnabledVisionModel(): boolean {
+export async function hasEnabledVisionModel(): Promise<boolean> {
   const db = getDb();
-  return getActiveChain(db).some(entry => entry.enabled === 1 && entry.supports_vision === 1);
+  return await (await getActiveChain(db)).some(entry => entry.enabled === 1 && entry.supports_vision === 1);
 }
 
 // Whether at least one tool-capable model is enabled in the fallback chain.
 // Same role as hasEnabledVisionModel: a clear up-front error for tool-bearing
 // requests beats routing them to a model that mangles the tool call.
-export function hasEnabledToolsModel(): boolean {
+export async function hasEnabledToolsModel(): Promise<boolean> {
   const db = getDb();
-  return getActiveChain(db).some(entry => entry.enabled === 1 && entry.supports_tools === 1);
+  return await (await getActiveChain(db)).some(entry => entry.enabled === 1 && entry.supports_tools === 1);
 }

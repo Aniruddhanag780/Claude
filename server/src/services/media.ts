@@ -207,16 +207,16 @@ function throwIfClientGone(signal?: AbortSignal): void {
   if (signal?.aborted) throw new MediaError('client closed the request', 499);
 }
 
-export function listMediaModels(modality: MediaModality): MediaModelRow[] {
-  return getDb().all('SELECT * FROM media_models WHERE modality = ? AND enabled = 1 ORDER BY priority, id', [modality]) as MediaModelRow[];
+export async function listMediaModels(modality: MediaModality): Promise<MediaModelRow[]> {
+  return await getDb().all('SELECT * FROM media_models WHERE modality = ? AND enabled = 1 ORDER BY priority, id', [modality]) as MediaModelRow[];
 }
 
 /** All media models (every media modality, including disabled) for the
  *  dashboard. Search engines and decision models share the table (modality
  *  'search' / 'decision') but have their own pages and APIs, so they are left
  *  out here. */
-export function listAllMediaModels(): MediaModelRow[] {
-  return getDb().all("SELECT * FROM media_models WHERE modality NOT IN ('search', 'decision') ORDER BY modality, priority, id") as MediaModelRow[];
+export async function listAllMediaModels(): Promise<MediaModelRow[]> {
+  return await getDb().all("SELECT * FROM media_models WHERE modality NOT IN ('search', 'decision') ORDER BY modality, priority, id") as MediaModelRow[];
 }
 
 interface ProviderCredential {
@@ -582,7 +582,7 @@ async function callVideoProvider(
       };
     }
     case 'huggingface':
-      return callHuggingFaceVideo(row, key, p, clientSignal);
+      return await callHuggingFaceVideo(row, key, p, clientSignal);
     default:
       throw new MediaError(`no video adapter for platform '${row.platform}'`, 500);
   }
@@ -794,8 +794,8 @@ async function callSpeechProvider(
 /** Map the request's `model` to a candidate chain within one modality:
  *  'auto'/empty → every enabled provider for the modality (failover order),
  *  a provider model id → just that row. */
-function resolveMediaChain(model: string | undefined, modality: MediaModality): MediaModelRow[] {
-  const rows = listMediaModels(modality);
+async function resolveMediaChain(model: string | undefined, modality: MediaModality): Promise<MediaModelRow[]> {
+  const rows = await listMediaModels(modality);
   if (rows.length === 0) {
     throw new MediaError(`No enabled ${modality} providers configured.`, 503);
   }
@@ -807,10 +807,10 @@ function resolveMediaChain(model: string | undefined, modality: MediaModality): 
   return matches;
 }
 
-function logMedia(row: Pick<MediaModelRow, 'platform' | 'model_id' | 'modality'>, keyId: number | null, status: 'success' | 'error', latencyMs: number, error: string | null): void {
+async function logMedia(row: Pick<MediaModelRow, 'platform' | 'model_id' | 'modality'>, keyId: number | null, status: 'success' | 'error', latencyMs: number, error: string | null): Promise<void> {
   try {
     const client = getClientContext();
-    getDb().run(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
+    await getDb().run(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
                 VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)`, [row.platform, row.model_id, keyId, status, latencyMs, error, row.modality, client.ip, client.userAgent, client.agent]);
   } catch (e) {
     console.error('Failed to log media request:', e);
@@ -841,14 +841,14 @@ function chainError(modality: MediaModality, lastError: MediaError | null, hints
 
 /** Generate image(s), failing over across providers serving the modality. */
 export async function runImageGeneration(model: string | undefined, params: ImageParams): Promise<ImageResult> {
-  const chain = resolveMediaChain(model, 'image');
+  const chain = await resolveMediaChain(model, 'image');
   let lastError: MediaError | null = null;
   // Only a chain rate limited end to end earns a Retry-After (the soonest).
   const hints = new RetryHintTracker();
   for (const row of chain) {
     const { credential, budgetBlocked } = KEYLESS_CAPABLE.has(row.platform)
       ? { credential: { id: null, key: null, baseUrl: null, release: () => {} }, budgetBlocked: false }
-      : reserveProviderCredential(row, 0);
+      : await reserveProviderCredential(row, 0);
     if (!credential) {
       if (budgetBlocked) {
         lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');
@@ -862,11 +862,11 @@ export async function runImageGeneration(model: string | undefined, params: Imag
       if (!images.length || images.every(i => !i.b64_json && !i.url)) {
         throw new MediaError('upstream returned no image', 502);
       }
-      logMedia(row, credential.id, 'success', Date.now() - started, null);
+      await logMedia(row, credential.id, 'success', Date.now() - started, null);
       return { platform: row.platform, modelId: row.model_id, images };
     } catch (err: any) {
       const e = err instanceof MediaError ? err : new MediaError(String(err?.message ?? err), 502);
-      logMedia(row, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
+      await logMedia(row, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
       lastError = e;
       hints.record(e.status, e.retryAfterMs);
     } finally {
@@ -884,14 +884,14 @@ export async function runVideoGeneration(
   params: VideoParams,
   clientSignal?: AbortSignal,
 ): Promise<VideoResult> {
-  const chain = resolveMediaChain(model, 'video');
+  const chain = await resolveMediaChain(model, 'video');
   let lastError: MediaError | null = null;
   // Only a chain rate limited end to end earns a Retry-After (the soonest).
   const hints = new RetryHintTracker();
   for (const row of chain) {
     throwIfClientGone(clientSignal);
-    const { credential, budgetBlocked } = reserveProviderCredential(row, 0,
-      keyId => isOnCooldown(row.platform, row.model_id, keyId));
+    const { credential, budgetBlocked } = await reserveProviderCredential(row, 0,
+      async keyId => await isOnCooldown(row.platform, row.model_id, keyId));
     if (!credential) {
       if (budgetBlocked) {
         lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');
@@ -903,11 +903,11 @@ export async function runVideoGeneration(
     try {
       const out = await callVideoProvider(row, credential, params, clientSignal);
       if (!out.video.length) throw new MediaError('upstream returned no video', 502);
-      logMedia(row, credential.id, 'success', Date.now() - started, null);
+      await logMedia(row, credential.id, 'success', Date.now() - started, null);
       return { platform: row.platform, modelId: row.model_id, ...out };
     } catch (err: any) {
       const e = err instanceof MediaError ? err : new MediaError(String(err?.message ?? err), 502);
-      logMedia(row, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
+      await logMedia(row, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
       if (e.status === 429 && credential.id != null) setCooldown(row.platform, row.model_id, credential.id);
       lastError = e;
       hints.record(e.status, e.retryAfterMs);
@@ -1020,8 +1020,8 @@ export interface TranscriptionResult {
   vtt?: string;
 }
 
-function resolveTranscriptionChain(model: string | undefined, responseFormat: string): SttCandidate[] {
-  let chain = listMediaModels('transcription').map(toSttCandidate);
+async function resolveTranscriptionChain(model: string | undefined, responseFormat: string): Promise<SttCandidate[]> {
+  let chain = await (await listMediaModels('transcription')).map(toSttCandidate);
   if (chain.length === 0) {
     // Never-synced install (or the catalog retired every STT model): the
     // registry only ever arrives via catalog-sync, so tell the caller to wait
@@ -1173,7 +1173,7 @@ async function callTranscriptionProvider(
  *  (platform, model, key) triple through the standard cooldown machinery so a
  *  rate-limited key is skipped on subsequent requests, exactly like chat. */
 export async function runTranscription(model: string | undefined, p: TranscriptionParams): Promise<TranscriptionResult> {
-  const chain = resolveTranscriptionChain(model, p.responseFormat);
+  const chain = await resolveTranscriptionChain(model, p.responseFormat);
   const usable = chain.filter(m => p.file.length <= m.maxBytes);
   if (usable.length === 0) {
     const maxMb = Math.max(...chain.map(m => m.maxBytes)) / (1024 * 1024);
@@ -1183,8 +1183,8 @@ export async function runTranscription(model: string | undefined, p: Transcripti
   // Only a chain rate limited end to end earns a Retry-After (the soonest).
   const hints = new RetryHintTracker();
   for (const m of usable) {
-    const { credential, budgetBlocked } = reserveProviderCredential({ platform: m.platform, key_id: m.keyId }, 0,
-      keyId => isOnCooldown(m.platform, m.modelId, keyId));
+    const { credential, budgetBlocked } = await reserveProviderCredential({ platform: m.platform, key_id: m.keyId }, 0,
+      async keyId => await isOnCooldown(m.platform, m.modelId, keyId));
     if (!credential) {
       if (budgetBlocked) {
         lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');
@@ -1199,11 +1199,11 @@ export async function runTranscription(model: string | undefined, p: Transcripti
       if (p.responseFormat === 'vtt' && !out.vtt) {
         throw new MediaError('upstream returned no vtt subtitles', 502);
       }
-      logMedia(logRow, credential.id, 'success', Date.now() - started, null);
+      await logMedia(logRow, credential.id, 'success', Date.now() - started, null);
       return { platform: m.platform, modelId: m.modelId, ...out };
     } catch (err: any) {
       const e = err instanceof MediaError ? err : new MediaError(String(err?.message ?? err), 502);
-      logMedia(logRow, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
+      await logMedia(logRow, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
       if (e.status === 429 && credential.id != null) {
         setCooldown(m.platform, m.modelId, credential.id);
       }
@@ -1218,14 +1218,14 @@ export async function runTranscription(model: string | undefined, p: Transcripti
 
 /** Synthesize speech, failing over across providers serving the modality. */
 export async function runSpeech(model: string | undefined, params: SpeechParams): Promise<SpeechResult> {
-  const chain = resolveMediaChain(model, 'audio');
+  const chain = await resolveMediaChain(model, 'audio');
   let lastError: MediaError | null = null;
   // Only a chain rate limited end to end earns a Retry-After (the soonest).
   const hints = new RetryHintTracker();
   for (const row of chain) {
     const { credential, budgetBlocked } = KEYLESS_CAPABLE.has(row.platform)
       ? { credential: { id: null, key: null, baseUrl: null, release: () => {} }, budgetBlocked: false }
-      : reserveProviderCredential(row, 0);
+      : await reserveProviderCredential(row, 0);
     if (!credential) {
       if (budgetBlocked) {
         lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');
@@ -1237,11 +1237,11 @@ export async function runSpeech(model: string | undefined, params: SpeechParams)
     try {
       const out = await callSpeechProvider(row, credential, params);
       if (!out.audio.length) throw new MediaError('upstream returned no audio', 502);
-      logMedia(row, credential.id, 'success', Date.now() - started, null);
+      await logMedia(row, credential.id, 'success', Date.now() - started, null);
       return { platform: row.platform, modelId: row.model_id, audio: out.audio, contentType: out.contentType };
     } catch (err: any) {
       const e = err instanceof MediaError ? err : new MediaError(String(err?.message ?? err), 502);
-      logMedia(row, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
+      await logMedia(row, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
       lastError = e;
       hints.record(e.status, e.retryAfterMs);
     } finally {

@@ -44,7 +44,7 @@ function sendError(res: Response, status: number, message: string, code = 'INVAL
   });
 }
 
-function authenticate(req: Request, res: Response): boolean {
+async function authenticate(req: Request, res: Response): Promise<boolean> {
   const queryKey = typeof req.query.key === 'string' ? req.query.key.trim() : '';
   if (queryKey) {
     // Query credentials are a Gemini compatibility escape hatch and are
@@ -53,7 +53,7 @@ function authenticate(req: Request, res: Response): boolean {
     console.warn('[Gemini] API key supplied in ?key=; prefer x-goog-api-key to avoid URL leakage');
   }
   const token = extractApiToken(req) ?? queryKey;
-  if (!token || !timingSafeStringEqual(token, getUnifiedApiKey())) {
+  if (!token || !timingSafeStringEqual(token, await getUnifiedApiKey())) {
     sendError(res, 401, 'Invalid API key', 'UNAUTHENTICATED');
     return false;
   }
@@ -77,9 +77,9 @@ function modelShape(model: NormalizedModel | null, autoContextWindow: number | n
   };
 }
 
-geminiRouter.get('/models', (req, res) => {
-  if (!authenticate(req, res)) return;
-  const { models, autoContextWindow } = buildModelListing();
+geminiRouter.get('/models', async (req, res) => {
+  if (!await authenticate(req, res)) return;
+  const { models, autoContextWindow } = await buildModelListing();
   const availableOnly = String(req.query.available ?? '').toLowerCase();
   const listed = ['1', 'true', 'yes'].includes(availableOnly)
     ? models.filter(model => model.available === 1)
@@ -92,10 +92,10 @@ geminiRouter.get('/models', (req, res) => {
   });
 });
 
-geminiRouter.get(/^\/models\/(.+)$/, (req, res) => {
-  if (!authenticate(req, res)) return;
+geminiRouter.get(/^\/models\/(.+)$/, async (req, res) => {
+  if (!await authenticate(req, res)) return;
   const requested = decodeURIComponent(req.params[0]).replace(/^models\//, '');
-  const { models, autoContextWindow } = buildModelListing();
+  const { models, autoContextWindow } = await buildModelListing();
   if (requested === 'auto') {
     res.json(modelShape(null, autoContextWindow));
     return;
@@ -185,7 +185,7 @@ function streamWire(altSse: boolean): InboundChatWire {
 }
 
 async function handleGenerate(req: Request, res: Response, stream: boolean): Promise<void> {
-  if (!authenticate(req, res)) return;
+  if (!await authenticate(req, res)) return;
   const body = parseGenerateBody(req, res);
   if (!body) return;
   const generation = body.generationConfig;
@@ -197,7 +197,7 @@ async function handleGenerate(req: Request, res: Response, stream: boolean): Pro
   const sessionId = Array.isArray(rawSession) ? rawSession[0] : rawSession;
   const tools = geminiToolsToChatTools(body.tools);
   await runInboundChat(req, res, {
-    model: resolveGeminiModel(model),
+    model: await resolveGeminiModel(model),
     messages: geminiContentsToMessages(body),
     stream,
     // Gemini CLI never sends maxOutputTokens; the shared 1024-token default
@@ -224,12 +224,12 @@ async function handleGenerate(req: Request, res: Response, stream: boolean): Pro
 // resurfaces as an `unhandledRejection`, which the process safety net
 // classifies as fatal for anything that is not a transport error — so one
 // failing request exited the whole gateway instead of answering 500.
-geminiRouter.post(/^\/models\/(.+):generateContent$/, (req, res) => handleGenerate(req, res, false));
+geminiRouter.post(/^\/models\/(.+):generateContent$/, async (req, res) => await handleGenerate(req, res, false));
 
-geminiRouter.post(/^\/models\/(.+):streamGenerateContent$/, (req, res) => handleGenerate(req, res, true));
+geminiRouter.post(/^\/models\/(.+):streamGenerateContent$/, async (req, res) => await handleGenerate(req, res, true));
 
-geminiRouter.post(/^\/models\/(.+):countTokens$/, (req, res) => {
-  if (!authenticate(req, res)) return;
+geminiRouter.post(/^\/models\/(.+):countTokens$/, async (req, res) => {
+  if (!await authenticate(req, res)) return;
   const body = parseGenerateBody(req, res);
   if (!body) return;
   res.json({ totalTokens: estimateGeminiTokens(body) });

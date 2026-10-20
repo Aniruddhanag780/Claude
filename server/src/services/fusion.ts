@@ -61,16 +61,16 @@ const MAX_JUDGE_ATTEMPTS = 6;
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 12_000;
 const MAX_TOOL_CALL_TIMEOUT_MS = 120_000;
 
-function intSetting(key: string, fallback: number): number {
-  const raw = getSetting(key);
+async function intSetting(key: string, fallback: number): Promise<number> {
+  const raw = await getSetting(key);
   if (!raw) return fallback;
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function toolCallTimeoutMs(): number {
+async function toolCallTimeoutMs(): Promise<number> {
   return Math.min(
-    intSetting('fusion_tool_timeout_ms', DEFAULT_TOOL_CALL_TIMEOUT_MS),
+    await intSetting('fusion_tool_timeout_ms', DEFAULT_TOOL_CALL_TIMEOUT_MS),
     MAX_TOOL_CALL_TIMEOUT_MS,
   );
 }
@@ -81,9 +81,9 @@ function toolCallTimeoutMs(): number {
  * settles; aborting a request is deliberately scoped to this candidate so a
  * later fallback can still run.
  */
-function withToolCallDeadline(options: CompletionOptions): { options: CompletionOptions; cancel: () => void } {
+async function withToolCallDeadline(options: CompletionOptions): Promise<{ options: CompletionOptions; cancel: () => void }> {
   const controller = new AbortController();
-  const timeoutMs = toolCallTimeoutMs();
+  const timeoutMs = await toolCallTimeoutMs();
   const timer = setTimeout(() => {
     controller.abort(new Error(`fusion tool call timed out after ${timeoutMs}ms`));
   }, timeoutMs);
@@ -98,11 +98,11 @@ function withToolCallDeadline(options: CompletionOptions): { options: Completion
   };
 }
 
-function panelDefaultK(): number {
-  return Math.min(intSetting('fusion_default_k', DEFAULT_PANEL_K), panelMaxK());
+async function panelDefaultK(): Promise<number> {
+  return Math.min(await intSetting('fusion_default_k', DEFAULT_PANEL_K), await panelMaxK());
 }
-function panelMaxK(): number {
-  return Math.min(intSetting('fusion_max_k', HARD_MAX_PANEL_K), HARD_MAX_PANEL_K);
+async function panelMaxK(): Promise<number> {
+  return Math.min(await intSetting('fusion_max_k', HARD_MAX_PANEL_K), HARD_MAX_PANEL_K);
 }
 
 export const fusionConfigSchema = z.object({
@@ -123,8 +123,8 @@ export const fusionConfigSchema = z.object({
 
 export type FusionConfig = z.infer<typeof fusionConfigSchema>;
 
-export function getFusionMaxK(): number {
-  return panelMaxK();
+export async function getFusionMaxK(): Promise<number> {
+  return await panelMaxK();
 }
 
 // ── Saved fusion config (dashboard-managed default) ─────────────────────────
@@ -146,23 +146,23 @@ export const savedFusionConfigSchema = z.object({
 
 export type SavedFusionConfig = z.infer<typeof savedFusionConfigSchema>;
 
-function defaultSavedConfig(): SavedFusionConfig {
-  return { mode: 'auto', models: [], judge: null, k: panelDefaultK(), strategy: 'synthesize', expose_panel: false };
+async function defaultSavedConfig(): Promise<SavedFusionConfig> {
+  return { mode: 'auto', models: [], judge: null, k: await panelDefaultK(), strategy: 'synthesize', expose_panel: false };
 }
 
-export function getSavedFusionConfig(): SavedFusionConfig {
-  const raw = getSetting(SAVED_FUSION_KEY);
+export async function getSavedFusionConfig(): Promise<SavedFusionConfig> {
+  const raw = await getSetting(SAVED_FUSION_KEY);
   if (raw) {
     try {
       const parsed = savedFusionConfigSchema.safeParse(JSON.parse(raw));
       if (parsed.success) return parsed.data;
     } catch { /* corrupt setting → fall through to default */ }
   }
-  return defaultSavedConfig();
+  return await defaultSavedConfig();
 }
 
-export function setSavedFusionConfig(input: SavedFusionConfig): SavedFusionConfig {
-  const maxK = panelMaxK();
+export async function setSavedFusionConfig(input: SavedFusionConfig): Promise<SavedFusionConfig> {
+  const maxK = await panelMaxK();
   const normalized: SavedFusionConfig = {
     mode: input.mode,
     // De-dup the explicit panel and clamp to the operator cap.
@@ -172,21 +172,21 @@ export function setSavedFusionConfig(input: SavedFusionConfig): SavedFusionConfi
     strategy: input.strategy,
     expose_panel: input.expose_panel,
   };
-  setSetting(SAVED_FUSION_KEY, JSON.stringify(normalized));
+  await setSetting(SAVED_FUSION_KEY, JSON.stringify(normalized));
   return normalized;
 }
 
-export function pruneUnavailableSavedFusionConfig(): SavedFusionConfig {
-  const raw = getSetting(SAVED_FUSION_KEY);
-  if (!raw) return getSavedFusionConfig();
+export async function pruneUnavailableSavedFusionConfig(): Promise<SavedFusionConfig> {
+  const raw = await getSetting(SAVED_FUSION_KEY);
+  if (!raw) return await getSavedFusionConfig();
 
-  const saved = getSavedFusionConfig();
-  const models = saved.models.filter(savedModelId => resolveFusionCandidate(savedModelId) != null);
-  const judge = saved.judge && resolveFusionCandidate(saved.judge) != null ? saved.judge : null;
+  const saved = await getSavedFusionConfig();
+  const models = saved.models.filter(async savedModelId => await resolveFusionCandidate(savedModelId) != null);
+  const judge = saved.judge && await resolveFusionCandidate(saved.judge) != null ? saved.judge : null;
 
   if (models.length === saved.models.length && judge === saved.judge) return saved;
 
-  return setSavedFusionConfig({
+  return await setSavedFusionConfig({
     ...saved,
     models,
     judge,
@@ -200,8 +200,8 @@ export function pruneUnavailableSavedFusionConfig(): SavedFusionConfig {
  * 'explicit' — in 'auto' mode the saved `models` are ignored so the panel is
  * picked fresh off the Fallback Chain.
  */
-export function resolveEffectiveConfig(req: FusionConfig): FusionConfig {
-  const saved = getSavedFusionConfig();
+export async function resolveEffectiveConfig(req: FusionConfig): Promise<FusionConfig> {
+  const saved = await getSavedFusionConfig();
   const models = (req.models && req.models.length > 0)
     ? req.models
     : (saved.mode === 'explicit' && saved.models.length > 0 ? saved.models : undefined);
@@ -262,9 +262,9 @@ function mergeCallFailure(current: CallFailure | undefined, next: CallFailure): 
 // model for this request and learn the ceiling the provider reported so the
 // router sizes it out before the next oversized dispatch, but never cool it
 // down or penalize it (#1479).
-function noteContextTooLarge(route: RouteResult, err: any, skipModels: Set<number>): void {
-  learnLimitFromError(route.modelDbId, err);
-  learnContextWindowFromError(route.modelDbId, err);
+async function noteContextTooLarge(route: RouteResult, err: any, skipModels: Set<number>): Promise<void> {
+  await learnLimitFromError(route.modelDbId, err);
+  await learnContextWindowFromError(route.modelDbId, err);
   skipModels.add(route.modelDbId);
 }
 
@@ -289,14 +289,14 @@ function addUsage(a: TokenUsage, b: TokenUsage | undefined): TokenUsage {
 // Exported for the attribution regression test: the panel/judge retry path is
 // the fusion mirror of lib/fallback-loop.ts's recordRetryableFailure.
 export async function runModelCall(
-  getRoute: (skipKeys: Set<string>, skipModels: Set<number>) => RouteResult | null,
+  getRoute: (skipKeys: Set<string>, skipModels: Set<number>) => RouteResult | null | Promise<RouteResult | null>,
   messages: ChatMessage[],
   options: CompletionOptions,
   estimatedTokens: number,
   maxAttempts: number,
   // Why the call failed when no route was ever available. Defaults to
   // rate_limited (every key cooling down or over quota).
-  noRouteFailure: () => CallFailure = () => 'rate_limited',
+  noRouteFailure: () => CallFailure | Promise<CallFailure> = () => 'rate_limited',
 ): Promise<CallOutcome> {
   const skipKeys = new Set<string>();
   const skipModels = new Set<number>();
@@ -306,7 +306,7 @@ export async function runModelCall(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     let route: RouteResult | null;
     try {
-      route = getRoute(skipKeys, skipModels);
+      route = await getRoute(skipKeys, skipModels);
     } catch (err: any) {
       // routeRequest throws when the whole chain is exhausted (judge path).
       lastError = sanitizeProviderErrorMessage(err?.message);
@@ -331,9 +331,9 @@ export async function runModelCall(
 
       if (!text && !hasToolCalls) {
         // Empty completion — fail over like the main proxy path does.
-        logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0, Date.now() - startedAt, 'empty completion (fusion)', null, FUSION_TAG, null, 'http');
+        await logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0, Date.now() - startedAt, 'empty completion (fusion)', null, FUSION_TAG, null, 'http');
         skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
-        setCooldown(route.platform, route.modelId, route.keyId, getCooldownDurationForLimit(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }));
+        setCooldown(route.platform, route.modelId, route.keyId, await getCooldownDurationForLimit(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }));
         recordRateLimitHit(route.modelDbId);
         lastError = `empty completion from ${route.displayName}`;
         failure = mergeCallFailure(failure, 'error');
@@ -341,10 +341,10 @@ export async function runModelCall(
       }
 
       const usage = result.usage ?? ZERO_USAGE;
-      recordRequest(route.platform, route.modelId, route.keyId);
-      recordTokens(route.platform, route.modelId, route.keyId, usage.total_tokens);
+      await recordRequest(route.platform, route.modelId, route.keyId);
+      await recordTokens(route.platform, route.modelId, route.keyId, usage.total_tokens);
       recordSuccess(route.modelDbId);
-      logRequest(route.platform, route.modelId, route.keyId, 'success', usage.prompt_tokens ?? 0, usage.completion_tokens ?? 0, Date.now() - startedAt, null, null, FUSION_TAG, null, 'http');
+      await logRequest(route.platform, route.modelId, route.keyId, 'success', usage.prompt_tokens ?? 0, usage.completion_tokens ?? 0, Date.now() - startedAt, null, null, FUSION_TAG, null, 'http');
       return {
         ok: true,
         route,
@@ -360,13 +360,13 @@ export async function runModelCall(
       // provider's bad minute, not model evidence: the key still cools down,
       // but the model's rate-limit penalty is skipped and the log row is
       // tagged so the stats cache excludes it.
-      const attribution = failureAttributionFor(err);
-      logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0, Date.now() - startedAt, safe, null, FUSION_TAG, null, 'http', attribution);
+      const attribution = await failureAttributionFor(err);
+      await logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0, Date.now() - startedAt, safe, null, FUSION_TAG, null, 'http', attribution);
       lastError = safe;
       failure = mergeCallFailure(failure, classifyCallFailure(err));
 
       if (isContextTooLargeError(err)) {
-        noteContextTooLarge(route, err, skipModels);
+        await noteContextTooLarge(route, err, skipModels);
         continue;
       }
       if (isRetryableError(err)) {
@@ -376,10 +376,10 @@ export async function runModelCall(
         // credit/tier benches are never probe-recovered, Retry-After-backed
         // ones only when our heuristic outlasted the provider's own retry time.
         const decision = isPaymentRequiredError(err)
-          ? { durationMs: getPaymentRequiredCooldownMs(), source: 'credit' as const }
+          ? { durationMs: await getPaymentRequiredCooldownMs(), source: 'credit' as const }
           : isModelAccessForbiddenError(err)
-          ? { durationMs: getModelForbiddenCooldownMs(), source: 'tier' as const }
-          : getCooldownDecisionForLimit(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }, err.retryAfterMs, { quotaSignal: isRateLimitSignal(err) });
+          ? { durationMs: await getModelForbiddenCooldownMs(), source: 'tier' as const }
+          : await getCooldownDecisionForLimit(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }, err.retryAfterMs, { quotaSignal: isRateLimitSignal(err) });
         setCooldown(route.platform, route.modelId, route.keyId, decision.durationMs, decision.source);
         if (attribution !== 'provider_moment') recordRateLimitHit(route.modelDbId);
         continue;
@@ -395,7 +395,7 @@ export async function runModelCall(
   }
 
   if (failure == null) {
-    failure = noRouteFailure();
+    failure = await noRouteFailure();
     if (failure === 'context_too_large' && lastError == null) {
       lastError = `request (~${estimatedTokens} tokens) does not fit this model's context window`;
     }
@@ -411,7 +411,7 @@ export async function runModelCall(
  * Usage is estimated (streaming rarely echoes a usage block).
  */
 async function runJudgeStreaming(
-  getRoute: (skipKeys: Set<string>, skipModels: Set<number>) => RouteResult | null,
+  getRoute: (skipKeys: Set<string>, skipModels: Set<number>) => RouteResult | null | Promise<RouteResult | null>,
   messages: ChatMessage[],
   options: CompletionOptions,
   estimatedTokens: number,
@@ -424,7 +424,7 @@ async function runJudgeStreaming(
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     let route: RouteResult | null;
-    try { route = getRoute(skipKeys, skipModels); } catch (err: any) { lastError = sanitizeProviderErrorMessage(err?.message); break; }
+    try { route = await getRoute(skipKeys, skipModels); } catch (err: any) { lastError = sanitizeProviderErrorMessage(err?.message); break; }
     if (!route) break;
     // A pinned judge keeps handing back its one model (see runModelCall).
     if (skipModels.has(route.modelDbId)) {
@@ -446,25 +446,25 @@ async function runJudgeStreaming(
         }
       }
       if (!text) {
-        logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0, Date.now() - startedAt, 'empty completion (fusion judge)', null, FUSION_TAG, null, 'http');
+        await logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0, Date.now() - startedAt, 'empty completion (fusion judge)', null, FUSION_TAG, null, 'http');
         skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
-        setCooldown(route.platform, route.modelId, route.keyId, getCooldownDurationForLimit(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }));
+        setCooldown(route.platform, route.modelId, route.keyId, await getCooldownDurationForLimit(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }));
         recordRateLimitHit(route.modelDbId);
         lastError = `empty judge completion from ${route.displayName}`;
         continue;
       }
       const out = Math.ceil(text.length / 4);
       const usage: TokenUsage = { prompt_tokens: estimatedTokens, completion_tokens: out, total_tokens: estimatedTokens + out };
-      recordRequest(route.platform, route.modelId, route.keyId);
-      recordTokens(route.platform, route.modelId, route.keyId, usage.total_tokens);
+      await recordRequest(route.platform, route.modelId, route.keyId);
+      await recordTokens(route.platform, route.modelId, route.keyId, usage.total_tokens);
       recordSuccess(route.modelDbId);
-      logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedTokens, out, Date.now() - startedAt, null, null, FUSION_TAG, null, 'http');
+      await logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedTokens, out, Date.now() - startedAt, null, null, FUSION_TAG, null, 'http');
       return { ok: true, route, text, usage };
     } catch (err: any) {
       const safe = sanitizeProviderErrorMessage(err?.message);
       // #1347: same attribution as the panel path above.
-      const attribution = failureAttributionFor(err);
-      logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0, Date.now() - startedAt, safe, null, FUSION_TAG, null, 'http', attribution);
+      const attribution = await failureAttributionFor(err);
+      await logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0, Date.now() - startedAt, safe, null, FUSION_TAG, null, 'http', attribution);
       lastError = safe;
       // Already streamed bytes — can't fail over without duplicating output.
       // Keep whatever the client already received.
@@ -476,7 +476,7 @@ async function runJudgeStreaming(
         break;
       }
       if (isContextTooLargeError(err)) {
-        noteContextTooLarge(route, err, skipModels);
+        await noteContextTooLarge(route, err, skipModels);
         continue;
       }
       if (isRetryableError(err)) {
@@ -484,10 +484,10 @@ async function runJudgeStreaming(
         skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
         // Same provenance mapping as the non-stream path above.
         const decision = isPaymentRequiredError(err)
-          ? { durationMs: getPaymentRequiredCooldownMs(), source: 'credit' as const }
+          ? { durationMs: await getPaymentRequiredCooldownMs(), source: 'credit' as const }
           : isModelAccessForbiddenError(err)
-          ? { durationMs: getModelForbiddenCooldownMs(), source: 'tier' as const }
-          : getCooldownDecisionForLimit(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }, err.retryAfterMs, { quotaSignal: isRateLimitSignal(err) });
+          ? { durationMs: await getModelForbiddenCooldownMs(), source: 'tier' as const }
+          : await getCooldownDecisionForLimit(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }, err.retryAfterMs, { quotaSignal: isRateLimitSignal(err) });
         setCooldown(route.platform, route.modelId, route.keyId, decision.durationMs, decision.source);
         if (attribution !== 'provider_moment') recordRateLimitHit(route.modelDbId);
         continue;
@@ -561,8 +561,8 @@ export function diversifyChain(ordered: FusionCandidate[]): FusionCandidate[] {
  * both the panel and its refills span genuinely different perspectives before
  * doubling up on either axis.
  */
-export function selectPanel(config: FusionConfig, requirements: { requireTools?: boolean; requireVision?: boolean; estimatedTokens: number }): { panel: FusionCandidate[]; overflow: FusionCandidate[]; dropped: string[] } {
-  const maxK = panelMaxK();
+export async function selectPanel(config: FusionConfig, requirements: { requireTools?: boolean; requireVision?: boolean; estimatedTokens: number }): Promise<{ panel: FusionCandidate[]; overflow: FusionCandidate[]; dropped: string[] }> {
+  const maxK = await panelMaxK();
 
   if (config.models && config.models.length > 0) {
     const panel: FusionCandidate[] = [];
@@ -570,7 +570,7 @@ export function selectPanel(config: FusionConfig, requirements: { requireTools?:
     const seen = new Set<number>();
     for (const id of config.models) {
       if (panel.length >= maxK) { dropped.push(`${id} (over cap of ${maxK})`); continue; }
-      const cand = resolveFusionCandidate(id);
+      const cand = await resolveFusionCandidate(id);
       if (!cand) { dropped.push(`${id} (unknown or disabled)`); continue; }
       if (requirements.requireTools && !cand.supportsTools) { dropped.push(`${id} (no tool-calling support)`); continue; }
       if (requirements.requireVision && !cand.supportsVision) { dropped.push(`${id} (no vision support)`); continue; }
@@ -582,10 +582,10 @@ export function selectPanel(config: FusionConfig, requirements: { requireTools?:
     return { panel, overflow: [], dropped };
   }
 
-  const k = Math.min(Math.max(config.k ?? panelDefaultK(), 1), maxK);
+  const k = Math.min(Math.max(config.k ?? await panelDefaultK(), 1), maxK);
   // Size-aware: the chain excludes models that cannot hold a prompt this large,
   // so a too-small model never claims a slot it is guaranteed to fail.
-  const ordered = getOrderedFusionChain(requirements.estimatedTokens)
+  const ordered = await (await getOrderedFusionChain(requirements.estimatedTokens))
     .filter(c => !requirements.requireTools || c.supportsTools)
     .filter(c => !requirements.requireVision || c.supportsVision);
 
@@ -719,7 +719,7 @@ export async function runFusion(params: {
   const { messages, options, estimatedTokens, hooks, vision = false } = params;
   // Apply the dashboard-saved default; the request's inline fusion field (if
   // any) has already-merged precedence field-by-field.
-  const config = resolveEffectiveConfig(params.config);
+  const config = await resolveEffectiveConfig(params.config);
   const strategy = config.strategy ?? 'synthesize';
 
   const requireTools = (options.tools?.length ?? 0) > 0;
@@ -732,13 +732,13 @@ export async function runFusion(params: {
   // structured call. Continue past a prose-only candidate so a later capable
   // model gets a chance; `none` is the explicit opt-out and may stop at prose.
   const acceptsToolCall = options.tool_choice !== 'none';
-  const { panel, overflow, dropped } = selectPanel(config, { requireTools, requireVision: vision, estimatedTokens });
+  const { panel, overflow, dropped } = await selectPanel(config, { requireTools, requireVision: vision, estimatedTokens });
   if (panel.length === 0) {
     // The auto-panel drops models whose context window or TPM ceiling cannot
     // hold the prompt. When that is the only reason the panel is empty, the
     // request can never be served as sent: say so with a 413 instead of
     // pointing the user at their model setup.
-    if (selectPanel(config, { requireTools, requireVision: vision, estimatedTokens: 1 }).panel.length > 0) {
+    if (await (await selectPanel(config, { requireTools, requireVision: vision, estimatedTokens: 1 })).panel.length > 0) {
       throw contextTooLargeError(estimatedTokens);
     }
     const hint = vision
@@ -754,11 +754,11 @@ export async function runFusion(params: {
   // model's keys (so a key 429 doesn't collapse the slot onto a duplicate
   // backend — issue #326). Returns its answer and fires onPanel the moment it
   // settles so a streaming client sees answers arrive one by one.
-  const runSlot = (cand: FusionCandidate, slotOptions: CompletionOptions = options): Promise<PanelAnswer> =>
-    runModelCall(
-      (skipKeys) => routePinnedModel(cand.modelDbId, estimatedTokens, skipKeys),
+  const runSlot = async (cand: FusionCandidate, slotOptions: CompletionOptions = options): Promise<PanelAnswer> =>
+    await runModelCall(
+      async (skipKeys) => await routePinnedModel(cand.modelDbId, estimatedTokens, skipKeys),
       messages, slotOptions, estimatedTokens, MAX_SLOT_ATTEMPTS,
-      () => pinnedModelFitsRequestSize(cand.modelDbId, estimatedTokens) ? 'rate_limited' : 'context_too_large',
+      async () => (await pinnedModelFitsRequestSize(cand.modelDbId, estimatedTokens)) ? 'rate_limited' : 'context_too_large',
     ).then((outcome): PanelAnswer => {
       const returnedToolCalls = outcome.toolCalls;
       const forbiddenToolCall = options.tool_choice === 'none' && !!returnedToolCalls?.length;
@@ -817,7 +817,7 @@ export async function runFusion(params: {
     // the provider lease before the next candidate starts.
     while (cursor < candidates.length) {
       const cand = candidates[cursor++];
-      const deadline = withToolCallDeadline(options);
+      const deadline = await withToolCallDeadline(options);
       let answer: PanelAnswer;
       try {
         answer = await runSlot(cand, deadline.options);
@@ -836,7 +836,7 @@ export async function runFusion(params: {
     while (okCount < target && cursor < candidates.length) {
       const wave = candidates.slice(cursor, cursor + (target - okCount));
       cursor += wave.length;
-      const settled = await Promise.allSettled(wave.map(cand => runSlot(cand)));
+      const settled = await Promise.allSettled(wave.map(async cand => await runSlot(cand)));
       settled.forEach((s, i) => {
         const a: PanelAnswer = s.status === 'fulfilled'
           ? s.value
@@ -936,11 +936,11 @@ export async function runFusion(params: {
       : options;
 
     const getJudgeRoute = config.judge
-      ? (skipKeys: Set<string>) => {
-          const cand = resolveFusionCandidate(config.judge!);
-          return cand ? routePinnedModel(cand.modelDbId, judgeEstimate, skipKeys) : null;
+      ? async (skipKeys: Set<string>) => {
+          const cand = await resolveFusionCandidate(config.judge!);
+          return cand ? await routePinnedModel(cand.modelDbId, judgeEstimate, skipKeys) : null;
         }
-      : (skipKeys: Set<string>, skipModels: Set<number>) => routeRequest(
+      : async (skipKeys: Set<string>, skipModels: Set<number>) => await routeRequest(
           judgeEstimate, skipKeys.size ? skipKeys : undefined, undefined, false, false,
           skipModels.size ? skipModels : undefined, undefined,
           // The judge writes the final answer the client receives, so a

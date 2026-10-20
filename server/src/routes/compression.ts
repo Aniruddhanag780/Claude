@@ -25,8 +25,8 @@ const previewMessageSchema = z.object({
   }).passthrough()).optional(),
 }).passthrough();
 
-compressionRouter.get('/stats', (_req: Request, res: Response) => {
-  res.json({ config: getCompressionConfig(), ...getCompressionStats() });
+compressionRouter.get('/stats', async (_req: Request, res: Response) => {
+  res.json({ config: await getCompressionConfig(), ...getCompressionStats() });
 });
 
 function previewMessages(body: unknown): ChatMessage[] | null {
@@ -45,7 +45,7 @@ function previewMessages(body: unknown): ChatMessage[] | null {
   return null;
 }
 
-compressionRouter.post('/preview', (req: Request, res: Response) => {
+compressionRouter.post('/preview', async (req: Request, res: Response) => {
   const messages = previewMessages(req.body);
   if (!messages || messages.length === 0) {
     res.status(400).json({
@@ -60,12 +60,12 @@ compressionRouter.post('/preview', (req: Request, res: Response) => {
   const mode: CompressionMode = typeof rawMode === 'string'
     && (COMPRESSION_MODES as readonly string[]).includes(rawMode)
       ? rawMode as CompressionMode
-      : getCompressionConfig().mode;
+      : await (await getCompressionConfig()).mode;
   const targetTokens = (req.body as { targetTokens?: unknown })?.targetTokens;
   const tools = Array.isArray((req.body as { tools?: unknown })?.tools)
     ? (req.body as { tools: ChatToolDefinition[] }).tools
     : undefined;
-  const result = compressRequest(messages, {
+  const result = await compressRequest(messages, {
     previewMode: mode,
     targetTokens: typeof targetTokens === 'number' && targetTokens > 0 ? Math.floor(targetTokens) : undefined,
     tools,

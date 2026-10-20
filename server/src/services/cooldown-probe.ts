@@ -119,7 +119,7 @@ export async function runCooldownProbePass(opts: ProbePassOptions = {}): Promise
   const jitter = opts.jitter ?? Math.random;
   const maxProbes = opts.maxProbes ?? getMaxProbesPerPass();
 
-  const all = getProbeableCooldowns(now);
+  const all = await getProbeableCooldowns(now);
 
   // Drop pacing state for keys with no probeable cooldowns left (expired,
   // cleared, or re-benched as authoritative) so old backoff cannot delay a
@@ -165,7 +165,7 @@ export async function runCooldownProbePass(opts: ProbePassOptions = {}): Promise
       keyState.delete(keyId);
       // Structured so the dashboard log viewer can filter recoveries by
       // provider; providerLog still writes the same line to stdout.
-      providerLog(
+      await providerLog(
         'info',
         `[CooldownProbe] key ${keyId} validated — cleared ${cooldownsForKey.length} cooldown(s) early ` +
         `(${cooldownsForKey.map(c => `${c.platform}/${c.modelId}`).join(', ')})`,
@@ -188,12 +188,12 @@ export async function runCooldownProbePass(opts: ProbePassOptions = {}): Promise
 // let the next scheduled pass stack a second set of probes on top.
 let passInFlight: Promise<ProbePassResult> | null = null;
 
-function runGuardedPass(): Promise<ProbePassResult> {
-  if (passInFlight) return passInFlight;
+async function runGuardedPass(): Promise<ProbePassResult> {
+  if (passInFlight) return await passInFlight;
   passInFlight = runCooldownProbePass().finally(() => {
     passInFlight = null;
   });
-  return passInFlight;
+  return await passInFlight;
 }
 
 let cancelProbeJob: (() => void) | null = null;

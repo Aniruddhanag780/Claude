@@ -447,7 +447,7 @@ export async function discoverEndpointModels(baseUrl: string, apiKey: string): P
     // inherit the 120s custom-provider chat timeout.
     timeoutMs: 30_000,
   });
-  return discoverProviderModels(provider, apiKey, baseUrl);
+  return await discoverProviderModels(provider, apiKey, baseUrl);
 }
 
 /**

@@ -74,21 +74,21 @@ export interface DiscoveryEligibility {
 }
 
 /** Whether `platform` may fill its model list from its own /models. */
-export function builtinDiscoveryEligibility(db: Db, platform: string): DiscoveryEligibility {
+export async function builtinDiscoveryEligibility(db: Db, platform: string): Promise<DiscoveryEligibility> {
   if (builtinDiscoveryMode() === 'off') return { eligible: false, reason: 'disabled' };
   if (!(BUILTIN_DISCOVERY_PLATFORMS as readonly string[]).includes(platform)) {
     return { eligible: false, reason: 'not_allowlisted' };
   }
   const provider = getProvider(platform as Platform);
   if (!(provider instanceof OpenAICompatProvider)) return { eligible: false, reason: 'not_openai_compatible' };
-  if (appliedCatalogPlatforms(db).has(platform) || hasCatalogOwnedRows(db, platform)) {
+  if (await (await appliedCatalogPlatforms(db)).has(platform) || await hasCatalogOwnedRows(db, platform)) {
     return { eligible: false, reason: 'catalog_managed' };
   }
   return { eligible: true, provider };
 }
 
-export function isBuiltinDiscoveryEligible(db: Db, platform: string): boolean {
-  return builtinDiscoveryEligibility(db, platform).eligible;
+export async function isBuiltinDiscoveryEligible(db: Db, platform: string): Promise<boolean> {
+  return await (await builtinDiscoveryEligibility(db, platform)).eligible;
 }
 
 /** A human sentence for an ineligible platform, for route errors. */
@@ -106,8 +106,8 @@ export function ineligibleMessage(platform: string, reason: IneligibleReason | u
 // Catalog-owned rows for this platform in the local DB: chat rows the catalog
 // (or the bundled baseline) wrote, or any embedding / media row, which only
 // the catalog and the bundled baseline write for a built-in platform.
-function hasCatalogOwnedRows(db: Db, platform: string): boolean {
-  const row = db.get(`
+async function hasCatalogOwnedRows(db: Db, platform: string): Promise<boolean> {
+  const row = await db.get(`
     SELECT (SELECT COUNT(*) FROM models           WHERE platform = ? AND source = 'catalog')
          + (SELECT COUNT(*) FROM embedding_models WHERE platform = ?)
          + (SELECT COUNT(*) FROM media_models     WHERE platform = ?) AS c
@@ -134,13 +134,13 @@ export async function discoverBuiltinModels(
   apiKeyOverride?: string,
 ): Promise<DiscoveredModel[]> {
   const apiKey = apiKeyOverride?.trim() || decrypt(key.encrypted_key, key.iv, key.auth_tag);
-  return withKeyProxy(decryptProxyUrl(key), () => discoverProviderModels(provider, apiKey, provider.modelsUrl.replace(/\/models\/?$/, '')));
+  return await withKeyProxy(decryptProxyUrl(key), async () => await discoverProviderModels(provider, apiKey, provider.modelsUrl.replace(/\/models\/?$/, '')));
 }
 
 /** Discovered model ids already present on this platform, in any provenance. */
-export function registeredModelIds(db: Db, platform: string): Set<string> {
+export async function registeredModelIds(db: Db, platform: string): Promise<Set<string>> {
   return new Set(
-    (db.all("SELECT model_id FROM models WHERE platform = ? AND endpoint_scope = ''", [platform]) as { model_id: string }[])
+    (await db.all("SELECT model_id FROM models WHERE platform = ? AND endpoint_scope = ''", [platform]) as { model_id: string }[])
       .map(r => r.model_id),
   );
 }
@@ -166,29 +166,29 @@ export interface RegisterDiscoveredResult {
  * all win. `explicit` marks a pick the operator made in the dashboard, which
  * lifts a previous deletion, the way re-adding a custom model does (#926).
  */
-export function registerDiscoveredModels(
+export async function registerDiscoveredModels(
   db: Db,
   platform: string,
   entries: DiscoveredEntry[],
   options: { explicit: boolean },
-): RegisterDiscoveredResult {
-  return db.transaction(() => {
+): Promise<RegisterDiscoveredResult> {
+  return await db.transaction(async (tx) => {
     const result: RegisterDiscoveredResult = { created: [], existing: [], tombstoned: [] };
-    const seed = customModelSeed(db);
+    const seed = await customModelSeed(db);
 
     for (const entry of entries) {
-      if (db.get("SELECT 1 FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ''", [platform, entry.modelId])) {
+      if (await tx.get("SELECT 1 FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ''", [platform, entry.modelId])) {
         result.existing.push(entry.modelId);
         continue;
       }
-      if (isCatalogModelTombstoned(db, 'chat', platform, entry.modelId)) {
+      if (await isCatalogModelTombstoned(db, 'chat', platform, entry.modelId)) {
         if (!options.explicit) {
           result.tombstoned.push(entry.modelId);
           continue;
         }
-        clearCatalogModelTombstone(db, 'chat', platform, entry.modelId);
+        await clearCatalogModelTombstone(db, 'chat', platform, entry.modelId);
       }
-      db.run(`
+      await tx.run(`
       INSERT INTO models
         (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, key_id,
@@ -198,15 +198,15 @@ export function registerDiscoveredModels(
          1, $7, $8, '')
       ON CONFLICT(platform, model_id, endpoint_scope) DO NOTHING
     `, [platform, entry.modelId, seed.intelligenceRank, seed.speedRank, seed.sizeLabel, entry.contextWindow ?? null, entry.vision ? 1 : 0, DISCOVERED_MODEL_SOURCE]);
-      const row = db.get("SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ''", [platform, entry.modelId]) as { id: number };
-      if (!db.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [row.id])) {
-        addToChain.run(row.id, (db.get('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config') as { m: number }).m + 1);
+      const row = await tx.get("SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ''", [platform, entry.modelId]) as { id: number };
+      if (!await tx.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [row.id])) {
+        await tx.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)', [row.id, (await tx.get('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config') as { m: number }).m + 1]);
       }
-      ensureModelInProfiles(db, row.id);
+      await ensureModelInProfiles(db, row.id);
       result.created.push(entry.modelId);
     }
     return result;
-  })();
+  });
 }
 
 /** Glob match where `*` matches any run of chars (incl. empty). */
@@ -247,8 +247,8 @@ export interface BuiltinDiscoveryResult {
   failures: Array<{ platform: string; error: string }>;
 }
 
-function usableKeys(db: Db, platform: string): KeyRow[] {
-  return db.all(`
+async function usableKeys(db: Db, platform: string): Promise<KeyRow[]> {
+  return await db.all(`
     SELECT id, platform, encrypted_key, iv, auth_tag, proxy_encrypted, proxy_iv, proxy_auth_tag
       FROM api_keys
      WHERE platform = ? AND enabled = 1 AND status != 'invalid'
@@ -269,20 +269,20 @@ export async function runBuiltinModelDiscovery(db: Db, only?: string): Promise<B
 
   const platforms = only ? [only] : [...BUILTIN_DISCOVERY_PLATFORMS];
   for (const platform of platforms) {
-    const eligibility = builtinDiscoveryEligibility(db, platform);
+    const eligibility = await builtinDiscoveryEligibility(db, platform);
     if (!eligibility.eligible || !eligibility.provider) continue;
-    const keys = usableKeys(db, platform);
+    const keys = await usableKeys(db, platform);
     if (keys.length === 0) continue;
     result.platforms += 1;
     try {
       const discovered = await discoverBuiltinModels(eligibility.provider, keys[0]!);
       // Re-check after the network round-trip: a catalog sync may have landed
       // in between, and the catalog always wins.
-      if (!isBuiltinDiscoveryEligible(db, platform)) continue;
+      if (!await isBuiltinDiscoveryEligible(db, platform)) continue;
       const { accepted, nonChat, paid } = autoRegistrable(discovered);
       result.nonChatSkipped += nonChat;
       result.paidSkipped += paid;
-      const registered = registerDiscoveredModels(
+      const registered = await registerDiscoveredModels(
         db,
         platform,
         accepted.map(m => ({ modelId: m.id, contextWindow: m.contextWindow, vision: m.vision })),
@@ -311,17 +311,17 @@ const inFlight = new Map<string, Promise<BuiltinDiscoveryResult>>();
 const lastEventRunMs = new Map<string, number>();
 const EVENT_MIN_GAP_MS = 60 * 60 * 1000;
 
-export function triggerBuiltinModelDiscovery(
+export async function triggerBuiltinModelDiscovery(
   db: Db,
   platform: string,
   reason: 'key_added' | 'healthy',
-): Promise<BuiltinDiscoveryResult> | null {
+): Promise<BuiltinDiscoveryResult | null> {
   if (builtinDiscoveryMode() !== 'auto') return null;
-  if (!isBuiltinDiscoveryEligible(db, platform)) return null;
+  if (!await isBuiltinDiscoveryEligible(db, platform)) return null;
   const pending = inFlight.get(platform);
-  if (pending) return pending;
+  if (pending) return await pending;
   if (reason === 'healthy') {
-    const hasModels = db.get('SELECT 1 FROM models WHERE platform = ? LIMIT 1', [platform]);
+    const hasModels = await db.get('SELECT 1 FROM models WHERE platform = ? LIMIT 1', [platform]);
     if (hasModels) return null;
     const last = lastEventRunMs.get(platform) ?? 0;
     if (Date.now() - last < EVENT_MIN_GAP_MS) return null;

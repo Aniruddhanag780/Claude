@@ -13,17 +13,17 @@ export const mediaRouter = Router();
 // Generative-media models for the dashboard Image/Video/Audio tabs.
 // Mirrors the embeddings tab: a flat list with an enable toggle per row. keyCount
 // surfaces whether the row's platform has a usable key configured.
-mediaRouter.get('/', (_req: Request, res: Response) => {
+mediaRouter.get('/', async (_req: Request, res: Response) => {
   const db = getDb();
   const keyCounts = new Map(
-    (db.all("SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; n: number }[]).map(r => [r.platform, r.n]),
+    (await db.all("SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; n: number }[]).map(r => [r.platform, r.n]),
   );
   const customKeyIds = new Set(
-    (db.all("SELECT id FROM api_keys WHERE platform = 'custom' AND enabled = 1 AND status IN ('healthy', 'unknown')") as { id: number }[]).map(r => r.id),
+    (await db.all("SELECT id FROM api_keys WHERE platform = 'custom' AND enabled = 1 AND status IN ('healthy', 'unknown')") as { id: number }[]).map(r => r.id),
   );
 
   res.json({
-    models: listAllMediaModels().map(r => ({
+    models: await (await listAllMediaModels()).map(r => ({
       id: r.id,
       platform: r.platform,
       modelId: r.model_id,
@@ -49,7 +49,7 @@ mediaRouter.get('/', (_req: Request, res: Response) => {
 // rows are logged the same way (request_type='transcription', see
 // logMedia), so the Audio tab's STT section can show the same per-model
 // counts instead of dead-ending on a 400.
-mediaRouter.get('/usage', (req: Request, res: Response) => {
+mediaRouter.get('/usage', async (req: Request, res: Response) => {
   const parsed = z.enum(['image', 'video', 'audio', 'transcription']).safeParse(req.query.modality);
   if (!parsed.success) {
     res.status(400).json({ error: { message: 'modality must be image, video, audio or transcription' } });
@@ -58,17 +58,17 @@ mediaRouter.get('/usage', (req: Request, res: Response) => {
   const modality = parsed.data;
   const db = getDb();
 
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT mm.id, mm.platform, mm.model_id, mm.display_name, mm.quota_label,
-           COALESCE(SUM(CASE WHEN r.created_at >= datetime('now', 'start of day') THEN 1 ELSE 0 END), 0) AS requests_today,
-           COALESCE(SUM(CASE WHEN r.created_at >= datetime('now', 'start of month') THEN 1 ELSE 0 END), 0) AS requests_month
+           COALESCE(SUM(CASE WHEN r.created_at >= to_char(now() at time zone 'utc', 'YYYY-MM-DD') THEN 1 ELSE 0 END), 0) AS requests_today,
+           COALESCE(SUM(CASE WHEN r.created_at >= to_char(date_trunc('month', now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS') THEN 1 ELSE 0 END), 0) AS requests_month
     FROM media_models mm
     LEFT JOIN requests r
       ON r.request_type = ?
      AND r.status = 'success'
      AND r.platform = mm.platform
      AND r.model_id = mm.model_id
-     AND r.created_at >= datetime('now', 'start of month')
+     AND r.created_at >= to_char(date_trunc('month', now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS')
     WHERE mm.modality = ? AND mm.enabled = 1
     GROUP BY mm.id
     ORDER BY mm.priority ASC
@@ -111,7 +111,7 @@ const customMediaSchema = z.object({
   quotaLabel: z.string().optional(),
 });
 
-mediaRouter.post('/custom', (req: Request, res: Response) => {
+mediaRouter.post('/custom', async (req: Request, res: Response) => {
   const parsed = customMediaSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -133,12 +133,12 @@ mediaRouter.post('/custom', (req: Request, res: Response) => {
   const providedKey = parsed.data.apiKey?.trim() || undefined;
   const quotaLabel = parsed.data.quotaLabel?.trim() || 'custom endpoint';
 
-  const upsert = db.transaction(() => {
+  const upsert = await db.transaction(async () => {
     // A new secret for a known endpoint is an ADDITIONAL credential, never a
     // replacement for the stored one (#619). The upsert itself is shared with
     // the classified branch of POST /api/keys/custom (#1051).
-    const { keyId, storedKey: storedKeyForMask } = resolveCustomEndpointKey(db, baseUrl, providedKey, label);
-    const { modelDbId } = registerCustomMediaModel(db, keyId, {
+    const { keyId, storedKey: storedKeyForMask } = await resolveCustomEndpointKey(db, baseUrl, providedKey, label);
+    const { modelDbId } = await registerCustomMediaModel(db, keyId, {
       modelId,
       displayName: submittedName,
       modality: parsed.data.modality,
@@ -147,8 +147,8 @@ mediaRouter.post('/custom', (req: Request, res: Response) => {
     return { modelDbId, keyId, storedKeyForMask };
   });
 
-  const result = upsert();
-  const storedName = (db.get('SELECT display_name FROM media_models WHERE id = ?', [result.modelDbId]) as { display_name: string }).display_name;
+  const result = upsert;
+  const storedName = (await db.get('SELECT display_name FROM media_models WHERE id = ?', [result.modelDbId]) as { display_name: string }).display_name;
   res.status(201).json({
     success: true,
     keyId: result.keyId,
@@ -164,7 +164,7 @@ mediaRouter.post('/custom', (req: Request, res: Response) => {
 
 const updateSchema = z.object({ enabled: z.boolean() });
 
-mediaRouter.put('/:id', (req: Request, res: Response) => {
+mediaRouter.put('/:id', async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) {
     res.status(400).json({ error: { message: 'Invalid id' } });
@@ -175,7 +175,7 @@ mediaRouter.put('/:id', (req: Request, res: Response) => {
     res.status(400).json({ error: { message: 'Invalid request body' } });
     return;
   }
-  const info = getDb().run('UPDATE media_models SET enabled = ? WHERE id = ?', [parsed.data.enabled ? 1 : 0, id]);
+  const info = await getDb().run('UPDATE media_models SET enabled = ? WHERE id = ?', [parsed.data.enabled ? 1 : 0, id]);
   if (info.changes === 0) {
     res.status(404).json({ error: { message: `Unknown media model ${id}` } });
     return;
@@ -183,7 +183,7 @@ mediaRouter.put('/:id', (req: Request, res: Response) => {
   res.json({ success: true });
 });
 
-mediaRouter.delete('/custom/:id', (req: Request, res: Response) => {
+mediaRouter.delete('/custom/:id', async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) {
     res.status(400).json({ error: { message: 'Invalid id' } });
@@ -191,15 +191,14 @@ mediaRouter.delete('/custom/:id', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = db.get("SELECT key_id FROM media_models WHERE id = ? AND platform = 'custom'", [id]) as { key_id: number | null } | undefined;
+  const row = await db.get("SELECT key_id FROM media_models WHERE id = ? AND platform = 'custom'", [id]) as { key_id: number | null } | undefined;
   if (!row) {
     res.status(404).json({ error: { message: `Unknown custom media model ${id}` } });
     return;
   }
-  const remove = db.transaction(() => {
-    db.run("DELETE FROM media_models WHERE id = ? AND platform = 'custom'", [id]);
-    deleteUnusedCustomEndpointKey(db, row.key_id);
+  await db.transaction(async (tx) => {
+    await tx.run("DELETE FROM media_models WHERE id = ? AND platform = 'custom'", [id]);
+    await deleteUnusedCustomEndpointKey(db, row.key_id);
   });
-  remove();
   res.json({ success: true });
 });

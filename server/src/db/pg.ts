@@ -16,10 +16,10 @@ const { Pool } = pg;
  * 64-bit integer beyond 2^53 already lost precision in the JavaScript number
  * it was stored in, so nothing is given up here.
  */
-pg.types.setTypeParser(pg.types.builtins.INT8, (v) => (v === null ? null : Number(v)));
-pg.types.setTypeParser(pg.types.builtins.NUMERIC, (v) => (v === null ? null : Number(v)));
-pg.types.setTypeParser(pg.types.builtins.INT8_ARRAY, (v) => (v === null ? null : v.map(Number)));
-pg.types.setTypeParser(pg.types.builtins.NUMERIC_ARRAY, (v) => (v === null ? null : v.map(Number)));
+pg.types.setTypeParser(pg.types.builtins.INT8, (v: string) => (v === null ? null : Number(v)) as unknown as string);
+pg.types.setTypeParser(pg.types.builtins.NUMERIC, (v: string) => (v === null ? null : Number(v)) as unknown as string);
+pg.types.setTypeParser(1016 as unknown as Parameters<typeof pg.types.setTypeParser>[0], ((v: string) => (v === null ? null : v.replace(/[{}]/g, '').split(',').map(Number))) as unknown as (v: string) => string);
+pg.types.setTypeParser(1231 as unknown as Parameters<typeof pg.types.setTypeParser>[0], ((v: string) => (v === null ? null : v.replace(/[{}]/g, '').split(',').map(Number))) as unknown as (v: string) => string);
 
 export interface SslResolution {
   /** Value for pg.PoolConfig.ssl. `undefined` means "let the driver decide" (used
@@ -279,7 +279,7 @@ export class PgDb implements Db {
   }
 
   async query<T = any>(sql: string, params: readonly unknown[] = []): Promise<QueryResult<T>> {
-    return this.runQuery<T>(sql, params);
+    return await this.runQuery<T>(sql, params);
   }
 
   async get<T = any>(sql: string, params: readonly unknown[] = []): Promise<T | undefined> {

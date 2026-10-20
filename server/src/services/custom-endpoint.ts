@@ -31,8 +31,8 @@ export interface ResolvedEndpointKey {
   created: boolean;
 }
 
-function endpointKeyRows(db: Db, baseUrl: string): StoredKeyRow[] {
-  return db.all(`
+async function endpointKeyRows(db: Db, baseUrl: string): Promise<StoredKeyRow[]> {
+  return await db.all(`
     SELECT id, encrypted_key, iv, auth_tag
       FROM api_keys
      WHERE platform = 'custom' AND base_url = ?
@@ -48,8 +48,8 @@ function plaintextOf(row: StoredKeyRow): string | null {
   }
 }
 
-function touch(db: Db, id: number, label: string | undefined): void {
-  db.run("UPDATE api_keys SET label = COALESCE(?, label), status = 'unknown', enabled = 1 WHERE id = ?", [label ?? null, id]);
+async function touch(db: Db, id: number, label: string | undefined): Promise<void> {
+  await db.run("UPDATE api_keys SET label = COALESCE(?, label), status = 'unknown', enabled = 1 WHERE id = ?", [label ?? null, id]);
 }
 
 /**
@@ -67,14 +67,14 @@ function defaultCustomEndpointLabel(baseUrl: string): string {
   }
 }
 
-function insertKey(db: Db, baseUrl: string, secret: string, label: string | undefined): ResolvedEndpointKey {
+async function insertKey(db: Db, baseUrl: string, secret: string, label: string | undefined): Promise<ResolvedEndpointKey> {
   const { encrypted, iv, authTag } = encrypt(secret);
   // A second credential joins the endpoint's group (#1176): the group names the
   // endpoint, not the row, so a new key must not land back in the "Custom" pile.
-  const r = db.run(`
+  const r = await db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url, group_label)
     VALUES ('custom', ?, ?, ?, ?, 'unknown', 1, ?, ?) RETURNING id
-  `, [label ?? defaultCustomEndpointLabel(baseUrl), encrypted, iv, authTag, baseUrl, customEndpointGroup(db, baseUrl)]);
+  `, [label ?? defaultCustomEndpointLabel(baseUrl), encrypted, iv, authTag, baseUrl, await customEndpointGroup(db, baseUrl)]);
   return { keyId: Number(r.lastInsertRowid), storedKey: secret, created: true };
 }
 
@@ -95,8 +95,8 @@ export function normalizeGroupLabel(raw: string | null | undefined): string | nu
 }
 
 /** The group an endpoint's keys carry, or null when it has none. */
-export function customEndpointGroup(db: Db, baseUrl: string): string | null {
-  const row = db.get(`
+export async function customEndpointGroup(db: Db, baseUrl: string): Promise<string | null> {
+  const row = await db.get(`
     SELECT group_label FROM api_keys
      WHERE platform = 'custom' AND base_url = ? AND group_label IS NOT NULL
      ORDER BY id LIMIT 1
@@ -108,10 +108,10 @@ export function customEndpointGroup(db: Db, baseUrl: string): string | null {
  * Put the endpoint `keyId` belongs to into `label` (null = back to "Custom"),
  * across its whole key pool. Returns the number of key rows updated.
  */
-export function setCustomEndpointGroup(db: Db, keyId: number, label: string | null): number {
-  const ids = [...customEndpointKeyIds(db, keyId)];
+export async function setCustomEndpointGroup(db: Db, keyId: number, label: string | null): Promise<number> {
+  const ids = [...await customEndpointKeyIds(db, keyId)];
   const placeholders = ids.map(() => '?').join(', ');
-  return db.run( `UPDATE api_keys SET group_label = ? WHERE platform = 'custom' AND id IN (${placeholders})`, [label, ...ids]).changes;
+  return await (await db.run( `UPDATE api_keys SET group_label = ? WHERE platform = 'custom' AND id IN (${placeholders})`, [label, ...ids])).changes;
 }
 
 /**
@@ -128,14 +128,14 @@ export function setCustomEndpointGroup(db: Db, keyId: number, label: string | nu
  * applies when that row really serves this base_url and no new secret was
  * submitted; a new secret still goes through the rules above.
  */
-export function resolveCustomEndpointKey(
+export async function resolveCustomEndpointKey(
   db: Db,
   baseUrl: string,
   providedKey: string | undefined,
   label: string | undefined,
   pinnedKeyId?: number,
-): ResolvedEndpointKey {
-  const rows = endpointKeyRows(db, baseUrl);
+): Promise<ResolvedEndpointKey> {
+  const rows = await endpointKeyRows(db, baseUrl);
   const stored = rows.map(row => ({ row, secret: plaintextOf(row) }));
 
   if (!providedKey) {
@@ -143,14 +143,14 @@ export function resolveCustomEndpointKey(
       ? undefined
       : stored.find(s => s.row.id === pinnedKeyId);
     const first = pinned ?? stored[0];
-    if (!first) return insertKey(db, baseUrl, NO_KEY, label);
-    touch(db, first.row.id, label);
+    if (!first) return await insertKey(db, baseUrl, NO_KEY, label);
+    await touch(db, first.row.id, label);
     return { keyId: first.row.id, storedKey: first.secret ?? NO_KEY, created: false };
   }
 
   const same = stored.find(s => s.secret === providedKey);
   if (same) {
-    touch(db, same.row.id, label);
+    await touch(db, same.row.id, label);
     return { keyId: same.row.id, storedKey: providedKey, created: false };
   }
 
@@ -159,7 +159,7 @@ export function resolveCustomEndpointKey(
   if (stored.length > 0 && stored.every(s => s.secret === NO_KEY)) {
     const target = stored[0]!.row;
     const { encrypted, iv, authTag } = encrypt(providedKey);
-    db.run(`
+    await db.run(`
       UPDATE api_keys
          SET label = COALESCE(?, label), encrypted_key = ?, iv = ?, auth_tag = ?,
              status = 'unknown', enabled = 1
@@ -168,14 +168,14 @@ export function resolveCustomEndpointKey(
     return { keyId: target.id, storedKey: providedKey, created: false };
   }
 
-  return insertKey(db, baseUrl, providedKey, label);
+  return await insertKey(db, baseUrl, providedKey, label);
 }
 
 /** True when this endpoint already stores this exact secret. Lets a caller tell
  *  a genuinely new credential from a re-submit of one already in the pool, which
  *  `resolveCustomEndpointKey` deliberately treats the same way. */
-export function endpointHasCredential(db: Db, baseUrl: string, secret: string): boolean {
-  return endpointKeyRows(db, baseUrl).some(row => plaintextOf(row) === secret);
+export async function endpointHasCredential(db: Db, baseUrl: string, secret: string): Promise<boolean> {
+  return await (await endpointKeyRows(db, baseUrl)).some(row => plaintextOf(row) === secret);
 }
 
 /**
@@ -183,11 +183,11 @@ export function endpointHasCredential(db: Db, baseUrl: string, secret: string): 
  * credential pool a model bound to `keyId` may rotate across. Falls back to the
  * key itself when the row is gone or carries no base_url.
  */
-export function customEndpointKeyIds(db: Db, keyId: number): Set<number> {
-  const row = db.get("SELECT base_url FROM api_keys WHERE id = ?", [keyId]) as
+export async function customEndpointKeyIds(db: Db, keyId: number): Promise<Set<number>> {
+  const row = await db.get("SELECT base_url FROM api_keys WHERE id = ?", [keyId]) as
     { base_url: string | null } | undefined;
   if (!row?.base_url) return new Set([keyId]);
-  const siblings = db.all("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ?", [row.base_url]) as { id: number }[];
+  const siblings = await db.all("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ?", [row.base_url]) as { id: number }[];
   return new Set(siblings.map(s => s.id));
 }
 
@@ -196,9 +196,9 @@ export function customEndpointKeyIds(db: Db, keyId: number): Set<number> {
  * it was the last one. Used to re-home an endpoint's models instead of deleting
  * them with the key.
  */
-export function siblingEndpointKeyId(db: Db, keyId: number, baseUrl: string | null): number | null {
+export async function siblingEndpointKeyId(db: Db, keyId: number, baseUrl: string | null): Promise<number | null> {
   if (!baseUrl) return null;
-  const row = db.get(`
+  const row = await db.get(`
     SELECT id FROM api_keys
      WHERE platform = 'custom' AND base_url = ? AND id != ?
      ORDER BY id LIMIT 1
@@ -224,8 +224,8 @@ export interface CustomEndpointCredential {
  * so an unattended pass must not keep polling it and registering new (enabled)
  * model rows behind the operator's back.
  */
-export function listCustomEndpoints(db: Db): CustomEndpointCredential[] {
-  const rows = db.all(`
+export async function listCustomEndpoints(db: Db): Promise<CustomEndpointCredential[]> {
+  const rows = await db.all(`
     SELECT base_url, id, encrypted_key, iv, auth_tag
       FROM api_keys
      WHERE platform = 'custom' AND base_url IS NOT NULL AND enabled = 1

@@ -116,9 +116,9 @@ export interface RoutingOverrideDrift {
  * right. The malformed-JSON and bad-multiplier halves need no catalog and
  * always run.
  */
-export function warnOnRoutingOverrideDrift(
+export async function warnOnRoutingOverrideDrift(
   logger: Pick<Console, 'warn'> = console,
-): RoutingOverrideDrift | null {
+): Promise<RoutingOverrideDrift | null> {
   const raw = process.env.MODEL_ROUTING_OVERRIDES;
   if (raw === undefined || raw.trim() === '') return null;
 
@@ -159,9 +159,9 @@ export function warnOnRoutingOverrideDrift(
       // Read-only, and gated on a completed sync: before the first one the
       // models table is just the migration seed, so "unknown" would mean
       // "not seeded yet" rather than "wrong".
-      if (getSetting(CATALOG_LAST_SYNC_SETTING)) {
+      if (await getSetting(CATALOG_LAST_SYNC_SETTING)) {
         const known = new Set(
-          (getDb().all('SELECT DISTINCT model_id FROM models') as { model_id: string }[])
+          (await getDb().all('SELECT DISTINCT model_id FROM models') as { model_id: string }[])
             .map(r => r.model_id),
         );
         for (const modelId of accepted.keys()) {

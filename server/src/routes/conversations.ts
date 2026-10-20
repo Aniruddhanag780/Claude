@@ -128,8 +128,8 @@ function parseMessages(json: string): unknown[] {
   }
 }
 
-function getConversation(id: number): ConversationRow | undefined {
-  return getDb().get('SELECT * FROM playground_conversations WHERE id = ?', [id]) as ConversationRow | undefined;
+async function getConversation(id: number): Promise<ConversationRow | undefined> {
+  return await getDb().get('SELECT * FROM playground_conversations WHERE id = ?', [id]) as ConversationRow | undefined;
 }
 
 function parseId(req: Request, res: Response): number | null {
@@ -170,8 +170,8 @@ function serialiseMessages(messages: unknown[], res: Response): string | null {
 // small no matter how long the conversations are. json_array_length reads the
 // count straight out of the stored blob (SQLite's JSON1, present in both the
 // better-sqlite3 and node:sqlite drivers) instead of parsing every transcript.
-conversationsRouter.get('/', (_req: Request, res: Response) => {
-  const rows = getDb().all(`
+conversationsRouter.get('/', async (_req: Request, res: Response) => {
+  const rows = await getDb().all(`
     SELECT id,
            title,
            model,
@@ -191,15 +191,15 @@ conversationsRouter.get('/', (_req: Request, res: Response) => {
   })));
 });
 
-conversationsRouter.get('/:id', (req: Request, res: Response) => {
+conversationsRouter.get('/:id', async (req: Request, res: Response) => {
   const id = parseId(req, res);
   if (id === null) return;
-  const row = getConversation(id);
+  const row = await getConversation(id);
   if (!row) return notFound(res);
   res.json(toJson(row));
 });
 
-conversationsRouter.post('/', (req: Request, res: Response) => {
+conversationsRouter.post('/', async (req: Request, res: Response) => {
   const parsed = createSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
     res.status(400).json({ error: { message: 'Invalid conversation' } });
@@ -209,15 +209,15 @@ conversationsRouter.post('/', (req: Request, res: Response) => {
   if (messagesJson === null) return;
 
   const now = Date.now();
-  const info = getDb().run(`
+  const info = await getDb().run(`
     INSERT INTO playground_conversations
       (title, messages_json, model, system_prompt, created_at_ms, updated_at_ms)
     VALUES (?, ?, ?, ?, ?, ?) RETURNING id
   `, [parsed.data.title ?? '', messagesJson, parsed.data.model ?? null, parsed.data.systemPrompt ?? null, now, now]);
-  res.status(201).json(toJson(getConversation(Number(info.lastInsertRowid))!));
+  res.status(201).json(toJson((await getConversation(Number(info.lastInsertRowid)))!));
 });
 
-conversationsRouter.put('/:id', (req: Request, res: Response) => {
+conversationsRouter.put('/:id', async (req: Request, res: Response) => {
   const id = parseId(req, res);
   if (id === null) return;
   const parsed = updateSchema.safeParse(req.body ?? {});
@@ -225,7 +225,7 @@ conversationsRouter.put('/:id', (req: Request, res: Response) => {
     res.status(400).json({ error: { message: 'Invalid conversation update' } });
     return;
   }
-  const row = getConversation(id);
+  const row = await getConversation(id);
   if (!row) return notFound(res);
 
   const { title, messages, model, systemPrompt } = parsed.data;
@@ -237,18 +237,18 @@ conversationsRouter.put('/:id', (req: Request, res: Response) => {
   // One statement for the whole conversation: title, transcript, model and
   // system prompt always move together, so a save can never leave a row half
   // updated (the transcript of one exchange under the title of another).
-  getDb().run(`
+  await getDb().run(`
     UPDATE playground_conversations
        SET title = ?, messages_json = ?, model = ?, system_prompt = ?, updated_at_ms = ?
      WHERE id = ?
   `, [title ?? row.title, messagesJson, model === undefined ? row.model : model, systemPrompt === undefined ? row.system_prompt : systemPrompt, Date.now(), id]);
-  res.json(toJson(getConversation(id)!));
+  res.json(toJson((await getConversation(id))!));
 });
 
-conversationsRouter.delete('/:id', (req: Request, res: Response) => {
+conversationsRouter.delete('/:id', async (req: Request, res: Response) => {
   const id = parseId(req, res);
   if (id === null) return;
-  const info = getDb().run('DELETE FROM playground_conversations WHERE id = ?', [id]);
+  const info = await getDb().run('DELETE FROM playground_conversations WHERE id = ?', [id]);
   if (info.changes === 0) return notFound(res);
   res.json({ success: true });
 });

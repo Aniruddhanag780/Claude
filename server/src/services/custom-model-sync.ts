@@ -72,7 +72,7 @@ export interface CustomModelSyncResult {
 /** Sync every configured custom endpoint once. Exported so tests (and an admin
  *  that wants a manual pass) can run it directly without waiting for the timer. */
 export async function runCustomModelSync(db: Db): Promise<CustomModelSyncResult> {
-  const endpoints = listCustomEndpoints(db);
+  const endpoints = await listCustomEndpoints(db);
   const result: CustomModelSyncResult = { endpoints: endpoints.length, added: 0, skipped: 0, paidSkipped: 0, tombstoned: 0, nonChatSkipped: 0, failures: [] };
 
   for (const endpoint of endpoints) {
@@ -85,7 +85,7 @@ export async function runCustomModelSync(db: Db): Promise<CustomModelSyncResult>
 
       const scope = endpointScopeForBaseUrl(endpoint.baseUrl);
       const registeredIds = new Set(
-        (db.all("SELECT model_id FROM models WHERE platform = 'custom' AND endpoint_scope = ?", [scope]) as { model_id: string }[])
+        (await db.all("SELECT model_id FROM models WHERE platform = 'custom' AND endpoint_scope = ?", [scope]) as { model_id: string }[])
           .map(row => row.model_id),
       );
 
@@ -99,7 +99,7 @@ export async function runCustomModelSync(db: Db): Promise<CustomModelSyncResult>
         // #926: the operator deleted this model (or the key that owned it) and
         // expects it to stay gone. The sync's "add only" contract must not turn
         // a deliberate deletion into the next pass's "new model".
-        if (isCustomModelTombstoned(db, scope, model.id)) {
+        if (await isCustomModelTombstoned(db, scope, model.id)) {
           result.tombstoned += 1;
           continue;
         }
@@ -124,7 +124,7 @@ export async function runCustomModelSync(db: Db): Promise<CustomModelSyncResult>
       }
 
       if (fresh.length > 0) {
-        const registered = registerCustomModels(db, endpoint.baseUrl, undefined, undefined, endpoint.keyId, fresh);
+        const registered = await registerCustomModels(db, endpoint.baseUrl, undefined, undefined, endpoint.keyId, fresh);
         result.added += registered.registered.filter(m => m.created).length;
       }
     } catch (err: any) {

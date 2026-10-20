@@ -77,7 +77,7 @@ describe('ACLIDE Responses adapter', () => {
     { status: 'failed', error: { message: 'outage' } },
     { output: [{ type: 'function_call', name: 'missing_call_id' }] },
     { status: 'incomplete', incomplete_details: { reason: 'unknown' } },
-  ])('rejects invalid/empty/substituted responses: %j', async override => {
+  ])('rejects invalid/empty/substituted responses: %j', override async => {
     vi.spyOn(global, 'fetch').mockResolvedValue(json({ ...completed(), ...override }));
     await expect(new AclideProvider().chatCompletion('k', messages, model)).rejects.toMatchObject({ status: 502 });
   });

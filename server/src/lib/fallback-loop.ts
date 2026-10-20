@@ -92,7 +92,7 @@ const modelFailureTimestamps = new Map<number, number[]>(); // model_db_id → t
  *  holds ≥ MODEL_FAILURE_THRESHOLD failures, bench the model on EVERY key that
  *  can route to it so the model sinks out of routing until upstream heals, then
  *  reset the counter (one bench per streak). */
-function noteModelFailure(route: RouteResult, now: number): void {
+async function noteModelFailure(route: RouteResult, now: number): Promise<void> {
   const window = (modelFailureTimestamps.get(route.modelDbId) ?? [])
     .filter(t => now - t < MODEL_FAILURE_WINDOW_MS);
   window.push(now);
@@ -100,10 +100,10 @@ function noteModelFailure(route: RouteResult, now: number): void {
   if (window.length < MODEL_FAILURE_THRESHOLD) return;
   // Fall back to the failing key alone when the model's key set can't be read
   // (model row gone, DB unavailable) — a narrower bench beats none.
-  const keyIds = routableKeyIdsForModel(route.modelDbId);
+  const keyIds = await routableKeyIdsForModel(route.modelDbId);
   const targets = keyIds.length > 0 ? keyIds : [route.keyId];
   const benchUntil = now + MODEL_FAILURE_COOLDOWN_MS;
-  const active = getActiveCooldownsForKeys(targets, now);
+  const active = await getActiveCooldownsForKeys(targets, now);
   for (const keyId of targets) {
     // Never SHORTEN an existing bench: a provider-stated reset or an escalated
     // ladder step outlasting this window knows more than this heuristic does,
@@ -130,16 +130,16 @@ function clearModelFailure(route: RouteResult): void {
  *  Never throws: an unreadable catalog leaves the narrower per-route bench in
  *  place.
  */
-function benchKeyAcrossPlatform(
+async function benchKeyAcrossPlatform(
   route: RouteResult,
   durationMs: number,
   source: CooldownSource,
   state: FallbackState,
   reason: string,
-): void {
+): Promise<void> {
   let modelIds: string[] = [];
   try {
-    modelIds = (getDb().all('SELECT model_id FROM models WHERE platform = ? AND enabled = 1 AND (key_id IS NULL OR key_id = ?)', [route.platform, route.keyId]) as { model_id: string }[]).map(r => r.model_id);
+    modelIds = (await getDb().all('SELECT model_id FROM models WHERE platform = ? AND enabled = 1 AND (key_id IS NULL OR key_id = ?)', [route.platform, route.keyId]) as { model_id: string }[]).map(r => r.model_id);
   } catch (dbErr: any) {
     console.warn(`[FallbackLoop] could not list ${route.platform} models to bench key ${route.keyId}: ${dbErr?.message ?? dbErr}`);
     return;
@@ -178,10 +178,10 @@ export const DEFAULT_FALLBACK_TIME_BUDGET_MS = 45_000;
 export const HEDGE_BENCH_MIN_SILENT_FRACTION = 0.75;
 export const FALLBACK_TIME_BUDGET_SETTING = 'fallback_time_budget_ms';
 
-export function getFallbackTimeBudgetMs(): number {
+export async function getFallbackTimeBudgetMs(): Promise<number> {
   let stored: string | undefined;
   try {
-    stored = getSetting(FALLBACK_TIME_BUDGET_SETTING);
+    stored = await getSetting(FALLBACK_TIME_BUDGET_SETTING);
   } catch {
     stored = undefined; // DB not ready — never throw on the proxy hot path
   }
@@ -296,8 +296,8 @@ export function msUntilNextPacificMidnight(now = Date.now()): number {
  *   - anything else → the transient/daily escalation ladder, honoring the
  *     provider's Retry-After as a floor (getCooldownDurationForLimit).
  */
-export function cooldownForError(route: RouteResult, err: any): number {
-  return cooldownDecisionForError(route, err).durationMs;
+export async function cooldownForError(route: RouteResult, err: any): Promise<number> {
+  return await (await cooldownDecisionForError(route, err)).durationMs;
 }
 
 /**
@@ -310,13 +310,13 @@ export function cooldownForError(route: RouteResult, err: any): number {
  * getCooldownDecisionForLimit, which tags 'authoritative' only when an explicit
  * Retry-After actually determined the expiry.
  */
-export function cooldownDecisionForError(route: RouteResult, err: any): CooldownDecision {
-  if (isPaymentRequiredError(err)) return { durationMs: getPaymentRequiredCooldownMs(), source: 'credit' };
+export async function cooldownDecisionForError(route: RouteResult, err: any): Promise<CooldownDecision> {
+  if (isPaymentRequiredError(err)) return { durationMs: await getPaymentRequiredCooldownMs(), source: 'credit' };
   // Before the model-forbidden check: a suspended account is a 403 too, but
   // it is the KEY that is out, for as long as an empty balance would be — and
   // under the same operator ceiling (#952).
-  if (isAccountSuspendedError(err)) return { durationMs: getPaymentRequiredCooldownMs(), source: 'credit' };
-  if (isModelAccessForbiddenError(err)) return { durationMs: getModelForbiddenCooldownMs(), source: 'tier' };
+  if (isAccountSuspendedError(err)) return { durationMs: await getPaymentRequiredCooldownMs(), source: 'credit' };
+  if (isModelAccessForbiddenError(err)) return { durationMs: await getModelForbiddenCooldownMs(), source: 'tier' };
   if (isDailyQuotaExhaustedError(err)) {
     if (route.platform === 'google') {
       // RetryInfo can describe a simultaneous per-minute violation. It cannot
@@ -325,7 +325,7 @@ export function cooldownDecisionForError(route: RouteResult, err: any): Cooldown
     }
     return { durationMs: err?.retryAfterMs ?? msUntilNextUtcMidnight(), source: 'authoritative' };
   }
-  return getCooldownDecisionForLimit(
+  return await getCooldownDecisionForLimit(
     route.platform,
     route.modelId,
     route.keyId,
@@ -435,7 +435,7 @@ function consumeSkipBenchExemption(route: RouteResult, err: any): boolean {
  *
  * Callers add the just-failed key to skipKeys via this function (do not pre-add).
  */
-export function recordRetryableFailure(route: RouteResult, err: any, state: FallbackState, now: number = Date.now()): boolean {
+export async function recordRetryableFailure(route: RouteResult, err: any, state: FallbackState, now: number = Date.now()): Promise<boolean> {
   // `skipModelForRequest: true` = the failure is MODEL behavior, not key
   // state (ignored response_format, JSON truncated at max_tokens): a sibling
   // key would reproduce it exactly, so rule out the whole model for this
@@ -470,7 +470,7 @@ export function recordRetryableFailure(route: RouteResult, err: any, state: Fall
   // or the retired model burns a fallback slot on every request forever (#634).
   // The trace object identifies the request, so one request's failover across
   // sibling keys counts as the single observation it is.
-  noteModelRetirementSignal(route, err, getRequestTrace());
+  await noteModelRetirementSignal(route, err, getRequestTrace());
   // Provider-reported request size (#507): if the just-failed attempt was a
   // size-related rejection that names the request's real token count, latch it
   // onto the request state. The route() closure on the next attempt picks it
@@ -507,8 +507,8 @@ export function recordRetryableFailure(route: RouteResult, err: any, state: Fall
   // turn (Claude Code ships ~16k tokens of tool schemas) sink every small-TPM
   // model it touched, so later ordinary requests found the pool rate limited.
   if (isContextTooLargeError(err)) {
-    learnLimitFromError(route.modelDbId, err);
-    learnContextWindowFromError(route.modelDbId, err);
+    await learnLimitFromError(route.modelDbId, err);
+    await learnContextWindowFromError(route.modelDbId, err);
     return false;
   }
   // A max_tokens above this model's output ceiling (Claude Code asks for
@@ -529,7 +529,7 @@ export function recordRetryableFailure(route: RouteResult, err: any, state: Fall
     return false;
   }
   if (consumeSkipBenchExemption(route, err)) return true;
-  const decision = cooldownDecisionForError(route, err);
+  const decision = await cooldownDecisionForError(route, err);
   setCooldown(route.platform, route.modelId, route.keyId, decision.durationMs, decision.source);
   // A truncated stream (200 + partial SSE, no [DONE]/finish_reason) on the
   // SAME route repeatedly is a sick edge, not bad luck — but a single one is
@@ -577,7 +577,7 @@ export function recordRetryableFailure(route: RouteResult, err: any, state: Fall
   // the next PROVIDER is the better hop.
   if (isAccountSuspendedError(err)) {
     state.skipPlatforms.add(route.platform);
-    benchKeyAcrossPlatform(route, decision.durationMs, decision.source, state, 'reports the account suspended');
+    await benchKeyAcrossPlatform(route, decision.durationMs, decision.source, state, 'reports the account suspended');
   } else if (isPaymentRequiredError(err)) {
     // A 402 is the ACCOUNT's balance, not one model's (#1239: one broke
     // HuggingFace key answered three different models with 402 in a single
@@ -585,22 +585,22 @@ export function recordRetryableFailure(route: RouteResult, err: any, state: Fall
     // the key on every model of the platform for the credit window. Unlike a
     // suspension the platform itself stays in play: a sibling key is a
     // different wallet and may well have credits, so only THIS key is out.
-    benchKeyAcrossPlatform(route, decision.durationMs, decision.source, state, 'is out of credits (402)');
+    await benchKeyAcrossPlatform(route, decision.durationMs, decision.source, state, 'is out of credits (402)');
   }
   // #1347 (PR 1): a provider-moment failure (429 / 5xx / timeout / transport)
   // is the provider's bad minute, not model evidence. When attribution is
   // enabled it still steers the key via the cooldown above, but leaves the
   // model's books (failure window, penalties) untouched — so one slow minute
   // stops sinking a healthy model out of routing.
-  const providerMoment = isProviderMomentAttributionEnabled() && isProviderMomentFailure(err);
+  const providerMoment = await isProviderMomentAttributionEnabled() && isProviderMomentFailure(err);
   if (!providerMoment) {
     // Model-level failure benching: a model failing across keys (or repeatedly
     // on one key) must sink out of routing instead of being re-picked every
     // request.
-    noteModelFailure(route, now);
+    await noteModelFailure(route, now);
   }
   // Model-level penalty only when no sibling key can still serve (#454).
-  if (!providerMoment && !hasOtherUsableKey(route.modelDbId, route.keyId, state.skipKeys)) {
+  if (!providerMoment && !await hasOtherUsableKey(route.modelDbId, route.keyId, state.skipKeys)) {
     // Hard limit signals (429/402) carry the heavier demotion; ordinary
     // upstream failures (5xx/timeout/empty stream) get a lighter one so the
     // model sinks gradually instead of being banished on a single blip.
@@ -610,7 +610,7 @@ export function recordRetryableFailure(route: RouteResult, err: any, state: Fall
       recordModelFailure(route.modelDbId);
     }
   }
-  learnLimitFromError(route.modelDbId, err);
+  await learnLimitFromError(route.modelDbId, err);
   return false;
 }
 
@@ -629,13 +629,13 @@ export const AUTH_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 const REVALIDATION_DEDUPE_MS = 30_000;
 const lastRevalidation = new Map<number, number>();
 
-function triggerKeyRevalidation(platform: string, keyId: number): void {
+async function triggerKeyRevalidation(platform: string, keyId: number): Promise<void> {
   const now = Date.now();
   const last = lastRevalidation.get(keyId) ?? 0;
   if (now - last < REVALIDATION_DEDUPE_MS) return;
   lastRevalidation.set(keyId, now);
   console.warn(`[FallbackLoop] Upstream 401 from ${platform} key ${keyId}; revalidating it now instead of waiting for the health cycle`);
-  void checkKeyHealth(keyId).catch(err => {
+  void await checkKeyHealth(keyId).catch(err => {
     console.error(`[FallbackLoop] Immediate revalidation of key ${keyId} failed:`, err?.message);
   });
 }
@@ -646,10 +646,10 @@ function triggerKeyRevalidation(platform: string, keyId: number): void {
  * immediate revalidation. Deliberately NO model penalty and NO limit-learning —
  * a bad key says nothing about the model's health.
  */
-export function recordAuthFailure(route: RouteResult, state: FallbackState): void {
+export async function recordAuthFailure(route: RouteResult, state: FallbackState): Promise<void> {
   state.skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
   setCooldown(route.platform, route.modelId, route.keyId, AUTH_FAILURE_COOLDOWN_MS);
-  triggerKeyRevalidation(route.platform, route.keyId);
+  await triggerKeyRevalidation(route.platform, route.keyId);
 }
 
 /**
@@ -658,7 +658,7 @@ export function recordAuthFailure(route: RouteResult, state: FallbackState): voi
  * clear the model's 429 penalty. `rateLimitTokens` is whatever the surface metered
  * (the provider's usage.total_tokens for non-stream, an estimate for stream).
  */
-export function recordUpstreamSuccess(route: RouteResult, rateLimitTokens: number, state?: FallbackState): void {
+export async function recordUpstreamSuccess(route: RouteResult, rateLimitTokens: number, state?: FallbackState): Promise<void> {
   // A tool-carrying request that was served proves two things (#1230): this
   // model does handle tools, and the request itself was well-formed, so the
   // models that answered it with a 400 earlier in this chain are the ones at
@@ -668,8 +668,8 @@ export function recordUpstreamSuccess(route: RouteResult, rateLimitTokens: numbe
     clearToolRejections(winner);
     for (const tk of state.toolRejects ?? []) if (tk !== winner) benchForTools(tk);
   }
-  recordRequest(route.platform, route.modelId, route.keyId);
-  recordTokens(route.platform, route.modelId, route.keyId, rateLimitTokens);
+  await recordRequest(route.platform, route.modelId, route.keyId);
+  await recordTokens(route.platform, route.modelId, route.keyId, rateLimitTokens);
   recordSuccess(route.modelDbId);
   // A served request proves the model+key can complete: the empty-completion
   // streak (#751) starts over.
@@ -683,7 +683,7 @@ export function recordUpstreamSuccess(route: RouteResult, rateLimitTokens: numbe
   // A served request is the strongest possible evidence the key works, so clear
   // any stale 'error' status left by an earlier transport blip instead of waiting
   // for the next health pass to make the key routable again.
-  markKeyHealthyFromRequest(route.keyId);
+  await markKeyHealthyFromRequest(route.keyId);
 }
 
 // ── Attempt trail ─────────────────────────────────────────────────────────────
@@ -767,10 +767,10 @@ const DETAIL_HEADER_MAX_LENGTH = 2048;
 // hops still fit. The full text remains in request_attempts either way.
 const DETAIL_SUMMARY_MAX_LENGTH = 120;
 
-export function isFallbackDetailHeaderEnabled(): boolean {
+export async function isFallbackDetailHeaderEnabled(): Promise<boolean> {
   let stored: string | undefined;
   try {
-    stored = getSetting(EXPOSE_FALLBACK_DETAIL_SETTING);
+    stored = await getSetting(EXPOSE_FALLBACK_DETAIL_SETTING);
   } catch {
     stored = undefined; // DB not ready — never throw on the proxy hot path
   }
@@ -837,11 +837,11 @@ export function formatAttemptTrail(attempts: AttemptRecord[]): string {
  * res.json(), or after the whole stream has finished — so its duration is not
  * knowable while headers are still open, on either path.
  */
-export function setFallbackHeaders(
+export async function setFallbackHeaders(
   res: { setHeader(name: string, value: string): void },
   failedAttempts: number,
   trail: AttemptRecord[] | undefined,
-): void {
+): Promise<void> {
   if (failedAttempts > 0) res.setHeader('X-Fallback-Attempts', String(failedAttempts));
   if (trail && trail.length > 0) {
     const value = trail
@@ -856,7 +856,7 @@ export function setFallbackHeaders(
   // Checked before the setting so the overwhelmingly common no-failover request
   // never pays for a settings read.
   const records = getRequestTrace()?.records;
-  if (records && records.length > 0 && isFallbackDetailHeaderEnabled()) {
+  if (records && records.length > 0 && await isFallbackDetailHeaderEnabled()) {
     res.setHeader('X-Fallback-Detail', safeHeaderValue(formatAttemptDetail(records), DETAIL_HEADER_MAX_LENGTH));
   }
 }
@@ -960,7 +960,7 @@ const UNAVAILABLE_UNTIL_KNOWN_TIME: ReadonlySet<AttemptErrorClass> = new Set([
  * All bodies carry the attempt trail (what was tried, per attempt) and, where
  * meaningful, the soonest-cooldown-reset hint.
  */
-export function exhaustedRetryError(lastError: any, maxRetries?: number, ctx?: ExhaustionContext): ExhaustionBody {
+export async function exhaustedRetryError(lastError: any, maxRetries?: number, ctx?: ExhaustionContext): Promise<ExhaustionBody> {
   const safeLastError = sanitizeProviderErrorMessage(lastError?.message);
   const attempts = ctx?.attempts ?? [];
   const trail = attempts.length > 0 ? ` Attempt trail: ${formatAttemptTrail(attempts)}.` : '';
@@ -1044,7 +1044,7 @@ export function exhaustedRetryError(lastError: any, maxRetries?: number, ctx?: E
   // Circuit-breaker guardrail stop. Checked after the aggregate and bad-request
   // diagnoses, which are more specific about WHY the pool is failing.
   if (ctx?.breakerFails) {
-    const breakerEta = formatResetEta(getSoonestCooldownExpiry());
+    const breakerEta = formatResetEta(await getSoonestCooldownExpiry());
     const breakerEtaNote = breakerEta ? ` Soonest cooldown reset ${breakerEta}.` : '';
     return {
       kind: 'unavailable',
@@ -1065,7 +1065,7 @@ export function exhaustedRetryError(lastError: any, maxRetries?: number, ctx?: E
     const scope = attemptCount == null
       ? 'All models rate-limited'
       : `All models rate-limited after ${attemptCount} attempt${attemptCount === 1 ? '' : 's'}`;
-    const retryAtMs = getSoonestCooldownExpiry() ?? undefined;
+    const retryAtMs = await getSoonestCooldownExpiry() ?? undefined;
     const eta = formatResetEta(retryAtMs);
     const etaNote = eta ? ` Soonest cooldown reset ${eta}.` : '';
     return {
@@ -1143,7 +1143,7 @@ function classifyRoutingDiagLine(line: string): RoutingDiagClass {
   return 'other';
 }
 
-export function routingExhaustionBody(routeErr: any): ExhaustionBody {
+export async function routingExhaustionBody(routeErr: any): Promise<ExhaustionBody> {
   const diag: string[] = Array.isArray(routeErr?.diagnostics) ? routeErr.diagnostics : [];
   const message: string = routeErr?.message ?? 'No model available to route this request';
   const classes = diag.map(classifyRoutingDiagLine);
@@ -1180,7 +1180,7 @@ export function routingExhaustionBody(routeErr: any): ExhaustionBody {
   }
 
   if (classes.some(c => c === 'time_bound') && classes.every(c => c !== 'other')) {
-    const retryAtMs = getSoonestCooldownExpiry() ?? undefined;
+    const retryAtMs = await getSoonestCooldownExpiry() ?? undefined;
     return {
       kind: 'rate_limit',
       status: 429,
@@ -1293,7 +1293,7 @@ export interface FallbackHooks {
    * Throws the router's RouteError when the pool is exhausted before any
    * upstream is tried (caught by the loop → onRoutingExhausted).
    */
-  route(attempt: number): RouteResult;
+  route(attempt: number): RouteResult | Promise<RouteResult>;
 
   /**
    * Run one attempt against the chosen route. Return 'done' on success or
@@ -1356,15 +1356,15 @@ export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
   // so its trace persists too).
   const trace = newRequestTrace();
   try {
-    await runWithRequestTrace(trace, () => runFallbackLoopAttempts(hooks, trace));
+    await runWithRequestTrace(trace, async () => await runFallbackLoopAttempts(hooks, trace));
   } finally {
-    persistRequestAttempts(trace);
+    await persistRequestAttempts(trace);
   }
 }
 
 async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace): Promise<void> {
   const maxRetries = hooks.maxRetries ?? FALLBACK_MAX_RETRIES;
-  const baseBudgetMs = hooks.timeBudgetMs ?? getFallbackTimeBudgetMs();
+  const baseBudgetMs = hooks.timeBudgetMs ?? await getFallbackTimeBudgetMs();
   const startedAt = Date.now();
   const attempts: AttemptRecord[] = hooks.attemptLog ?? [];
   const keyOrdinals = new Map<string, number>();
@@ -1385,8 +1385,8 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
   // too — a wall of dead keys is exactly the "stop early" case. Within one
   // request every recorded failure is consecutive by construction (a success
   // ends the loop), so this is "max upstream failures per request".
-  const breaker = newBreaker(hooks.breakerLimit);
-  const stopIfBreakerTripped = (): boolean => {
+  const breaker = await newBreaker(hooks.breakerLimit);
+  const stopIfBreakerTripped = async (): Promise<boolean> => {
     if (!recordBreakerFailure(breaker)) return false;
     // Tripped after the client already hung up: stop the chain, but there is
     // no socket to render an exhaustion body to (mirrors the loop-top
@@ -1396,7 +1396,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
       return true;
     }
     hooks.onExhausted(
-      exhaustedRetryError(lastError, maxRetries, { attempts, breakerFails: breaker.consecutive }),
+      await exhaustedRetryError(lastError, maxRetries, { attempts, breakerFails: breaker.consecutive }),
       { attempts, timedOut: false },
     );
     return true;
@@ -1413,20 +1413,20 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
 
     let route: RouteResult;
     try {
-      route = hooks.route(attempt);
+      route = await hooks.route(attempt);
     } catch (routeErr) {
       // With no candidate to supply an endpoint-specific allowance, retain
       // the original timeout diagnosis when the base budget is already spent.
       if (attempt > 1 && baseBudgetMs > 0 && Date.now() - startedAt >= baseBudgetMs) {
         hooks.onExhausted(
-          exhaustedRetryError(lastError, maxRetries, { attempts, timedOut: true, budgetMs: baseBudgetMs }),
+          await exhaustedRetryError(lastError, maxRetries, { attempts, timedOut: true, budgetMs: baseBudgetMs }),
           { attempts, timedOut: true },
         );
         return;
       }
       const exhaustion = lastError
-        ? exhaustedRetryError(lastError, undefined, { attempts })
-        : routingExhaustionBody(routeErr);
+        ? await exhaustedRetryError(lastError, undefined, { attempts })
+        : await routingExhaustionBody(routeErr);
       // Zero attempts ran: log the router's per-candidate disposition, the only
       // record of why the pool was empty. With prior attempts the trail in the
       // exhaustion body already explains the failure.
@@ -1442,13 +1442,13 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
     // the base for every candidate so its allowance cannot leak to a faster
     // endpoint later in the ladder. The clock still starts at loop entry.
     const budgetMs = attempt > 1
-      ? getEndpointTimeBudgetMs(baseBudgetMs, route.platform, route.endpointScope)
+      ? await getEndpointTimeBudgetMs(baseBudgetMs, route.platform, route.endpointScope)
       : baseBudgetMs;
     // Attempt 0 and the first retry remain exempt (#751). Routing reserves a
     // lease, so even a candidate rejected here must pass through finally.
     if (attempt > 1 && budgetMs > 0 && Date.now() - startedAt >= budgetMs) {
       hooks.onExhausted(
-        exhaustedRetryError(lastError, maxRetries, { attempts, timedOut: true, budgetMs }),
+        await exhaustedRetryError(lastError, maxRetries, { attempts, timedOut: true, budgetMs }),
         { attempts, timedOut: true },
       );
       return;
@@ -1514,7 +1514,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
       // otherwise the global proxy / direct path applies as before. The URL
       // arrives already decrypted on the route (services/router.ts), so an
       // attempt costs nothing extra — no query, no decrypt.
-      outcome = await withKeyProxy(route.proxyUrl, () => hooks.dispatch(route, attempt, { disarmHedge }));
+      outcome = await withKeyProxy(route.proxyUrl, async () => await hooks.dispatch(route, attempt, { disarmHedge }));
     } catch (err: any) {
       // Client-caused abort: the composed fetch signal fired because OUR
       // client hung up mid-attempt (see newClientAbortError). Not a
@@ -1530,7 +1530,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
         // Status 'canceled' is neither success nor failure — every stats/
         // scoring query excludes it — and this row is also the parent the
         // attempt-trace batch below keys to.
-        logRequest(route.platform, route.modelId, route.keyId, 'canceled', 0, 0, elapsedMs,
+        await logRequest(route.platform, route.modelId, route.keyId, 'canceled', 0, 0, elapsedMs,
           `client disconnected after ${(elapsedMs / 1000).toFixed(1)}s; upstream request canceled`);
         traceAttempt('client_abort');
         return;
@@ -1561,11 +1561,11 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
           && attemptElapsedMs >= budgetMs * HEDGE_BENCH_MIN_SILENT_FRACTION;
         if (ownedWholeBudget) {
           hooks.logFailure(route, err, attempt);
-          recordRetryableFailure(route, err, hooks.state);
+          await recordRetryableFailure(route, err, hooks.state);
         }
         console.log(`[FallbackLoop] retry time budget expired mid-attempt on ${route.platform}/${route.modelId} after ${(elapsedMs / 1000).toFixed(1)}s — rendering timedOut exhaustion ${ownedWholeBudget ? `and benching the route (silent for the whole ${budgetMs}ms budget)` : 'without benching'}`);
         hooks.onExhausted(
-          exhaustedRetryError(lastError, maxRetries, { attempts, timedOut: true, budgetMs }),
+          await exhaustedRetryError(lastError, maxRetries, { attempts, timedOut: true, budgetMs }),
           { attempts, timedOut: true },
         );
         traceAttempt('timeout', err);
@@ -1575,15 +1575,15 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
       if (isKeyAuthError(err)) {
         // KEY-fatal, not request-fatal: rotate past the bad key and revalidate
         // it immediately instead of 502-ing while healthy routes sit idle.
-        recordAuthFailure(route, hooks.state);
+        await recordAuthFailure(route, hooks.state);
         attempts.push({ platform: route.platform, modelId: route.modelId, keyOrdinal: keyOrdinal(route), errorClass: 'auth' });
         traceAttempt('auth', err);
         lastError = err;
-        if (stopIfBreakerTripped()) return;
+        if (await stopIfBreakerTripped()) return;
         continue;
       }
       if (isRetryableError(err)) {
-        const exempt = recordRetryableFailure(route, err, hooks.state);
+        const exempt = await recordRetryableFailure(route, err, hooks.state);
         // An in-band provider error that arrives only after the attempt has
         // silently consumed most of the operator's whole budget (#1218 Gap 3:
         // nvidia ran 140.7s before surfacing "Service temporarily overloaded",
@@ -1614,7 +1614,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
         // either: three prose answers to a json_schema request say nothing
         // about whether candidate four is up. Once the empty-completion streak
         // lifts the exemption (#751), the failure counts everywhere.
-        if (!exempt && stopIfBreakerTripped()) return;
+        if (!exempt && await stopIfBreakerTripped()) return;
         continue;
       }
       traceAttempt(classifyAttemptError(err), err);
@@ -1652,7 +1652,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
   }
 
   hooks.onExhausted(
-    exhaustedRetryError(lastError, maxRetries, { attempts }),
+    await exhaustedRetryError(lastError, maxRetries, { attempts }),
     { attempts, timedOut: false },
   );
 }

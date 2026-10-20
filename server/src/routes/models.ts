@@ -80,8 +80,8 @@ function dbValue(key: keyof typeof MODEL_FIELD_COLUMNS, value: unknown): unknown
   return value;
 }
 
-function fetchModelRow(id: number): ModelRow | undefined {
-  return getDb().get('SELECT id, platform, model_id, key_id, source FROM models WHERE id = ?', [id]) as ModelRow | undefined;
+async function fetchModelRow(id: number): Promise<ModelRow | undefined> {
+  return await getDb().get('SELECT id, platform, model_id, key_id, source FROM models WHERE id = ?', [id]) as ModelRow | undefined;
 }
 
 const createModelSchema = z.object({
@@ -99,7 +99,7 @@ const createModelSchema = z.object({
   endpointScope: z.string().nullable().optional(),
 }).strict();
 
-modelsRouter.post('/', (req: Request, res: Response) => {
+modelsRouter.post('/', async (req: Request, res: Response) => {
   const parsed = createModelSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -117,7 +117,7 @@ modelsRouter.post('/', (req: Request, res: Response) => {
   let endpointScope = '';
   const boundKeyId: number | null = data.keyId ?? null;
   if (data.platform === 'custom') {
-    endpointScope = endpointScopeOfKey(db, boundKeyId);
+    endpointScope = await endpointScopeOfKey(db, boundKeyId);
     if (!endpointScope) {
       res.status(400).json({ error: { message: 'Select an existing custom endpoint key for this model' } });
       return;
@@ -131,24 +131,24 @@ modelsRouter.post('/', (req: Request, res: Response) => {
     return;
   }
 
-  const existing = db.get('SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ?', [data.platform, data.modelId, endpointScope]) as { id: number } | undefined;
+  const existing = await db.get('SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ?', [data.platform, data.modelId, endpointScope]) as { id: number } | undefined;
 
   if (existing) {
     res.status(409).json({ error: { message: `Model "${data.modelId}" already exists for platform "${data.platform}"` } });
     return;
   }
 
-  const seed = customModelSeed(db);
+  const seed = await customModelSeed(db);
 
-  const insertModel = db.transaction(() => {
+  const insertModel = await db.transaction(async (tx) => {
     // Clear any tombstone so manual re-creation brings the model back into active state
     if (data.platform === 'custom') {
-      clearCustomModelTombstone(db, endpointScope, data.modelId);
+      await clearCustomModelTombstone(db, endpointScope, data.modelId);
     } else {
-      clearCatalogModelTombstone(db, 'chat', data.platform, data.modelId);
+      await clearCatalogModelTombstone(db, 'chat', data.platform, data.modelId);
     }
 
-    const info = db.run(`
+    const info = await tx.run(`
       INSERT INTO models (
         platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
         rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
@@ -162,17 +162,17 @@ modelsRouter.post('/', (req: Request, res: Response) => {
 
     const modelDbId = Number(info.lastInsertRowid);
 
-    const inChain = db.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [modelDbId]);
+    const inChain = await tx.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [modelDbId]);
     if (!inChain) {
-      const max = db.get('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config') as { m: number };
-      db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)', [modelDbId, max.m + 1]);
+      const max = await tx.get('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config') as { m: number };
+      await tx.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)', [modelDbId, max.m + 1]);
     }
-    ensureModelInProfiles(db, modelDbId);
+    await ensureModelInProfiles(db, modelDbId);
 
     return modelDbId;
   });
 
-  const createdId = insertModel();
+  const createdId = insertModel;
 
   res.status(201).json({
     success: true,
@@ -197,7 +197,7 @@ modelsRouter.post('/', (req: Request, res: Response) => {
   });
 });
 
-modelsRouter.delete('/custom/:id', (req: Request, res: Response) => {
+modelsRouter.delete('/custom/:id', async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) {
     res.status(400).json({ error: { message: 'Invalid id' } });
@@ -205,27 +205,26 @@ modelsRouter.delete('/custom/:id', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = db.get("SELECT id, key_id, model_id FROM models WHERE id = ? AND platform = 'custom'", [id]) as { id: number; key_id: number | null; model_id: string } | undefined;
+  const row = await db.get("SELECT id, key_id, model_id FROM models WHERE id = ? AND platform = 'custom'", [id]) as { id: number; key_id: number | null; model_id: string } | undefined;
   if (!row) {
     res.status(404).json({ error: { message: `Unknown custom model ${id}` } });
     return;
   }
 
-  const remove = db.transaction(() => {
+  await db.transaction(async (tx) => {
     // #926: keep this deletion across the scheduled custom-model sync, or the
     // next daily pass re-registers a model the operator removed on purpose.
-    recordCustomModelTombstone(db, endpointScopeOfKey(db, row.key_id), row.model_id);
-    db.run('DELETE FROM fallback_config WHERE model_db_id = ?', [id]);
-    db.run('DELETE FROM profile_models WHERE model_db_id = ?', [id]);
-    db.run("DELETE FROM models WHERE id = ? AND platform = 'custom'", [id]);
-    deleteUnusedCustomEndpointKey(db, row.key_id);
-    pruneUnavailableSavedFusionConfig();
+    await recordCustomModelTombstone(db, await endpointScopeOfKey(db, row.key_id), row.model_id);
+    await tx.run('DELETE FROM fallback_config WHERE model_db_id = ?', [id]);
+    await tx.run('DELETE FROM profile_models WHERE model_db_id = ?', [id]);
+    await tx.run("DELETE FROM models WHERE id = ? AND platform = 'custom'", [id]);
+    await deleteUnusedCustomEndpointKey(db, row.key_id);
+    await pruneUnavailableSavedFusionConfig();
   });
-  remove();
   res.json({ success: true });
 });
 
-modelsRouter.patch('/:id', (req: Request, res: Response) => {
+modelsRouter.patch('/:id', async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) {
     res.status(400).json({ error: { message: 'Invalid id' } });
@@ -239,7 +238,7 @@ modelsRouter.patch('/:id', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = fetchModelRow(id);
+  const row = await fetchModelRow(id);
   if (!row) {
     res.status(404).json({ error: { message: `Unknown model ${id}` } });
     return;
@@ -253,7 +252,7 @@ modelsRouter.patch('/:id', (req: Request, res: Response) => {
     return;
   }
 
-  const applyUpdate = db.transaction(() => {
+  await db.transaction(async (tx) => {
     const disablesModel = modelPatch.enabled === false;
 
     if (modelKeys.length > 0) {
@@ -262,7 +261,7 @@ modelsRouter.patch('/:id', (req: Request, res: Response) => {
       // after each sync), i.e. the baseline an override that returns to the
       // catalog default is recognised against (#1178).
       const preUpdateRow = isCatalogManagedModel(row)
-        ? db.get('SELECT * FROM models WHERE id = ?', [id]) as Record<string, unknown> | undefined
+        ? await tx.get('SELECT * FROM models WHERE id = ?', [id]) as Record<string, unknown> | undefined
         : undefined;
 
       const assignments: string[] = [];
@@ -272,7 +271,7 @@ modelsRouter.patch('/:id', (req: Request, res: Response) => {
         values.push(dbValue(key as keyof typeof MODEL_FIELD_COLUMNS, modelPatch[key]));
       }
       values.push(id);
-      db.run(`UPDATE models SET ${assignments.join(', ')} WHERE id = ?`, [...values]);
+      await tx.run(`UPDATE models SET ${assignments.join(', ')} WHERE id = ?`, [...values]);
 
       if (isCatalogManagedModel(row)) {
         const overridePatch: ModelOverridePatch = {};
@@ -285,30 +284,29 @@ modelsRouter.patch('/:id', (req: Request, res: Response) => {
             overridePatch[key] = modelPatch[key] as never;
           }
         }
-        upsertModelOverrides(db, row.platform, row.model_id, overridePatch, { baselineRow: preUpdateRow });
+        await upsertModelOverrides(db, row.platform, row.model_id, overridePatch, { baselineRow: preUpdateRow });
       }
 
       if (disablesModel) {
-        db.run('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?', [id]);
-        pruneUnavailableSavedFusionConfig();
+        await tx.run('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?', [id]);
+        await pruneUnavailableSavedFusionConfig();
       }
     }
 
     if (disablesModel || parsed.data.fallbackEnabled !== undefined) {
       const next = disablesModel ? 0 : parsed.data.fallbackEnabled ? 1 : 0;
-      db.run('UPDATE fallback_config SET enabled = ? WHERE model_db_id = ?', [next, id]);
-      const activeProfileId = getActiveProfileId(db);
+      await tx.run('UPDATE fallback_config SET enabled = ? WHERE model_db_id = ?', [next, id]);
+      const activeProfileId = await getActiveProfileId(db);
       if (activeProfileId != null) {
-        db.run('UPDATE profile_models SET enabled = ? WHERE profile_id = ? AND model_db_id = ?', [next, activeProfileId, id]);
+        await tx.run('UPDATE profile_models SET enabled = ? WHERE profile_id = ? AND model_db_id = ?', [next, activeProfileId, id]);
       }
     }
   });
-  applyUpdate();
 
   res.json({ success: true, id });
 });
 
-modelsRouter.delete('/:id', (req: Request, res: Response) => {
+modelsRouter.delete('/:id', async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) {
     res.status(400).json({ error: { message: 'Invalid id' } });
@@ -316,27 +314,26 @@ modelsRouter.delete('/:id', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = fetchModelRow(id);
+  const row = await fetchModelRow(id);
   if (!row) {
     res.status(404).json({ error: { message: `Unknown model ${id}` } });
     return;
   }
 
-  const remove = db.transaction(() => {
+  await db.transaction(async (tx) => {
     if (isCatalogManagedModel(row)) {
-      recordCatalogModelTombstone(db, 'chat', row.platform, row.model_id);
+      await recordCatalogModelTombstone(db, 'chat', row.platform, row.model_id);
     } else if (row.platform === 'custom') {
       // #926: same "keep it deleted" contract for custom relay models — the
       // scheduled custom-model sync must not resurrect this row.
-      recordCustomModelTombstone(db, endpointScopeOfKey(db, row.key_id), row.model_id);
+      await recordCustomModelTombstone(db, await endpointScopeOfKey(db, row.key_id), row.model_id);
     }
-    db.run('DELETE FROM fallback_config WHERE model_db_id = ?', [id]);
-    db.run('DELETE FROM profile_models WHERE model_db_id = ?', [id]);
-    db.run('DELETE FROM models WHERE id = ?', [id]);
-    if (row.platform === 'custom') deleteUnusedCustomEndpointKey(db, row.key_id);
-    pruneUnavailableSavedFusionConfig();
+    await tx.run('DELETE FROM fallback_config WHERE model_db_id = ?', [id]);
+    await tx.run('DELETE FROM profile_models WHERE model_db_id = ?', [id]);
+    await tx.run('DELETE FROM models WHERE id = ?', [id]);
+    if (row.platform === 'custom') await deleteUnusedCustomEndpointKey(db, row.key_id);
+    await pruneUnavailableSavedFusionConfig();
   });
-  remove();
 
   res.json({ success: true, tombstoned: isCatalogManagedModel(row) });
 });
@@ -348,7 +345,7 @@ modelsRouter.post('/:id/test', async (req: Request, res: Response) => {
     return;
   }
 
-  const modelRow = fetchModelRow(id);
+  const modelRow = await fetchModelRow(id);
   if (!modelRow) {
     res.status(404).json({ error: { message: `Unknown model ${id}` } });
     return;
@@ -371,7 +368,7 @@ modelsRouter.post('/:id/test', async (req: Request, res: Response) => {
   // inference, pinned to this model so Test cannot silently try another one.
   const inputEstimate = 16;
   const outputLimit = 4;
-  const route = routePinnedModel(id, inputEstimate + outputLimit);
+  const route = await routePinnedModel(id, inputEstimate + outputLimit);
   if (!route) {
     res.json({ success: false, modelId: modelRow.model_id, latencyMs: 0,
       error: 'No enabled API key is currently available for this model. Check model status, cooldowns and quotas.' });
@@ -379,24 +376,24 @@ modelsRouter.post('/:id/test', async (req: Request, res: Response) => {
   }
   const startTime = Date.now();
   try {
-    const response = await withKeyProxy(route.proxyUrl, () => route.provider.chatCompletion(
+    const response = await withKeyProxy(route.proxyUrl, async () => await route.provider.chatCompletion(
       route.apiKey, [{ role: 'user', content: 'ping' }], route.modelId,
       { max_tokens: outputLimit, timeoutMs: 15_000 },
     ));
     const latencyMs = Date.now() - startTime;
     const outputTokens = response.usage?.completion_tokens ?? Math.ceil((response.choices?.[0]?.message?.content?.length ?? 0) / 4);
     const inputTokens = response.usage?.prompt_tokens ?? Math.max(0, (response.usage?.total_tokens ?? inputEstimate + outputTokens) - outputTokens);
-    recordRequest(route.platform, route.modelId, route.keyId);
-    recordTokens(route.platform, route.modelId, route.keyId, response.usage?.total_tokens ?? inputTokens + outputTokens);
+    await recordRequest(route.platform, route.modelId, route.keyId);
+    await recordTokens(route.platform, route.modelId, route.keyId, response.usage?.total_tokens ?? inputTokens + outputTokens);
     // The request-log transaction also settles the durable monthly ledger.
-    logRequest(route.platform, route.modelId, route.keyId, 'success', inputTokens, outputTokens,
+    await logRequest(route.platform, route.modelId, route.keyId, 'success', inputTokens, outputTokens,
       latencyMs, null, null, route.modelId, null, 'model-test');
     res.json({ success: true, modelId: route.modelId, latencyMs });
   } catch (err: unknown) {
     const latencyMs = Date.now() - startTime;
     const error = sanitizeProviderErrorMessage(err instanceof Error ? err.message : String(err));
-    logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0,
-      latencyMs, error, null, route.modelId, null, 'model-test', failureAttributionFor(err));
+    await logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0,
+      latencyMs, error, null, route.modelId, null, 'model-test', await failureAttributionFor(err));
     res.json({ success: false, modelId: route.modelId, latencyMs, error });
   } finally {
     route.release?.();
@@ -405,10 +402,10 @@ modelsRouter.post('/:id/test', async (req: Request, res: Response) => {
 });
 
 // List all models with availability info
-modelsRouter.get('/', (_req: Request, res: Response) => {
+modelsRouter.get('/', async (_req: Request, res: Response) => {
   const db = getDb();
-  const activeProfileId = getActiveProfileId(db);
-  const models = activeProfileId == null ? db.all(`
+  const activeProfileId = await getActiveProfileId(db);
+  const models = activeProfileId == null ? await db.all(`
     SELECT m.*, fc.priority, fc.enabled as fallback_enabled,
            mo.overrides_json IS NOT NULL AS has_overrides, mo.overrides_json,
            ak.label AS key_label
@@ -417,7 +414,7 @@ modelsRouter.get('/', (_req: Request, res: Response) => {
     LEFT JOIN model_overrides mo ON mo.platform = m.platform AND mo.model_id = m.model_id
     LEFT JOIN api_keys ak ON ak.id = m.key_id
     ORDER BY COALESCE(fc.priority, m.intelligence_rank) ASC
-  `) as any[] : db.all(`
+  `) as any[] : await db.all(`
     SELECT m.*, COALESCE(pm.priority, fc.priority) AS priority,
            COALESCE(pm.enabled, fc.enabled) AS fallback_enabled,
            mo.overrides_json IS NOT NULL AS has_overrides, mo.overrides_json,
@@ -431,7 +428,7 @@ modelsRouter.get('/', (_req: Request, res: Response) => {
   `, [activeProfileId]) as any[];
 
   // Count keys per platform
-  const keyCounts = db.all(`
+  const keyCounts = await db.all(`
     SELECT platform, COUNT(*) as count
     FROM api_keys
     WHERE enabled = 1

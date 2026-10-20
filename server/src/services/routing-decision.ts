@@ -54,24 +54,24 @@ export interface DecisionRoutingSettings {
   minProbability: number;
 }
 
-export function getDecisionRoutingSettings(): DecisionRoutingSettings {
-  const model = getSetting(DECISION_MODEL_KEY)?.trim() || 'auto';
-  const raw = getSetting(MIN_PROBABILITY_KEY);
+export async function getDecisionRoutingSettings(): Promise<DecisionRoutingSettings> {
+  const model = await (await getSetting(DECISION_MODEL_KEY))?.trim() || 'auto';
+  const raw = await getSetting(MIN_PROBABILITY_KEY);
   const n = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
   return { model, minProbability: Number.isFinite(n) && n >= 0 && n <= 1 ? n : DEFAULT_MIN_PROBABILITY };
 }
 
-export function setDecisionRoutingSettings(patch: Partial<DecisionRoutingSettings>): void {
+export async function setDecisionRoutingSettings(patch: Partial<DecisionRoutingSettings>): Promise<void> {
   if (patch.model !== undefined) {
     const model = patch.model.trim();
     if (!model) throw new Error('decision model must be a model id or "auto"');
-    setSetting(DECISION_MODEL_KEY, model);
+    await setSetting(DECISION_MODEL_KEY, model);
   }
   if (patch.minProbability !== undefined) {
     if (!Number.isFinite(patch.minProbability) || patch.minProbability < 0 || patch.minProbability > 1) {
       throw new Error('minProbability must be between 0 and 1');
     }
-    setSetting(MIN_PROBABILITY_KEY, String(patch.minProbability));
+    await setSetting(MIN_PROBABILITY_KEY, String(patch.minProbability));
   }
 }
 
@@ -174,7 +174,7 @@ export async function chooseRoutingPreset(messages: readonly ChatMessage[], sign
   const state = decisionStateFor(messages);
   if (!state) return { strategy: 'balanced', source: 'unavailable' };
 
-  const settings = getDecisionRoutingSettings();
+  const settings = await getDecisionRoutingSettings();
   // minProbability is part of the key: a pick cached under one threshold must
   // not answer a request judged under another (a low_confidence Balanced held
   // for the TTL would silently undo a threshold lowering — the whole point of
@@ -225,7 +225,7 @@ export async function applyDecisionRouting(
   messages: readonly ChatMessage[],
   opts: { pinned?: boolean; signal?: AbortSignal } = {},
 ): Promise<DecisionPick | null> {
-  if (getRoutingStrategy() !== 'decision' || opts.pinned) return null;
+  if (await getRoutingStrategy() !== 'decision' || opts.pinned) return null;
   const pick = await chooseRoutingPreset(messages, opts.signal);
   setRequestRoutingStrategy(pick.strategy);
   record(pick);
@@ -243,9 +243,9 @@ export function routingStrategyHeader(pick: DecisionPick): string {
  *  - `ready`: one of those has a usable key (else every request is Balanced).
  *  - `hasModels`: there is at least one such model to add a key for.
  *  - `keyPlatforms`: providers whose key would make it ready, in priority order. */
-export function getDecisionRoutingStatus() {
-  const settings = getDecisionRoutingSettings();
-  const candidates = listDecisionModels()
+export async function getDecisionRoutingStatus() {
+  const settings = await getDecisionRoutingSettings();
+  const candidates = await (await listDecisionModels())
     .filter(m => m.enabled)
     .filter(m => settings.model === 'auto' ? !AUTO_SKIP_PLATFORMS.has(m.platform) : m.modelId === settings.model)
     .sort((a, b) => a.priority - b.priority || a.id - b.id);

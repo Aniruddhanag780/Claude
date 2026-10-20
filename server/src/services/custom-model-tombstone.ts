@@ -15,31 +15,31 @@
 
 import type { Db } from '../db/types.js';
 
-export function recordCustomModelTombstone(
+export async function recordCustomModelTombstone(
   db: Db,
   endpointScope: string,
   modelId: string,
-): void {
-  db.run(`
+): Promise<void> {
+  await db.run(`
     INSERT INTO custom_model_tombstones (endpoint_scope, model_id)
     VALUES (?, ?)
     ON CONFLICT(endpoint_scope, model_id)
-    DO UPDATE SET created_at = datetime('now')
+    DO UPDATE SET created_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')
   `, [endpointScope, modelId]);
 }
 
-export function isCustomModelTombstoned(
+export async function isCustomModelTombstoned(
   db: Db,
   endpointScope: string,
   modelId: string,
-): boolean {
-  return db.get('SELECT 1 FROM custom_model_tombstones WHERE endpoint_scope = ? AND model_id = ?', [endpointScope, modelId]) !== undefined;
+): Promise<boolean> {
+  return await db.get('SELECT 1 FROM custom_model_tombstones WHERE endpoint_scope = ? AND model_id = ?', [endpointScope, modelId]) !== undefined;
 }
 
-export function clearCustomModelTombstone(
+export async function clearCustomModelTombstone(
   db: Db,
   endpointScope: string,
   modelId: string,
-): void {
-  db.run('DELETE FROM custom_model_tombstones WHERE endpoint_scope = ? AND model_id = ?', [endpointScope, modelId]);
+): Promise<void> {
+  await db.run('DELETE FROM custom_model_tombstones WHERE endpoint_scope = ? AND model_id = ?', [endpointScope, modelId]);
 }

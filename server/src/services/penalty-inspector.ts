@@ -110,15 +110,15 @@ export interface RouterPressureClearResult {
  * live results, so the worst case of a premature clear is one more round of
  * failures — far better than a pool that cannot route for a day.
  */
-export function clearRouterPressure(): RouterPressureClearResult {
+export async function clearRouterPressure(): Promise<RouterPressureClearResult> {
   return {
-    cooldowns: clearAllCooldowns(),
+    cooldowns: await clearAllCooldowns(),
     penalties: clearAllPenalties(),
     failureWindows: clearModelFailureWindows(),
   };
 }
 
-export function getPenaltyInspector(): PenaltyInspectorSnapshot {
+export async function getPenaltyInspector(): Promise<PenaltyInspectorSnapshot> {
   const db = getDb();
   const now = Date.now();
   const rows = new Map<string, InspectorRow>();
@@ -126,7 +126,7 @@ export function getPenaltyInspector(): PenaltyInspectorSnapshot {
   const penalties = getAllPenalties();
   if (penalties.length > 0) {
     const placeholders = penalties.map(() => '?').join(',');
-    const models = db.all( `
+    const models = await db.all( `
       SELECT m.id AS model_db_id, m.platform, m.model_id, m.display_name,
              m.enabled AS model_enabled, fc.enabled AS fallback_enabled, fc.priority
         FROM models m
@@ -159,7 +159,7 @@ export function getPenaltyInspector(): PenaltyInspectorSnapshot {
     }
   }
 
-  const cooldownRows = db.all(`
+  const cooldownRows = await db.all(`
     SELECT c.platform, c.model_id, c.key_id, c.expires_at_ms,
            m.id AS model_db_id, m.display_name, m.enabled AS model_enabled,
            fc.enabled AS fallback_enabled, fc.priority,
@@ -204,7 +204,7 @@ export function getPenaltyInspector(): PenaltyInspectorSnapshot {
   }
 
   const since = toSqliteDateTime(now - INSPECTOR_LOOKBACK_MINUTES * 60 * 1000);
-  const errorRows = db.all(`
+  const errorRows = await db.all(`
     SELECT r.id, r.platform, r.model_id, r.key_id, r.error, r.latency_ms, r.created_at,
            m.id AS model_db_id, m.display_name, m.enabled AS model_enabled,
            fc.enabled AS fallback_enabled, fc.priority,

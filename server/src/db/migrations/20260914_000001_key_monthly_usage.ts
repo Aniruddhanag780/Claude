@@ -22,7 +22,7 @@ export async function up(db: Db): Promise<void> {
 
   // SQLite's `CREATE TRIGGER ... BEGIN ... END` has no PostgreSQL equivalent as
   // a single statement: PostgreSQL needs a trigger function plus the trigger
-  // that calls it. `MAX(a, b)` is `GREATEST(a, b)`; `strftime('%Y-%m', ts)` is
+  // that calls it. `MAX(a, b)` is `GREATEST(a, b)`; `to_char(ts::timestamp, 'YYYY-MM')` is
   // `to_char(ts, 'YYYY-MM')`.
   await db.exec(`
     CREATE OR REPLACE FUNCTION requests_key_monthly_usage_fn()

@@ -175,7 +175,7 @@ export async function maybeServeAnthropicWebSearch(
   const body = req.body;
   if (!body || typeof body !== 'object' || !Array.isArray(body.tools) || !Array.isArray(body.messages)) return false;
   const searchTool = body.tools.find(isWebSearchServerTool);
-  if (!searchTool || !hasSearchCapability()) return false;
+  if (!searchTool || !await hasSearchCapability()) return false;
 
   const filter: DomainFilter = {
     allowedDomains: Array.isArray(searchTool.allowed_domains) ? searchTool.allowed_domains.filter((d: unknown) => typeof d === 'string') : undefined,

@@ -10,10 +10,10 @@ import type { Platform } from '@freellmapi/shared/types.js';
 export const healthRouter = Router();
 
 // Get health status for all platforms
-healthRouter.get('/', (_req: Request, res: Response) => {
+healthRouter.get('/', async (_req: Request, res: Response) => {
   const db = getDb();
 
-  const platforms = db.all(`
+  const platforms = await db.all(`
     SELECT
       platform,
       COUNT(*) as total_keys,
@@ -27,7 +27,7 @@ healthRouter.get('/', (_req: Request, res: Response) => {
     GROUP BY platform
   `) as any[];
 
-  const keys = db.all(`
+  const keys = await db.all(`
     SELECT id, platform, label, status, enabled, created_at, last_checked_at, last_healthy_at, last_health_error
     FROM api_keys
     ORDER BY platform, created_at DESC
@@ -56,8 +56,8 @@ healthRouter.get('/', (_req: Request, res: Response) => {
       lastHealthyAt: k.last_healthy_at ?? null,
       lastHealthError: k.last_health_error,
     })),
-    quotaStates: getQuotaStateForKeys(),
-    degradation: getDegradationStatus(),
+    quotaStates: await getQuotaStateForKeys(),
+    degradation: await getDegradationStatus(),
   });
 });
 
@@ -94,7 +94,7 @@ healthRouter.post('/quota/:keyId', async (req: Request, res: Response) => {
     return;
   }
   const db = getDb();
-  const row = db.get('SELECT * FROM api_keys WHERE id = ?', [keyId]) as any;
+  const row = await db.get('SELECT * FROM api_keys WHERE id = ?', [keyId]) as any;
   if (!row) {
     res.status(404).json({ error: { message: 'Key not found' } });
     return;
@@ -107,7 +107,7 @@ healthRouter.post('/quota/:keyId', async (req: Request, res: Response) => {
   // pollKeyQuota is failure-silent by design; its boolean tells us whether a
   // quota_api row was written, and the state query returns the fresh reading.
   const recorded = await pollKeyQuota(keyId, row, provider);
-  const state = getQuotaStateForKeys().filter(
+  const state = await (await getQuotaStateForKeys()).filter(
     q => q.keyId === keyId && q.source === 'quota_api',
   );
   res.json({ keyId, recorded, quotaStates: state });

@@ -35,34 +35,34 @@ const PROFILES: Profile[] = [
   { platform: 'cerebras', modelId: 'smart-flaky', name: 'Smart-Flaky', intelligenceRank: 3, sizeLabel: 'Large', budget: '~50M', successes: 18, failures: 14, outTokens: 500, latencyMs: 1500, ttfbMs: 600 },
 ];
 
-function seed() {
+async function seed() {
   const db = getDb();
-  db.exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
+  await db.exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
 
-  PROFILES.forEach((p, i) => {
-    db.run(`
+  PROFILES.forEach(async (p, i) => {
+    await db.run(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, enabled)
     VALUES (?, ?, ?, ?, 1, ?, 100000, 1000000, 100000000, 1000000000, ?, 1)
   `, [p.platform, p.modelId, p.name, p.intelligenceRank, p.sizeLabel, p.budget]);
-    const id = (db.get('SELECT id FROM models WHERE platform=? AND model_id=?', [p.platform, p.modelId]) as { id: number }).id;
-    db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)', [id, i + 1]);
+    const id = (await db.get('SELECT id FROM models WHERE platform=? AND model_id=?', [p.platform, p.modelId]) as { id: number }).id;
+    await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)', [id, i + 1]);
     const { encrypted, iv, authTag } = encrypt(`key-${p.platform}`);
-    db.run(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES (?, 'sim', ?, ?, ?, 'healthy', 1)`, [p.platform, encrypted, iv, authTag]);
-    for (let s = 0; s < p.successes; s++) db.run(`
+    await db.run(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES (?, 'sim', ?, ?, ?, 'healthy', 1)`, [p.platform, encrypted, iv, authTag]);
+    for (let s = 0; s < p.successes; s++) await db.run(`
     INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
     VALUES (?, ?, 1, 'error', 0, 0, 1000, 'outage', NULL)
   `, [p.platform, p.modelId, 'success', p.outTokens, p.latencyMs, null, p.ttfbMs]);
-    for (let f = 0; f < p.failures; f++) db.run(`
+    for (let f = 0; f < p.failures; f++) await db.run(`
     INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
     VALUES (?, ?, 1, 'error', 0, 0, 1000, 'outage', NULL)
   `, [p.platform, p.modelId, 'error', 0, p.latencyMs, 'sim-fail', p.ttfbMs]);
   });
 }
 
-function distribution(runs: number): Map<string, number> {
+async function distribution(runs: number): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
   for (let i = 0; i < runs; i++) {
-    const r = routeRequest(100);
+    const r = await routeRequest(100);
     counts.set(r.displayName, (counts.get(r.displayName) ?? 0) + 1);
   }
   return counts;
@@ -81,8 +81,8 @@ function printDistribution(title: string, counts: Map<string, number>, runs: num
   }
 }
 
-function printScores() {
-  const { scores } = getRoutingScores();
+async function printScores() {
+  const { scores } = await getRoutingScores();
   console.log('    model                  rel  spd  int  guard  score');
   for (const s of scores) {
     const guard = s.headroom * s.rateLimit;
@@ -97,9 +97,9 @@ function printScores() {
   }
 }
 
-function main() {
-  initDb(':memory:');
-  seed();
+async function main() {
+  await initDb(':memory:');
+  await seed();
   const RUNS = 2000;
 
   console.log('\n══════════════════════════════════════════════════════════════');
@@ -114,34 +114,34 @@ function main() {
 
   const strategies: RoutingStrategy[] = ['priority', 'balanced', 'smartest', 'fastest', 'reliable'];
   for (const strat of strategies) {
-    setRoutingStrategy(strat);
-    refreshStatsCache(getDb(), true);
-    if (strat === 'balanced') { console.log('\n  ── balanced score breakdown ──'); printScores(); }
-    printDistribution(`Strategy: ${strat.toUpperCase()}`, distribution(RUNS), RUNS);
+    await setRoutingStrategy(strat);
+    await refreshStatsCache(getDb(), true);
+    if (strat === 'balanced') { console.log('\n  ── balanced score breakdown ──'); await printScores(); }
+    printDistribution(`Strategy: ${strat.toUpperCase()}`, await distribution(RUNS), RUNS);
   }
 
   // ── Adaptation: the favored model under 'balanced' suddenly starts failing ──
   console.log('\n══════════════════════════════════════════════════════════════');
   console.log('  ADAPTATION  —  inject a failure burst into the top model');
   console.log('══════════════════════════════════════════════════════════════');
-  setRoutingStrategy('balanced');
-  refreshStatsCache(getDb(), true);
-  const before = distribution(RUNS);
+  await setRoutingStrategy('balanced');
+  await refreshStatsCache(getDb(), true);
+  const before = await distribution(RUNS);
   printDistribution('Before (balanced, steady state)', before, RUNS);
 
   // Find the current favorite and slam it with fresh failures.
   const fav = [...before.entries()].sort((a, b) => b[1] - a[1])[0][0];
   const favProfile = PROFILES.find(p => p.name === fav)!;
   const db = getDb();
-  for (let i = 0; i < 300; i++) db.run(`
+  for (let i = 0; i < 300; i++) await db.run(`
     INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
     VALUES (?, ?, 1, 'error', 0, 0, 1000, 'outage', NULL)
   `, [favProfile.platform, favProfile.modelId]);
   console.log(`\n  → Injected 300 fresh failures into "${fav}" (simulated outage)…`);
-  refreshStatsCache(getDb(), true);
-  printScores();
-  printDistribution('After (balanced, post-outage)', distribution(RUNS), RUNS);
+  await refreshStatsCache(getDb(), true);
+  await printScores();
+  printDistribution('After (balanced, post-outage)', await distribution(RUNS), RUNS);
   console.log('');
 }
 
-main();
+await main();

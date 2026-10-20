@@ -15,7 +15,7 @@ export class PlugskyProvider extends OpenAICompatProvider {
   }
 
   protected override async validationResult(response: Response): Promise<KeyValidationResult> {
-    if ([401, 403].includes(response.status)) return super.validationResult(response);
+    if ([401, 403].includes(response.status)) return await super.validationResult(response);
     if (!response.ok) {
       throw providerHttpError(response, 'Plugsky key validation is temporarily inconclusive');
     }

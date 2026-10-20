@@ -11,7 +11,7 @@ export class TavilyProvider extends SearchOnlyProvider {
   readonly name = 'Tavily';
 
   async validateKey(apiKey: string): Promise<KeyValidationResult> {
-    return this.probe(`${TAVILY_BASE_URL}/usage`, {
+    return await this.probe(`${TAVILY_BASE_URL}/usage`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${apiKey}` },
     });

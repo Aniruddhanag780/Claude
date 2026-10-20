@@ -407,10 +407,10 @@ export abstract class BaseProvider {
     inactivityTimeoutMs: number,
     timeoutMessage?: string,
   ): Promise<T> {
-    if (inactivityTimeoutMs <= 0) return read();
+    if (inactivityTimeoutMs <= 0) return await read();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    return Promise.race([
-      read(),
+    return await Promise.race([
+      await read(),
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new Error(timeoutMessage ?? `${this.name} stream stalled: no data for ${inactivityTimeoutMs}ms (timeout)`)),
@@ -504,8 +504,8 @@ export abstract class BaseProvider {
     try {
       while (true) {
         const { done, value } = awaitingFirstByte
-          ? await this.readWithStallTimeout(() => reader.read(), firstByteMs, this.firstByteTimeoutMessage(firstByteMs))
-          : await this.readWithStallTimeout(() => reader.read(), inactivityTimeoutMs);
+          ? await this.readWithStallTimeout(async () => await reader.read(), firstByteMs, this.firstByteTimeoutMessage(firstByteMs))
+          : await this.readWithStallTimeout(async () => await reader.read(), inactivityTimeoutMs);
         awaitingFirstByte = false;
         if (done) break;
 
@@ -528,7 +528,7 @@ export abstract class BaseProvider {
         }
       }
     } finally {
-      reader.cancel().catch(() => { /* upstream already gone */ });
+      await reader.cancel().catch(() => { /* upstream already gone */ });
     }
 
     if (!sawFinishReason) {

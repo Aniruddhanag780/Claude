@@ -23,9 +23,9 @@ function unavailableReason(row: QuotaObservationView, now: number): QuotaOutlook
 }
 
 /** Local activity is measurable even without provider quota headers. No probes or writes. */
-export function getQuotaOutlook(): QuotaOutlookResponse {
+export async function getQuotaOutlook(): Promise<QuotaOutlookResponse> {
   const now = Date.now();
-  const activity = getRecentQuotaActivity(now);
+  const activity = await getRecentQuotaActivity(now);
   const counts = new Map<string, number>();
   for (const row of activity) counts.set(row.pool, (counts.get(row.pool) ?? 0) + row.count);
   const selected = new Map<string, QuotaObservationView>();
@@ -33,7 +33,7 @@ export function getQuotaOutlook(): QuotaOutlookResponse {
     const reason = unavailableReason(row, now);
     return reason === null ? 0 : reason === 'reset_not_reported' ? 1 : reason === 'quota_not_reported' ? 3 : 2;
   };
-  for (const row of getQuotaStateForKeys({ normalizeExpired: false })) {
+  for (const row of await getQuotaStateForKeys({ normalizeExpired: false })) {
     if (row.metric !== 'requests') continue;
     const previous = selected.get(row.quotaPoolKey);
     // A stale legacy key must not hide a current account reading. Among usable

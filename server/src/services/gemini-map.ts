@@ -21,8 +21,8 @@ const schema = z.object({
   flashLite: z.string().min(1).optional(),
 }).strict();
 
-export function getGeminiModelMap(): GeminiModelMap {
-  const raw = getSetting(SETTING_KEY);
+export async function getGeminiModelMap(): Promise<GeminiModelMap> {
+  const raw = await getSetting(SETTING_KEY);
   if (!raw) return { ...DEFAULT_MAP };
   try {
     const parsed = JSON.parse(raw) as Partial<GeminiModelMap>;
@@ -37,16 +37,16 @@ export function getGeminiModelMap(): GeminiModelMap {
   }
 }
 
-export function setGeminiModelMap(input: unknown): GeminiModelMap {
+export async function setGeminiModelMap(input: unknown): Promise<GeminiModelMap> {
   const patch = schema.parse(input);
-  const current = getGeminiModelMap();
+  const current = await getGeminiModelMap();
   const next = {
     default: patch.default ?? current.default,
     pro: patch.pro ?? current.pro,
     flash: patch.flash ?? current.flash,
     flashLite: patch.flashLite ?? current.flashLite,
   };
-  setSetting(SETTING_KEY, JSON.stringify(next));
+  await setSetting(SETTING_KEY, JSON.stringify(next));
   return next;
 }
 
@@ -66,13 +66,13 @@ export function classifyGeminiFamily(model?: string): GeminiFamily | null {
  * still pass through unchanged for native clients that select the gateway's
  * advertised ids.
  */
-export function resolveGeminiModel(model?: string): string {
+export async function resolveGeminiModel(model?: string): Promise<string> {
   const raw = (model ?? '').trim().replace(/^models\//, '');
   const family = classifyGeminiFamily(raw);
   if (family) {
-    const target = getGeminiModelMap()[family];
+    const target = await (await getGeminiModelMap())[family];
     if (!target || target === 'auto') return 'auto';
-    const exists = getDb().get('SELECT 1 FROM models WHERE model_id = ? AND enabled = 1', [target]);
+    const exists = await getDb().get('SELECT 1 FROM models WHERE model_id = ? AND enabled = 1', [target]);
     return exists ? target : 'auto';
   }
   return raw || 'auto';

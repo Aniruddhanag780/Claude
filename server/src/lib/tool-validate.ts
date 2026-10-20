@@ -34,10 +34,10 @@ const ajv = new (Ajv2020 as unknown as typeof import('ajv').default)({
 
 export const TOOL_ARGUMENT_VALIDATION_SETTING = 'validate_tool_arguments';
 
-export function isToolArgumentValidationEnabled(): boolean {
+export async function isToolArgumentValidationEnabled(): Promise<boolean> {
   let stored: string | undefined;
   try {
-    stored = getSetting(TOOL_ARGUMENT_VALIDATION_SETTING);
+    stored = await getSetting(TOOL_ARGUMENT_VALIDATION_SETTING);
   } catch {
     stored = undefined; // DB not ready — never throw on the proxy hot path.
   }

@@ -52,8 +52,8 @@ export function invalidateTtfbBudgetCache(): void {
   cache = undefined;
 }
 
-function readConfig(db: Db): Config {
-  const rows = db.all(`
+async function readConfig(db: Db): Promise<Config> {
+  const rows = await db.all(`
     SELECT key, value FROM settings
     WHERE key IN ('slow_endpoint_buffer_ms', 'ttfb_budget_window_ms', 'ttfb_budget_half_life_ms', 'ttfb_budget_min_samples')
   `) as { key: string; value: string }[];
@@ -81,7 +81,7 @@ function endpointKey(platform: string, endpointScope: string): string {
 }
 
 function timestampMs(raw: string): number {
-  // SQLite's datetime('now') has no suffix but is UTC. Date.parse would treat
+  // SQLite's to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS') has no suffix but is UTC. Date.parse would treat
   // it as local time; ISO values may already carry Z or an explicit offset.
   const iso = raw.trim().replace(' ', 'T');
   return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`);
@@ -97,7 +97,7 @@ function percentile(samples: Sample[], totalWeight: number, quantile: number): n
   return samples[samples.length - 1].ttfbMs;
 }
 
-function statsFor(db: Db, config: Config, now: number): Map<string, EndpointTtfbStats> {
+async function statsFor(db: Db, config: Config, now: number): Promise<Map<string, EndpointTtfbStats>> {
   if (cache?.db === db && cache.windowMs === config.windowMs && cache.halfLifeMs === config.halfLifeMs
     && now >= cache.time && now - cache.time < CACHE_TTL_MS) return cache.stats;
 
@@ -106,7 +106,7 @@ function statsFor(db: Db, config: Config, now: number): Map<string, EndpointTtfb
   // enforce the precise sliding window after parsing all timestamps as UTC.
   const earliest = new Date(now - config.windowMs - 24 * 60 * 60 * 1000);
   const since = Number.isFinite(earliest.getTime()) ? earliest.toISOString().slice(0, 10) : '';
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT r.platform, r.ttfb_ms, r.created_at, k.base_url
     FROM requests r
     LEFT JOIN api_keys k ON k.id = r.key_id AND k.platform = 'custom'
@@ -143,15 +143,15 @@ function statsFor(db: Db, config: Config, now: number): Map<string, EndpointTtfb
 }
 
 /** Decay-weighted nearest-rank percentiles of successful endpoint TTFB. */
-export function getEndpointTtfbStats(
+export async function getEndpointTtfbStats(
   platform: string,
   endpointScope = '',
   now = Date.now(),
-): EndpointTtfbStats | null {
+): Promise<EndpointTtfbStats | null> {
   if (!Number.isFinite(now)) return null;
   try {
     const db = getDb();
-    const stats = statsFor(db, readConfig(db), now).get(endpointKey(platform, endpointScope));
+    const stats = await (await statsFor(db, await readConfig(db), now)).get(endpointKey(platform, endpointScope));
     return stats ? { ...stats } : null;
   } catch {
     invalidateTtfbBudgetCache();
@@ -160,18 +160,18 @@ export function getEndpointTtfbStats(
 }
 
 /** Give historically slow endpoints their P95 TTFB plus a safety buffer. */
-export function getEndpointTimeBudgetMs(
+export async function getEndpointTimeBudgetMs(
   baseBudgetMs: number,
   platform: string,
   endpointScope = '',
   now = Date.now(),
-): number {
+): Promise<number> {
   if (!Number.isFinite(baseBudgetMs) || baseBudgetMs <= 0 || !Number.isFinite(now)
     || process.env.TTFB_BUDGET_DISABLED?.trim() === '1') return baseBudgetMs;
   try {
     const db = getDb();
-    const config = readConfig(db);
-    const stats = statsFor(db, config, now).get(endpointKey(platform, endpointScope));
+    const config = await readConfig(db);
+    const stats = await (await statsFor(db, config, now)).get(endpointKey(platform, endpointScope));
     if (!stats || stats.p95Ms <= 0 || stats.sampleCount < config.minSamples
       || stats.p95Ms < baseBudgetMs * SLOW_P95_BASE_FRACTION) return baseBudgetMs;
     const adaptiveBudget = stats.p95Ms + config.bufferMs;

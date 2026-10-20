@@ -25,7 +25,7 @@ export class BlockRunProvider extends OpenAICompatProvider {
     if (!response.ok && ![401, 403].includes(response.status)) {
       throw providerHttpError(response, 'BlockRun key validation is temporarily inconclusive');
     }
-    return super.validationResult(response);
+    return await super.validationResult(response);
   }
 
   override async chatCompletion(apiKey: string, messages: ChatMessage[], modelId: string,

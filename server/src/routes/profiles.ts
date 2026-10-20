@@ -8,6 +8,7 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
+import type { Db } from '../db/types.js';
 import { monthlyBudgetScore } from '../lib/budget.js';
 
 export const profilesRouter = Router();
@@ -63,9 +64,9 @@ function getId(req: Request): number {
  * Fetches all available profiles. 
  * Sorting order: Default profile first -> Favorited profiles -> Custom sorting order.
  */
-profilesRouter.get('/', (_req: Request, res: Response) => {
+profilesRouter.get('/', async (_req: Request, res: Response) => {
   const db = getDb();
-  const profiles = db.all(`
+  const profiles = await db.all(`
     SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at
     FROM profiles
     ORDER BY (CASE WHEN type = 'default' THEN 1 ELSE 0 END) DESC, is_favorite DESC, sort_order ASC, id ASC
@@ -74,31 +75,31 @@ profilesRouter.get('/', (_req: Request, res: Response) => {
 });
 
 // GET /api/profiles/active — get the currently active profile id
-profilesRouter.get('/active', (_req: Request, res: Response) => {
+profilesRouter.get('/active', async (_req: Request, res: Response) => {
   const db = getDb();
-  const row = db.get(`SELECT value FROM settings WHERE key = 'active_profile_id'`) as { value: string } | undefined;
+  const row = await db.get(`SELECT value FROM settings WHERE key = 'active_profile_id'`) as { value: string } | undefined;
   const activeProfileId = row ? (parseInt(row.value) || null) : null;
   res.json({ activeProfileId });
 });
 
 // POST /api/profiles/active — set or clear the active profile
-profilesRouter.post('/active', (req: Request, res: Response) => {
+profilesRouter.post('/active', async (req: Request, res: Response) => {
   const db = getDb();
   const profileId = req.body?.profileId;
 
   if (profileId === null || profileId === undefined) {
-    db.run(`DELETE FROM settings WHERE key = 'active_profile_id'`);
+    await db.run(`DELETE FROM settings WHERE key = 'active_profile_id'`);
     res.json({ activeProfileId: null });
     return;
   }
 
-  const profile = db.get('SELECT id FROM profiles WHERE id = ?', [Number(profileId)]) as any;
+  const profile = await db.get('SELECT id FROM profiles WHERE id = ?', [Number(profileId)]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
   }
 
-  db.run(`
+  await db.run(`
     INSERT INTO settings (key, value) VALUES ('active_profile_id', ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `, [String(profileId)]);
@@ -106,16 +107,16 @@ profilesRouter.post('/active', (req: Request, res: Response) => {
 });
 
 // GET /api/profiles/:id/models — get profile model order
-profilesRouter.get('/:id/models', (req: Request, res: Response) => {
+profilesRouter.get('/:id/models', async (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
+  const profile = await db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
   }
 
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT pm.model_db_id, pm.priority, pm.enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
@@ -136,7 +137,7 @@ profilesRouter.get('/:id/models', (req: Request, res: Response) => {
  * Creates a new custom profile.
  * Allows optional cloning of the active profile's model priority and layout configuration.
  */
-profilesRouter.post('/', (req: Request, res: Response) => {
+profilesRouter.post('/', async (req: Request, res: Response) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -147,25 +148,25 @@ profilesRouter.post('/', (req: Request, res: Response) => {
   const { name, emoji, color, sourceProfileId, empty } = parsed.data;
 
   // Check for case-insensitive duplicate profile names
-  const duplicate = db.get('SELECT id FROM profiles WHERE LOWER(name) = LOWER(?)', [name]) as any;
+  const duplicate = await db.get('SELECT id FROM profiles WHERE LOWER(name) = LOWER(?)', [name]) as any;
   if (duplicate) {
     res.status(409).json({ error: { message: `Profile with name '${name}' already exists` } });
     return;
   }
 
-  const maxOrder = (db.get('SELECT COALESCE(MAX(sort_order), 0) AS mx FROM profiles') as { mx: number }).mx;
+  const maxOrder = (await db.get('SELECT COALESCE(MAX(sort_order), 0) AS mx FROM profiles') as { mx: number }).mx;
 
   let layoutConfig: string | null = null;
   let autoSort: string | null = null;
   if (sourceProfileId) {
-    const source = db.get('SELECT layout_config, auto_sort FROM profiles WHERE id = ?', [sourceProfileId]) as any;
+    const source = await db.get('SELECT layout_config, auto_sort FROM profiles WHERE id = ?', [sourceProfileId]) as any;
     if (source) {
       layoutConfig = source.layout_config;
       autoSort = source.auto_sort;
     }
   }
 
-  const result = db.run('INSERT INTO profiles (name, emoji, color, type, sort_order, layout_config, auto_sort, auto_include_new_models) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id', [name, emoji, color, 'custom', maxOrder + 1, layoutConfig, autoSort, empty ? 0 : 1]);
+  const result = await db.run('INSERT INTO profiles (name, emoji, color, type, sort_order, layout_config, auto_sort, auto_include_new_models) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id', [name, emoji, color, 'custom', maxOrder + 1, layoutConfig, autoSort, empty ? 0 : 1]);
 
   const profileId = result.lastInsertRowid as number;
 
@@ -173,10 +174,10 @@ profilesRouter.post('/', (req: Request, res: Response) => {
   // requests, and copying a source chain in would defeat the point of it.
   if (!empty) {
     const source = sourceProfileId
-      ? db.get('SELECT id FROM profiles WHERE id = ?', [sourceProfileId]) as any
+      ? await db.get('SELECT id FROM profiles WHERE id = ?', [sourceProfileId]) as any
       : null;
     if (source) {
-      db.run(`
+      await db.run(`
         INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
         SELECT ?, model_db_id, priority, enabled
         FROM profile_models
@@ -188,7 +189,7 @@ profilesRouter.post('/', (req: Request, res: Response) => {
     }
   }
 
-  const created = db.get('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?', [profileId]);
+  const created = await db.get('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?', [profileId]);
   res.status(201).json(created);
 });
 
@@ -202,10 +203,10 @@ function copyFromDefault(db: any, profileId: number) {
 }
 
 // PUT /api/profiles/:id — update profile metadata
-profilesRouter.put('/:id', (req: Request, res: Response) => {
+profilesRouter.put('/:id', async (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.get('SELECT id, name, type FROM profiles WHERE id = ?', [profileId]) as any;
+  const profile = await db.get('SELECT id, name, type FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
@@ -230,7 +231,7 @@ profilesRouter.put('/:id', (req: Request, res: Response) => {
 
   // Check for case-insensitive duplicate profile names when editing name
   if (parsed.data.name !== undefined) {
-    const duplicate = db.get('SELECT id FROM profiles WHERE LOWER(name) = LOWER(?) AND id != ?', [parsed.data.name, profileId]) as any;
+    const duplicate = await db.get('SELECT id FROM profiles WHERE LOWER(name) = LOWER(?) AND id != ?', [parsed.data.name, profileId]) as any;
     if (duplicate) {
       res.status(409).json({ error: { message: `Profile with name '${parsed.data.name}' already exists` } });
       return;
@@ -257,15 +258,15 @@ profilesRouter.put('/:id', (req: Request, res: Response) => {
 
   if (updates.length > 0) {
     values.push(profileId);
-    db.run(`UPDATE profiles SET ${updates.join(', ')} WHERE id = ?`, [...values]);
+    await db.run(`UPDATE profiles SET ${updates.join(', ')} WHERE id = ?`, [...values]);
   }
 
   // If auto_sort was updated to a preset, automatically physically sort the models in DB
   if (parsed.data.auto_sort) {
-    sortProfileModels(db, profileId, parsed.data.auto_sort);
+    await sortProfileModels(db, profileId, parsed.data.auto_sort);
   }
 
-  const updated = db.get('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?', [profileId]);
+  const updated = await db.get('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?', [profileId]);
   res.json(updated);
 });
 
@@ -276,10 +277,10 @@ const reorderSchema = z.array(z.object({
   enabled: z.boolean(),
 }));
 
-profilesRouter.put('/:id/reorder', (req: Request, res: Response) => {
+profilesRouter.put('/:id/reorder', async (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
+  const profile = await db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
@@ -291,22 +292,21 @@ profilesRouter.put('/:id/reorder', (req: Request, res: Response) => {
     return;
   }
 
-  const transaction = db.transaction(() => {
-    db.run('DELETE FROM profile_models WHERE profile_id = ?', [profileId]);
+  await db.transaction(async (tx) => {
+    await tx.run('DELETE FROM profile_models WHERE profile_id = ?', [profileId]);
     for (const entry of parsed.data) {
-      db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profileId, entry.modelDbId, entry.priority, entry.enabled ? 1 : 0]);
+      await tx.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profileId, entry.modelDbId, entry.priority, entry.enabled ? 1 : 0]);
     }
   });
-  transaction();
 
   res.json({ success: true });
 });
 
 // POST /api/profiles/:id/reset — reset a profile to fallback baseline
-profilesRouter.post('/:id/reset', (req: Request, res: Response) => {
+profilesRouter.post('/:id/reset', async (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
+  const profile = await db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
@@ -322,30 +322,29 @@ profilesRouter.post('/:id/reset', (req: Request, res: Response) => {
     tierLayout: [{ id: "tier-default", type: "tier", title: "Default", emoji: "📋", color: "rgb(99, 102, 241)", collapsed: false, items: [] }]
   });
 
-  const transaction = db.transaction(() => {
+  await db.transaction(async (tx) => {
     // Reset layout_config and auto_sort
-    db.run('UPDATE profiles SET layout_config = ?, auto_sort = NULL WHERE id = ?', [baselineLayout, profileId]);
+    await tx.run('UPDATE profiles SET layout_config = ?, auto_sort = NULL WHERE id = ?', [baselineLayout, profileId]);
     
     // Copy models priority/enabled from fallback_config
-    db.run('DELETE FROM profile_models WHERE profile_id = ?', [profileId]);
-    db.run(`
+    await tx.run('DELETE FROM profile_models WHERE profile_id = ?', [profileId]);
+    await tx.run(`
       INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
       SELECT ?, model_db_id, priority, enabled
       FROM fallback_config
       ORDER BY priority ASC
     `, [profileId]);
   });
-  transaction();
 
-  const updated = db.get('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?', [profileId]);
+  const updated = await db.get('SELECT id, name, emoji, color, type, is_favorite, sort_order, auto_sort, layout_config, auto_include_new_models, created_at FROM profiles WHERE id = ?', [profileId]);
   res.json(updated);
 });
 
 // DELETE /api/profiles/:id — delete a profile
-profilesRouter.delete('/:id', (req: Request, res: Response) => {
+profilesRouter.delete('/:id', async (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.get('SELECT id, type FROM profiles WHERE id = ?', [profileId]) as any;
+  const profile = await db.get('SELECT id, type FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
@@ -354,23 +353,23 @@ profilesRouter.delete('/:id', (req: Request, res: Response) => {
     res.status(400).json({ error: { message: 'Cannot delete the default profile' } });
     return;
   }
-  const count = db.get('SELECT COUNT(*) as cnt FROM profiles') as { cnt: number };
+  const count = await db.get('SELECT COUNT(*) as cnt FROM profiles') as { cnt: number };
   if (count.cnt <= 1) {
     res.status(400).json({ error: { message: 'Cannot delete the last profile' } });
     return;
   }
 
   // If the deleted profile is the currently active one, switch to Default
-  const activeRow = db.get(`SELECT value FROM settings WHERE key = 'active_profile_id'`) as { value: string } | undefined;
+  const activeRow = await db.get(`SELECT value FROM settings WHERE key = 'active_profile_id'`) as { value: string } | undefined;
   const activeId = activeRow ? parseInt(activeRow.value) : null;
 
-  db.run('DELETE FROM profiles WHERE id = ?', [profileId]);
+  await db.run('DELETE FROM profiles WHERE id = ?', [profileId]);
 
   if (activeId === profileId) {
-    const defaultProf = db.get("SELECT id FROM profiles WHERE type = 'default' OR type = 'builtin' ORDER BY id ASC LIMIT 1") as { id: number } | undefined;
-    const fallbackId = defaultProf?.id ?? (db.get('SELECT id FROM profiles ORDER BY sort_order ASC LIMIT 1') as { id: number })?.id;
+    const defaultProf = await db.get("SELECT id FROM profiles WHERE type = 'default' OR type = 'builtin' ORDER BY id ASC LIMIT 1") as { id: number } | undefined;
+    const fallbackId = defaultProf?.id ?? (await db.get('SELECT id FROM profiles ORDER BY sort_order ASC LIMIT 1') as { id: number })?.id;
     if (fallbackId) {
-      db.run(`INSERT INTO settings (key, value) VALUES ('active_profile_id', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, [String(fallbackId)]);
+      await db.run(`INSERT INTO settings (key, value) VALUES ('active_profile_id', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, [String(fallbackId)]);
     }
   }
 
@@ -383,11 +382,11 @@ const SORT_PRESETS: Record<string, string> = {
   speed: 'm.speed_rank ASC',
 };
 
-function sortProfileModels(db: any, profileId: number, preset: string) {
+async function sortProfileModels(db: any, profileId: number, preset: string) {
   let models: { id: number }[] = [];
 
   if (preset === 'budget') {
-    const allModels = db.all(`SELECT id, monthly_token_budget, tpd_limit FROM models`) as any[];
+    const allModels = await db.all(`SELECT id, monthly_token_budget, tpd_limit FROM models`) as any[];
     allModels.sort((a, b) => monthlyBudgetScore(b) - monthlyBudgetScore(a));
     models = allModels.map(m => ({ id: m.id }));
   } else {
@@ -395,30 +394,29 @@ function sortProfileModels(db: any, profileId: number, preset: string) {
     if (!orderBy) {
       throw new Error(`Unknown preset: ${preset}. Use: intelligence, speed, budget`);
     }
-    models = db.all(`SELECT m.id FROM models m ORDER BY ${orderBy}`) as { id: number }[];
+    models = await db.all(`SELECT m.id FROM models m ORDER BY ${orderBy}`) as { id: number }[];
   }
 
   // Preserve existing enabled flags so sorting doesn't reset disabled models
-  const existing = db.all(`
+  const existing = await db.all(`
     SELECT model_db_id, enabled FROM profile_models WHERE profile_id = ?
   `, [profileId]) as { model_db_id: number; enabled: number }[];
   const enabledMap = new Map(existing.map(e => [e.model_db_id, e.enabled]));
 
-  const transaction = db.transaction(() => {
-    db.run('DELETE FROM profile_models WHERE profile_id = ?', [profileId]);
+  await db.transaction(async (tx: Db) => {
+    await tx.run('DELETE FROM profile_models WHERE profile_id = ?', [profileId]);
     for (let i = 0; i < models.length; i++) {
       // Use existing enabled state if available, default to 1 for newly added models
       const enabled = enabledMap.has(models[i].id) ? enabledMap.get(models[i].id) : 1;
-      db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profileId, models[i].id, i + 1, enabled]);
+      await tx.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profileId, models[i].id, i + 1, enabled]);
     }
   });
-  transaction();
 }
 
-profilesRouter.post('/:id/sort/:preset', (req: Request, res: Response) => {
+profilesRouter.post('/:id/sort/:preset', async (req: Request, res: Response) => {
   const db = getDb();
   const profileId = getId(req);
-  const profile = db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
+  const profile = await db.get('SELECT id FROM profiles WHERE id = ?', [profileId]) as any;
   if (!profile) {
     res.status(404).json({ error: { message: 'Profile not found' } });
     return;
@@ -427,7 +425,7 @@ profilesRouter.post('/:id/sort/:preset', (req: Request, res: Response) => {
   const preset = String(req.params.preset);
   
   try {
-    sortProfileModels(db, profileId, preset);
+    await sortProfileModels(db, profileId, preset);
     res.json({ success: true, preset });
   } catch (error: any) {
     res.status(400).json({ error: { message: error.message } });
@@ -435,7 +433,7 @@ profilesRouter.post('/:id/sort/:preset', (req: Request, res: Response) => {
 });
 
 // Initialize built-in profiles if they don't exist
-export function seedProfiles(db: any): void {
+export async function seedProfiles(db: any): Promise<void> {
   const count = db.get("SELECT COUNT(*) as cnt FROM profiles WHERE type = 'default' OR type = 'builtin'") as { cnt: number };
   if (count.cnt > 0) return;
 
@@ -460,12 +458,12 @@ export function seedProfiles(db: any): void {
     ];
 
 
-  const seed = db.transaction(() => {
+  await db.transaction(async (tx: Db) => {
     for (const builtin of builtins) {
-      const result = db.run('INSERT INTO profiles (name, emoji, color, type, sort_order) VALUES (?, ?, ?, ?, ?) RETURNING id', [builtin.name, builtin.emoji, builtin.color, builtin.profileType, -1]);
+      const result = await tx.run('INSERT INTO profiles (name, emoji, color, type, sort_order) VALUES (?, ?, ?, ?, ?) RETURNING id', [builtin.name, builtin.emoji, builtin.color, builtin.profileType, -1]);
       const profileId = result.lastInsertRowid as number;
 
-      const models = db.all('SELECT id, LOWER(display_name) as name FROM models ORDER BY id ASC') as { id: number; name: string }[];
+      const models = await tx.all('SELECT id, LOWER(display_name) as name FROM models ORDER BY id ASC') as { id: number; name: string }[];
 
       const scored = models.map(m => {
         let score = 0;
@@ -484,17 +482,16 @@ export function seedProfiles(db: any): void {
       });
 
       for (let i = 0; i < scored.length; i++) {
-        db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profileId, scored[i].id, i + 1, 1]);
+        await tx.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profileId, scored[i].id, i + 1, 1]);
       }
 
       // Set the default active profile
-      db.run(`
+      await tx.run(`
         INSERT INTO settings (key, value) VALUES ('active_profile_id', ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
       `, [String(profileId)]);
     }
   });
-  seed();
 
   console.log(`Seeded Default profile`);
 }

@@ -11,7 +11,7 @@ export class FirecrawlProvider extends SearchOnlyProvider {
   readonly name = 'Firecrawl';
 
   async validateKey(apiKey: string): Promise<KeyValidationResult> {
-    return this.probe(`${FIRECRAWL_BASE_URL}/team/credit-usage`, {
+    return await this.probe(`${FIRECRAWL_BASE_URL}/team/credit-usage`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${apiKey}` },
     });

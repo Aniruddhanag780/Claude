@@ -103,7 +103,7 @@ export async function catalogFetch(input: string | URL, init?: RequestInit): Pro
   } catch (err) {
     if (!fallbackFetch || init?.signal?.aborted) throw err;
     console.warn(`[catalog-sync] ${describeFetchError(err)}; retrying through the desktop network stack`);
-    return fallbackFetch(input, init);
+    return await fallbackFetch(input, init);
   }
 }
 
@@ -463,8 +463,8 @@ let appliedPlatformsCache: { raw: string; platforms: Set<string> } | null = null
  * limits, so the audited catalog, not an upstream /models list, decides what
  * those providers serve.
  */
-export function appliedCatalogPlatforms(db: Db): Set<string> {
-  const row = db.get('SELECT value FROM settings WHERE key = ?', [SETTING_APPLIED_JSON]) as { value: string } | undefined;
+export async function appliedCatalogPlatforms(db: Db): Promise<Set<string>> {
+  const row = await db.get('SELECT value FROM settings WHERE key = ?', [SETTING_APPLIED_JSON]) as { value: string } | undefined;
   const raw = row?.value ?? '';
   if (appliedPlatformsCache && appliedPlatformsCache.raw === raw) return appliedPlatformsCache.platforms;
   let platforms = new Set<string>();
@@ -478,13 +478,13 @@ export function appliedCatalogPlatforms(db: Db): Set<string> {
   return platforms;
 }
 
-export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['counts']> {
+export async function applyCatalog(db: Db, catalog: Catalog): Promise<NonNullable<SyncResult['counts']>> {
   // One transaction for the whole apply (#1047): the body runs hundreds of
   // individual statements, and under WAL each one outside a transaction is its
   // own commit + fsync executed on the event loop. On slow storage that made
   // the 12-hourly sync freeze every in-flight request — including the 3-query
   // profile-activate POST — for minutes.
-  return db.transaction(() => applyCatalogInner(db, catalog))();
+  return await db.transaction(async () => await applyCatalogInner(db, catalog));
 }
 
 /**
@@ -497,22 +497,22 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
  * `syncCatalog`'s own same-as-applied guard, so for that path the check is
  * always true and nothing changes.
  */
-function catalogBringsNewEvidence(catalog: Catalog): boolean {
-  return getSetting(SETTING_APPLIED_VERSION) !== catalog.version || getSetting(SETTING_APPLIED_TIER) !== catalog.tier;
+async function catalogBringsNewEvidence(catalog: Catalog): Promise<boolean> {
+  return await getSetting(SETTING_APPLIED_VERSION) !== catalog.version || await getSetting(SETTING_APPLIED_TIER) !== catalog.tier;
 }
 
-function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['counts']> {
+async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<SyncResult['counts']>> {
   const counts = { updated: 0, inserted: 0, removed: 0, skippedUnknownPlatform: 0, quirks: 0 };
   // Read once: the applied-version settings are only written after this
   // transaction returns, so they cannot change underneath the loop.
-  const newEvidence = catalogBringsNewEvidence(catalog);
+  const newEvidence = await catalogBringsNewEvidence(catalog);
 
 
   // Generative-media models go to their own table (never the chat router's pool).
   // Transcription rows share media_models but carry adapter metadata in
   // meta_json (subtitle capability, upload ceiling, request flavor).
 
-  const apply = db.transaction(() => {
+  await db.transaction(async (tx) => {
     const inCatalog = new Set<string>();
     const inMediaCatalog = new Set<string>();
     const inEmbeddingCatalog = new Set<string>();
@@ -530,9 +530,9 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
           counts.skippedUnknownPlatform++;
           continue;
         }
-        if (isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
+        if (await isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
         inMediaCatalog.add(`${m.platform}:${m.modelId}`);
-        const mrow = db.get('SELECT id, enabled FROM media_models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as { id: number; enabled: number } | undefined;
+        const mrow = await tx.get('SELECT id, enabled FROM media_models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as { id: number; enabled: number } | undefined;
         // Generative-media meta carries only the adapter request flavor today;
         // a row without one stores NULL so the adapter keeps its default.
         const mmeta: Record<string, unknown> = {};
@@ -546,7 +546,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
         };
         if (mrow) {
           const enabled = m.enabled ? mrow.enabled : 0; // catalog disable wins; local disable wins
-          db.run(`
+          await tx.run(`
     UPDATE media_models SET
       display_name = @displayName, modality = @modality, priority = @priority,
       quota_label = @quotaLabel, enabled = @enabled, meta_json = @metaJson
@@ -554,7 +554,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
   `, [{ ...mfields, id: mrow.id, enabled }]);
           counts.updated++;
         } else {
-          db.run(`
+          await tx.run(`
     INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
     VALUES (@platform, @modelId, @displayName, @modality, @priority, @enabled, @quotaLabel, @metaJson)
   `, [{ ...mfields, platform: m.platform, modelId: m.modelId, enabled: m.enabled ? 1 : 0 }]);
@@ -569,7 +569,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
         counts.skippedUnknownPlatform++;
         continue;
       }
-      if (isCatalogModelTombstoned(db, 'chat', m.platform, m.modelId)) continue;
+      if (await isCatalogModelTombstoned(db, 'chat', m.platform, m.modelId)) continue;
       // A model auto-retired from a 410/end-of-life response (#634) is disabled,
       // not deleted. A catalog that STILL lists it — and lists it enabled — is
       // newer evidence than that one provider response, so lift the retirement.
@@ -577,10 +577,10 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
       // replays the snapshot the retirement already came after, so replaying it
       // back would clear every retirement on the next boot, however fresh the
       // provider's 410 was.
-      if (m.enabled && newEvidence) reinstateUpstreamRetiredCatalogModel(db, m.platform, m.modelId);
+      if (m.enabled && newEvidence) await reinstateUpstreamRetiredCatalogModel(db, m.platform, m.modelId);
       inCatalog.add(`${m.platform}:${m.modelId}`);
 
-      const row = db.get('SELECT id, enabled, source FROM models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as
+      const row = await tx.get('SELECT id, enabled, source FROM models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as
         | { id: number; enabled: number; source: string }
         | undefined;
       // Collision rule: if the user hand-added a model and the catalog later
@@ -594,7 +594,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
       // row over: the metadata below replaces discovery's guesses and the row
       // becomes catalog-owned (pruned with the catalog from then on). Local
       // disables survive, like on any catalog row.
-      if (row && row.source === DISCOVERED_MODEL_SOURCE) db.run("UPDATE models SET source = 'catalog' WHERE id = ?", [row.id]);
+      if (row && row.source === DISCOVERED_MODEL_SOURCE) await tx.run("UPDATE models SET source = 'catalog' WHERE id = ?", [row.id]);
       const fields = {
         displayName: m.displayName,
         intelligenceRank: m.intelligenceRank,
@@ -612,7 +612,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
       if (row) {
         // Catalog disable wins (dead upstream); local disable also wins.
         const enabled = m.enabled ? row.enabled : 0;
-        db.run(`
+        await tx.run(`
     UPDATE models SET
       display_name = @displayName, intelligence_rank = @intelligenceRank, speed_rank = @speedRank,
       size_label = @sizeLabel, rpm_limit = @rpm, rpd_limit = @rpd, tpm_limit = @tpm, tpd_limit = @tpd,
@@ -621,11 +621,11 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
       enabled = @enabled
     WHERE id = @id
   `, [{ ...fields, id: row.id, enabled }]);
-        refreshModelOverrideBaselines(db, m.platform, m.modelId);
-        applyModelOverrides(db, m.platform, m.modelId);
+        await refreshModelOverrideBaselines(db, m.platform, m.modelId);
+        await applyModelOverrides(db, m.platform, m.modelId);
         counts.updated++;
       } else {
-        db.run(`
+        await tx.run(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
                         rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
                         enabled, supports_vision, supports_tools, source)
@@ -633,8 +633,8 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
             @rpm, @rpd, @tpm, @tpd, @monthlyTokenBudget, @contextWindow,
             @enabled, @supportsVision, @supportsTools, 'catalog')
   `, [{ ...fields, platform: m.platform, modelId: m.modelId, enabled: m.enabled ? 1 : 0 }]);
-        refreshModelOverrideBaselines(db, m.platform, m.modelId);
-        applyModelOverrides(db, m.platform, m.modelId);
+        await refreshModelOverrideBaselines(db, m.platform, m.modelId);
+        await applyModelOverrides(db, m.platform, m.modelId);
         counts.inserted++;
       }
     }
@@ -648,7 +648,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
           counts.skippedUnknownPlatform++;
           continue;
         }
-        if (isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
+        if (await isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
         inVideoCatalog.add(`${m.platform}:${m.modelId}`);
         const meta = typeof m.providerModelId === 'string'
           ? JSON.stringify({ providerModelId: m.providerModelId })
@@ -660,10 +660,10 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
           quotaLabel: m.quotaLabel ?? '',
           metaJson: meta,
         };
-        const row = db.get('SELECT id, enabled FROM media_models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as { id: number; enabled: number } | undefined;
+        const row = await tx.get('SELECT id, enabled FROM media_models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as { id: number; enabled: number } | undefined;
         if (row) {
           const enabled = m.enabled ? row.enabled : 0;
-          db.run(`
+          await tx.run(`
     UPDATE media_models SET
       display_name = @displayName, modality = @modality, priority = @priority,
       quota_label = @quotaLabel, enabled = @enabled, meta_json = @metaJson
@@ -671,7 +671,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
   `, [{ ...fields, id: row.id, enabled }]);
           counts.updated++;
         } else {
-          db.run(`
+          await tx.run(`
     INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
     VALUES (@platform, @modelId, @displayName, @modality, @priority, @enabled, @quotaLabel, @metaJson)
   `, [{ ...fields, platform: m.platform, modelId: m.modelId, enabled: m.enabled ? 1 : 0 }]);
@@ -690,7 +690,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
           counts.skippedUnknownPlatform++;
           continue;
         }
-        if (isCatalogModelTombstoned(db, 'media', e.platform, e.engineId)) continue;
+        if (await isCatalogModelTombstoned(db, 'media', e.platform, e.engineId)) continue;
         inSearchCatalog.add(`${e.platform}:${e.engineId}`);
         const meta: Record<string, unknown> = {};
         if (e.creditsPerQuery !== undefined) meta.creditsPerQuery = e.creditsPerQuery;
@@ -709,10 +709,10 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
           quotaLabel: e.quotaLabel ?? '',
           metaJson: JSON.stringify(meta),
         };
-        const row = db.get('SELECT id, enabled FROM media_models WHERE platform = ? AND model_id = ?', [e.platform, e.engineId]) as { id: number; enabled: number } | undefined;
+        const row = await tx.get('SELECT id, enabled FROM media_models WHERE platform = ? AND model_id = ?', [e.platform, e.engineId]) as { id: number; enabled: number } | undefined;
         if (row) {
           const enabled = e.enabled ? row.enabled : 0;
-          db.run(`
+          await tx.run(`
     UPDATE media_models SET
       display_name = @displayName, modality = @modality, priority = @priority,
       quota_label = @quotaLabel, enabled = @enabled, meta_json = @metaJson
@@ -720,7 +720,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
   `, [{ ...fields, id: row.id, enabled }]);
           counts.updated++;
         } else {
-          db.run(`
+          await tx.run(`
     INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
     VALUES (@platform, @modelId, @displayName, @modality, @priority, @enabled, @quotaLabel, @metaJson)
   `, [{ ...fields, platform: e.platform, modelId: e.engineId, enabled: e.enabled ? 1 : 0 }]);
@@ -737,7 +737,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
           counts.skippedUnknownPlatform++;
           continue;
         }
-        if (isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
+        if (await isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
         inDecisionCatalog.add(`${m.platform}:${m.modelId}`);
         const meta: Record<string, unknown> = {};
         if (typeof m.contextWindow === 'number') meta.contextWindow = m.contextWindow;
@@ -749,10 +749,10 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
           quotaLabel: m.quotaLabel ?? '',
           metaJson: JSON.stringify(meta),
         };
-        const row = db.get('SELECT id, enabled FROM media_models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as { id: number; enabled: number } | undefined;
+        const row = await tx.get('SELECT id, enabled FROM media_models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as { id: number; enabled: number } | undefined;
         if (row) {
           const enabled = m.enabled ? row.enabled : 0;
-          db.run(`
+          await tx.run(`
     UPDATE media_models SET
       display_name = @displayName, modality = @modality, priority = @priority,
       quota_label = @quotaLabel, enabled = @enabled, meta_json = @metaJson
@@ -760,7 +760,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
   `, [{ ...fields, id: row.id, enabled }]);
           counts.updated++;
         } else {
-          db.run(`
+          await tx.run(`
     INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
     VALUES (@platform, @modelId, @displayName, @modality, @priority, @enabled, @quotaLabel, @metaJson)
   `, [{ ...fields, platform: m.platform, modelId: m.modelId, enabled: m.enabled ? 1 : 0 }]);
@@ -778,7 +778,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
           continue;
         }
         inEmbeddingCatalog.add(`${m.platform}:${m.modelId}`);
-        const row = db.get('SELECT id, enabled FROM embedding_models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as { id: number; enabled: number } | undefined;
+        const row = await tx.get('SELECT id, enabled FROM embedding_models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as { id: number; enabled: number } | undefined;
         const fields = {
           family: m.family,
           displayName: m.displayName,
@@ -789,7 +789,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
         };
         if (row) {
           const enabled = m.enabled ? row.enabled : 0; // catalog and local disables both win
-          db.run(`
+          await tx.run(`
     UPDATE embedding_models SET
       family = @family, display_name = @displayName, dimensions = @dimensions,
       max_input_tokens = @maxInputTokens, priority = @priority,
@@ -798,7 +798,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
   `, [{ ...fields, id: row.id, enabled }]);
           counts.updated++;
         } else {
-          db.run(`
+          await tx.run(`
     INSERT INTO embedding_models
       (family, platform, model_id, display_name, dimensions, max_input_tokens,
        priority, enabled, quota_label)
@@ -826,7 +826,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
           counts.skippedUnknownPlatform++;
           continue;
         }
-        if (isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
+        if (await isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
         inTranscriptionCatalog.add(`${m.platform}:${m.modelId}`);
         const meta: Record<string, unknown> = {};
         if (m.subtitleFormats?.length) meta.subtitleFormats = m.subtitleFormats;
@@ -838,10 +838,10 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
           quotaLabel: m.quotaLabel ?? '',
           metaJson: Object.keys(meta).length > 0 ? JSON.stringify(meta) : null,
         };
-        const row = db.get('SELECT id, enabled FROM media_models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as { id: number; enabled: number } | undefined;
+        const row = await tx.get('SELECT id, enabled FROM media_models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as { id: number; enabled: number } | undefined;
         if (row) {
           const enabled = m.enabled ? row.enabled : 0; // catalog and local disables both win
-          db.run(`
+          await tx.run(`
     UPDATE media_models SET
       display_name = @displayName, modality = 'transcription', priority = @priority,
       quota_label = @quotaLabel, enabled = @enabled, meta_json = @metaJson
@@ -849,7 +849,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
   `, [{ ...fields, id: row.id, enabled }]);
           counts.updated++;
         } else {
-          db.run(`
+          await tx.run(`
     INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
     VALUES (@platform, @modelId, @displayName, 'transcription', @priority, @enabled, @quotaLabel, @metaJson)
   `, [{ ...fields, platform: m.platform, modelId: m.modelId, enabled: m.enabled ? 1 : 0 }]);
@@ -858,16 +858,16 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
       }
     }
 
-    counts.removed += deleteTombstonedCatalogModels(db);
-    applyAllModelOverrides(db);
+    counts.removed += await deleteTombstonedCatalogModels(db);
+    await applyAllModelOverrides(db);
 
     // Ensure every model has a fallback_config row (same invariant migrations keep).
-    const missingFb = db.all(`SELECT m.id FROM models m LEFT JOIN fallback_config f ON m.id = f.model_db_id WHERE f.id IS NULL`) as { id: number }[];
+    const missingFb = await tx.all(`SELECT m.id FROM models m LEFT JOIN fallback_config f ON m.id = f.model_db_id WHERE f.id IS NULL`) as { id: number }[];
     if (missingFb.length > 0) {
-      const maxPriority = (db.get('SELECT COALESCE(MAX(priority), 0) AS mx FROM fallback_config') as { mx: number }).mx;
-      missingFb.forEach((r, i) => db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)', [r.id, maxPriority + 1 + i]));
+      const maxPriority = (await tx.get('SELECT COALESCE(MAX(priority), 0) AS mx FROM fallback_config') as { mx: number }).mx;
+      missingFb.forEach(async (r, i) => await tx.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)', [r.id, maxPriority + 1 + i]));
     }
-    ensureAllModelsInProfiles(db);
+    await ensureAllModelsInProfiles(db);
 
     // Remove catalog-managed models that the catalog no longer lists.
     // Ownership is decided by the `source` provenance column: only rows the
@@ -877,7 +877,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     // the old size_label NOT IN ('User','Custom') heuristic, which lost user
     // rows whose label didn't follow the convention. The platform/key_id
     // predicates stay as belt and braces.
-    const candidates = db.all(`
+    const candidates = await tx.all(`
         SELECT id, platform, model_id
           FROM models
          WHERE platform != 'custom'
@@ -887,8 +887,8 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     for (const c of candidates) {
       if (!hasProvider(c.platform as Platform)) continue; // not catalog-managed by this binary
       if (!inCatalog.has(`${c.platform}:${c.model_id}`)) {
-        db.run('DELETE FROM fallback_config WHERE model_db_id = ?', [c.id]);
-        db.run('DELETE FROM models WHERE id = ?', [c.id]);
+        await tx.run('DELETE FROM fallback_config WHERE model_db_id = ?', [c.id]);
+        await tx.run('DELETE FROM models WHERE id = ?', [c.id]);
         counts.removed++;
       }
     }
@@ -901,11 +901,11 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     // source='catalog' by now, so what is left is exactly the discovered
     // stopgap the catalog has superseded.
     const managed = catalogPlatforms(catalog);
-    const discoveredRows = db.all('SELECT id, platform FROM models WHERE source = ?', [DISCOVERED_MODEL_SOURCE]) as { id: number; platform: string }[];
+    const discoveredRows = await tx.all('SELECT id, platform FROM models WHERE source = ?', [DISCOVERED_MODEL_SOURCE]) as { id: number; platform: string }[];
     for (const d of discoveredRows) {
       if (!managed.has(d.platform)) continue;
-      db.run('DELETE FROM fallback_config WHERE model_db_id = ?', [d.id]);
-      db.run('DELETE FROM models WHERE id = ?', [d.id]);
+      await tx.run('DELETE FROM fallback_config WHERE model_db_id = ?', [d.id]);
+      await tx.run('DELETE FROM models WHERE id = ?', [d.id]);
       counts.removed++;
     }
 
@@ -913,14 +913,14 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     // cascade in routes/keys.ts removes these at delete time; this is the
     // backstop for orphans from older builds or manual DB edits. Shared rows
     // (key_id NULL) are never touched — only key-bound rows whose key is gone.
-    const orphanChat = db.all('SELECT id FROM models WHERE key_id IS NOT NULL AND key_id NOT IN (SELECT id FROM api_keys)') as { id: number }[];
+    const orphanChat = await tx.all('SELECT id FROM models WHERE key_id IS NOT NULL AND key_id NOT IN (SELECT id FROM api_keys)') as { id: number }[];
     for (const o of orphanChat) {
-      db.run('DELETE FROM fallback_config WHERE model_db_id = ?', [o.id]);
-      db.run('DELETE FROM models WHERE id = ?', [o.id]);
+      await tx.run('DELETE FROM fallback_config WHERE model_db_id = ?', [o.id]);
+      await tx.run('DELETE FROM models WHERE id = ?', [o.id]);
       counts.removed++;
     }
-    counts.removed += (db.run('DELETE FROM embedding_models WHERE key_id IS NOT NULL AND key_id NOT IN (SELECT id FROM api_keys)').changes as number);
-    counts.removed += (db.run('DELETE FROM media_models WHERE key_id IS NOT NULL AND key_id NOT IN (SELECT id FROM api_keys)').changes as number);
+    counts.removed += (await (await tx.run('DELETE FROM embedding_models WHERE key_id IS NOT NULL AND key_id NOT IN (SELECT id FROM api_keys)')).changes as number);
+    counts.removed += (await (await tx.run('DELETE FROM media_models WHERE key_id IS NOT NULL AND key_id NOT IN (SELECT id FROM api_keys)')).changes as number);
 
     // Remove media models the catalog no longer lists (own table, no
     // fallback_config). Deliberately an ALLOWLIST of the two modalities that
@@ -929,11 +929,11 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     // catalog that omits those keys must leave them alone. Widening this back
     // to a `!=` filter would silently delete every video row on the first sync
     // from an older catalog.
-    const mediaCandidates = db.all("SELECT id, platform, model_id FROM media_models WHERE modality IN ('image', 'audio')") as { id: number; platform: string; model_id: string }[];
+    const mediaCandidates = await tx.all("SELECT id, platform, model_id FROM media_models WHERE modality IN ('image', 'audio')") as { id: number; platform: string; model_id: string }[];
     for (const c of mediaCandidates) {
       if (!MEDIA_PLATFORMS.has(c.platform)) continue; // not media-managed by this binary
       if (!inMediaCatalog.has(`${c.platform}:${c.model_id}`)) {
-        db.run('DELETE FROM media_models WHERE id = ?', [c.id]);
+        await tx.run('DELETE FROM media_models WHERE id = ?', [c.id]);
         counts.removed++;
       }
     }
@@ -941,11 +941,11 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     // Prune video rows only when this catalog actually carries the dedicated
     // snapshot. An older catalog cannot know whether a video row was retired.
     if (catalog.videoModels) {
-      const videoCandidates = db.all("SELECT id, platform, model_id FROM media_models WHERE modality = 'video'") as { id: number; platform: string; model_id: string }[];
+      const videoCandidates = await tx.all("SELECT id, platform, model_id FROM media_models WHERE modality = 'video'") as { id: number; platform: string; model_id: string }[];
       for (const c of videoCandidates) {
         if (!VIDEO_PLATFORMS.has(c.platform)) continue;
         if (!inVideoCatalog.has(`${c.platform}:${c.model_id}`)) {
-          db.run('DELETE FROM media_models WHERE id = ?', [c.id]);
+          await tx.run('DELETE FROM media_models WHERE id = ?', [c.id]);
           counts.removed++;
         }
       }
@@ -955,11 +955,11 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     // snapshot. Custom search relays (platform 'custom') are the user's own
     // and never pruned.
     if (catalog.searchEngines) {
-      const searchCandidates = db.all('SELECT id, platform, model_id FROM media_models WHERE modality = ?', [SEARCH_MODALITY]) as { id: number; platform: string; model_id: string }[];
+      const searchCandidates = await tx.all('SELECT id, platform, model_id FROM media_models WHERE modality = ?', [SEARCH_MODALITY]) as { id: number; platform: string; model_id: string }[];
       for (const c of searchCandidates) {
         if (!SEARCH_ENGINE_PLATFORMS.has(c.platform)) continue;
         if (!inSearchCatalog.has(`${c.platform}:${c.model_id}`)) {
-          db.run('DELETE FROM media_models WHERE id = ?', [c.id]);
+          await tx.run('DELETE FROM media_models WHERE id = ?', [c.id]);
           counts.removed++;
         }
       }
@@ -968,11 +968,11 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     // Prune decision models only when the catalog carries the decisionModels
     // snapshot (same rule as search engines).
     if (catalog.decisionModels) {
-      const decisionCandidates = db.all('SELECT id, platform, model_id FROM media_models WHERE modality = ?', [DECISION_MODALITY]) as { id: number; platform: string; model_id: string }[];
+      const decisionCandidates = await tx.all('SELECT id, platform, model_id FROM media_models WHERE modality = ?', [DECISION_MODALITY]) as { id: number; platform: string; model_id: string }[];
       for (const c of decisionCandidates) {
         if (!DECISION_PLATFORMS.has(c.platform)) continue;
         if (!inDecisionCatalog.has(`${c.platform}:${c.model_id}`)) {
-          db.run('DELETE FROM media_models WHERE id = ?', [c.id]);
+          await tx.run('DELETE FROM media_models WHERE id = ?', [c.id]);
           counts.removed++;
         }
       }
@@ -982,11 +982,11 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     // snapshot (mirrors the embeddings rule), scoped to the modality so
     // image/audio rows are never touched by it.
     if (catalog.transcriptionModels) {
-      const sttCandidates = db.all("SELECT id, platform, model_id FROM media_models WHERE modality = 'transcription'") as { id: number; platform: string; model_id: string }[];
+      const sttCandidates = await tx.all("SELECT id, platform, model_id FROM media_models WHERE modality = 'transcription'") as { id: number; platform: string; model_id: string }[];
       for (const c of sttCandidates) {
         if (!TRANSCRIPTION_PLATFORMS.has(c.platform)) continue;
         if (!inTranscriptionCatalog.has(`${c.platform}:${c.model_id}`)) {
-          db.run('DELETE FROM media_models WHERE id = ?', [c.id]);
+          await tx.run('DELETE FROM media_models WHERE id = ?', [c.id]);
           counts.removed++;
         }
       }
@@ -998,7 +998,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     // untouched". The JS truthy check on a non-empty array object would
     // misfire on `[]`, wiping the seeded rows; gate on length instead.
     if (catalog.embeddings && catalog.embeddings.length > 0) {
-      const embeddingCandidates = db.all(`
+      const embeddingCandidates = await tx.all(`
           SELECT id, platform, model_id
             FROM embedding_models
            WHERE platform != 'custom' AND key_id IS NULL
@@ -1006,24 +1006,23 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
       for (const c of embeddingCandidates) {
         if (!EMBEDDING_PLATFORMS.has(c.platform)) continue;
         if (!inEmbeddingCatalog.has(`${c.platform}:${c.model_id}`)) {
-          db.run('DELETE FROM embedding_models WHERE id = ?', [c.id]);
+          await tx.run('DELETE FROM embedding_models WHERE id = ?', [c.id]);
           counts.removed++;
         }
       }
     }
 
     // Quirks are pure content: replace wholesale.
-    db.run('DELETE FROM quirk_targets');
-    db.run('DELETE FROM quirks');
+    await tx.run('DELETE FROM quirk_targets');
+    await tx.run('DELETE FROM quirks');
     const now = Date.now();
     for (const q of catalog.quirks) {
-      const info = db.run(`INSERT INTO quirks (slug, title, body, severity, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)`, [q.slug, q.title, q.body, q.severity, now, now]);
-      for (const t of q.targets) db.run(`INSERT INTO quirk_targets (quirk_id, platform, model_glob) VALUES (?, ?, ?) RETURNING id`, [info.lastInsertRowid, t.platform ?? null, t.modelGlob ?? null]);
+      const info = await tx.run(`INSERT INTO quirks (slug, title, body, severity, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)`, [q.slug, q.title, q.body, q.severity, now, now]);
+      for (const t of q.targets) await tx.run(`INSERT INTO quirk_targets (quirk_id, platform, model_glob) VALUES (?, ?, ?) RETURNING id`, [info.lastInsertRowid, t.platform ?? null, t.modelGlob ?? null]);
       counts.quirks++;
     }
   });
 
-  apply();
   return counts;
 }
 
@@ -1034,8 +1033,8 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
  */
 export async function syncCatalog(force = false): Promise<SyncResult> {
   const db = getDb();
-  const key = getSetting(SETTING_LICENSE_KEY);
-  const applied = getSetting(SETTING_APPLIED_VERSION);
+  const key = await getSetting(SETTING_LICENSE_KEY);
+  const applied = await getSetting(SETTING_APPLIED_VERSION);
 
   try {
     const headers: Record<string, string> = {};
@@ -1046,8 +1045,8 @@ export async function syncCatalog(force = false): Promise<SyncResult> {
     const res = await catalogFetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 
     if (res.status === 304) {
-      setSetting(SETTING_LAST_SYNC_MS, String(Date.now()));
-      setSetting(SETTING_LAST_ERROR, '');
+      await setSetting(SETTING_LAST_SYNC_MS, String(Date.now()));
+      await setSetting(SETTING_LAST_ERROR, '');
       return { ok: true, action: 'up_to_date', version: applied };
     }
     if (!res.ok) throw new Error(`catalog fetch failed: HTTP ${res.status}`);
@@ -1071,39 +1070,39 @@ export async function syncCatalog(force = false): Promise<SyncResult> {
     if (catalog.version < MIN_CATALOG_VERSION) {
       // Older than the bundled baseline (e.g. monthly snapshot lagging a fresh
       // app release) — applying it would roll back migrations. Wait it out.
-      setSetting(SETTING_LAST_SYNC_MS, String(Date.now()));
-      setSetting(SETTING_LAST_ERROR, '');
+      await setSetting(SETTING_LAST_SYNC_MS, String(Date.now()));
+      await setSetting(SETTING_LAST_ERROR, '');
       return { ok: true, action: 'skipped_older', version: catalog.version, tier: catalog.tier };
     }
 
-    const sameAsApplied = applied === catalog.version && getSetting(SETTING_APPLIED_TIER) === catalog.tier;
+    const sameAsApplied = applied === catalog.version && await getSetting(SETTING_APPLIED_TIER) === catalog.tier;
     if (!sameAsApplied) {
-      const counts = applyCatalog(db, catalog);
-      setSetting(SETTING_APPLIED_VERSION, catalog.version);
-      setSetting(SETTING_APPLIED_TIER, catalog.tier);
+      const counts = await applyCatalog(db, catalog);
+      await setSetting(SETTING_APPLIED_VERSION, catalog.version);
+      await setSetting(SETTING_APPLIED_TIER, catalog.tier);
       // Cache the verified document so boots can re-apply it offline (see
       // reapplyCachedCatalog). Stored post-verification: anything that could
       // tamper this row could tamper the models table directly, so the cache
       // adds no new trust surface.
-      setSetting(SETTING_APPLIED_JSON, bytes.toString('utf8'));
+      await setSetting(SETTING_APPLIED_JSON, bytes.toString('utf8'));
       console.log(
         `[catalog-sync] applied ${catalog.tier} v${catalog.version}: ` +
           `${counts.updated} updated, ${counts.inserted} new, ${counts.removed} removed, ` +
           `${counts.quirks} quirks` +
           (counts.skippedUnknownPlatform ? `, ${counts.skippedUnknownPlatform} skipped (unknown platform)` : ''),
       );
-      setSetting(SETTING_LAST_SYNC_MS, String(Date.now()));
-      setSetting(SETTING_LAST_ERROR, '');
+      await setSetting(SETTING_LAST_SYNC_MS, String(Date.now()));
+      await setSetting(SETTING_LAST_ERROR, '');
       return { ok: true, action: 'applied', version: catalog.version, tier: catalog.tier, counts };
     }
 
-    setSetting(SETTING_LAST_SYNC_MS, String(Date.now()));
-    setSetting(SETTING_LAST_ERROR, '');
+    await setSetting(SETTING_LAST_SYNC_MS, String(Date.now()));
+    await setSetting(SETTING_LAST_ERROR, '');
     return { ok: true, action: 'up_to_date', version: catalog.version, tier: catalog.tier };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[catalog-sync] ${message}`);
-    setSetting(SETTING_LAST_ERROR, message);
+    await setSetting(SETTING_LAST_ERROR, message);
     return { ok: false, action: 'error', detail: message };
   }
 }
@@ -1140,7 +1139,7 @@ export async function validateLicenseKey(key: string, timeoutMs = FETCH_TIMEOUT_
 
 /** Revalidate the stored license against the catalog service and cache the result. */
 export async function refreshLicenseStatus(): Promise<LicenseStatus | null> {
-  const key = getSetting(SETTING_LICENSE_KEY);
+  const key = await getSetting(SETTING_LICENSE_KEY);
   if (!key) return null;
   try {
     const res = await catalogFetch(`${catalogBaseUrl()}/v1/license/check`, {
@@ -1150,18 +1149,18 @@ export async function refreshLicenseStatus(): Promise<LicenseStatus | null> {
     if (!res.ok && res.status !== 401) throw new Error(`HTTP ${res.status}`);
     const body = (await res.json()) as Omit<LicenseStatus, 'checkedAtMs'>;
     const status: LicenseStatus = { ...body, checkedAtMs: Date.now() };
-    setSetting(SETTING_LICENSE_STATUS, JSON.stringify(status));
+    await setSetting(SETTING_LICENSE_STATUS, JSON.stringify(status));
     return status;
   } catch (err) {
     // Offline or service down: keep the cached status. Entitlement is enforced
     // server-side at /v1/latest anyway — this cache is informational UI state.
     console.warn(`[catalog-sync] license check unreachable: ${err instanceof Error ? err.message : err}`);
-    return getCachedLicenseStatus();
+    return await getCachedLicenseStatus();
   }
 }
 
-export function getCachedLicenseStatus(): LicenseStatus | null {
-  const raw = getSetting(SETTING_LICENSE_STATUS);
+export async function getCachedLicenseStatus(): Promise<LicenseStatus | null> {
+  const raw = await getSetting(SETTING_LICENSE_STATUS);
   if (!raw) return null;
   try {
     return JSON.parse(raw) as LicenseStatus;
@@ -1178,13 +1177,13 @@ export interface CatalogSyncState {
   lastError: string | null;
 }
 
-export function getSyncState(): CatalogSyncState {
+export async function getSyncState(): Promise<CatalogSyncState> {
   return {
     baseUrl: catalogBaseUrl(),
-    appliedVersion: getSetting(SETTING_APPLIED_VERSION) ?? null,
-    appliedTier: getSetting(SETTING_APPLIED_TIER) ?? null,
-    lastSyncMs: Number(getSetting(SETTING_LAST_SYNC_MS)) || null,
-    lastError: getSetting(SETTING_LAST_ERROR) || null,
+    appliedVersion: await getSetting(SETTING_APPLIED_VERSION) ?? null,
+    appliedTier: await getSetting(SETTING_APPLIED_TIER) ?? null,
+    lastSyncMs: Number(await getSetting(SETTING_LAST_SYNC_MS)) || null,
+    lastError: await getSetting(SETTING_LAST_ERROR) || null,
   };
 }
 
@@ -1204,18 +1203,18 @@ export function getSyncState(): CatalogSyncState {
  * the applied version makes the next poll fetch the full catalog (no `since`
  * short-circuit), which re-applies it and populates the cache.
  */
-export function reapplyCachedCatalog(): { reapplied: boolean; version?: string } {
+export async function reapplyCachedCatalog(): Promise<{ reapplied: boolean; version?: string }> {
   try {
-    const raw = getSetting(SETTING_APPLIED_JSON);
+    const raw = await getSetting(SETTING_APPLIED_JSON);
     if (!raw) {
-      if (getSetting(SETTING_APPLIED_VERSION)) {
-        getDb().run('DELETE FROM settings WHERE key = ?', [SETTING_APPLIED_VERSION]);
+      if (await getSetting(SETTING_APPLIED_VERSION)) {
+        await getDb().run('DELETE FROM settings WHERE key = ?', [SETTING_APPLIED_VERSION]);
       }
       return { reapplied: false };
     }
     const parsed: unknown = JSON.parse(raw);
     if (!isCatalog(parsed) || parsed.version < MIN_CATALOG_VERSION) return { reapplied: false };
-    applyCatalog(getDb(), parsed);
+    await applyCatalog(getDb(), parsed);
     console.log(`[catalog-sync] re-applied cached ${parsed.tier} v${parsed.version} after boot`);
     return { reapplied: true, version: parsed.version };
   } catch (err) {
@@ -1227,13 +1226,13 @@ export function reapplyCachedCatalog(): { reapplied: boolean; version?: string }
 let cancelBootTimer: (() => void) | null = null;
 let cancelInterval: (() => void) | null = null;
 
-export function startCatalogSync(scheduler: Scheduler): void {
+export async function startCatalogSync(scheduler: Scheduler): Promise<void> {
   if (cancelInterval) return;
   if (process.env.CATALOG_SYNC_DISABLED === '1') {
     console.log('[catalog-sync] disabled via CATALOG_SYNC_DISABLED=1');
     return;
   }
-  reapplyCachedCatalog();
+  await reapplyCachedCatalog();
   const run = () => {
     void refreshLicenseStatus();
     void syncCatalog();

@@ -30,10 +30,10 @@ import { getSetting } from '../db/index.js';
 export const REQUEST_MAX_TOKENS_BUDGET_SETTING = 'request_max_tokens_budget';
 export const MAX_CONSECUTIVE_UPSTREAM_FAILS_SETTING = 'max_consecutive_upstream_fails';
 
-function readGuardrailValue(settingKey: string, envKey: string): number {
+async function readGuardrailValue(settingKey: string, envKey: string): Promise<number> {
   let stored: string | undefined;
   try {
-    stored = getSetting(settingKey);
+    stored = await getSetting(settingKey);
   } catch {
     stored = undefined; // DB not ready — never throw on the proxy hot path
   }
@@ -46,13 +46,13 @@ function readGuardrailValue(settingKey: string, envKey: string): number {
 }
 
 /** Per-request token budget ceiling; 0 = disabled. */
-export function getRequestMaxTokensBudget(): number {
-  return readGuardrailValue(REQUEST_MAX_TOKENS_BUDGET_SETTING, 'REQUEST_MAX_TOKENS_BUDGET');
+export async function getRequestMaxTokensBudget(): Promise<number> {
+  return await readGuardrailValue(REQUEST_MAX_TOKENS_BUDGET_SETTING, 'REQUEST_MAX_TOKENS_BUDGET');
 }
 
 /** Consecutive-upstream-failure breaker threshold; 0 = disabled. */
-export function getMaxConsecutiveUpstreamFails(): number {
-  return readGuardrailValue(MAX_CONSECUTIVE_UPSTREAM_FAILS_SETTING, 'MAX_CONSECUTIVE_UPSTREAM_FAILS');
+export async function getMaxConsecutiveUpstreamFails(): Promise<number> {
+  return await readGuardrailValue(MAX_CONSECUTIVE_UPSTREAM_FAILS_SETTING, 'MAX_CONSECUTIVE_UPSTREAM_FAILS');
 }
 
 // ── Token budget (pre-flight) ────────────────────────────────────────────────
@@ -86,8 +86,8 @@ export const TOKEN_BUDGET_OUTPUT_CAP = 4096;
  * flat per-image estimate); `maxTokens` is the client-requested output cap,
  * possibly undefined on the OpenAI-shaped surfaces.
  */
-export function applyTokenBudget(estimatedInputTokens: number, maxTokens: number | undefined): TokenBudgetResult {
-  const budget = getRequestMaxTokensBudget();
+export async function applyTokenBudget(estimatedInputTokens: number, maxTokens: number | undefined): Promise<TokenBudgetResult> {
+  const budget = await getRequestMaxTokensBudget();
   if (budget <= 0) return { rejection: null, maxTokens };
   const estimatedTotal = estimatedInputTokens + (maxTokens ?? 0);
   if (estimatedTotal > budget) return { rejection: { budget, estimatedTotal }, maxTokens };
@@ -113,8 +113,8 @@ export interface BreakerState {
   consecutive: number;
 }
 
-export function newBreaker(limit: number = getMaxConsecutiveUpstreamFails()): BreakerState {
-  return { limit, consecutive: 0 };
+export async function newBreaker(limit?: number): Promise<BreakerState> {
+  return { limit: limit ?? await getMaxConsecutiveUpstreamFails(), consecutive: 0 };
 }
 
 /**

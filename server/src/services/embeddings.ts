@@ -74,19 +74,19 @@ async function upstreamEmbeddingsError(r: Response): Promise<EmbeddingsError> {
   );
 }
 
-export function listEmbeddingModels(): EmbeddingModelRow[] {
-  return getDb().all('SELECT * FROM embedding_models ORDER BY family, priority') as EmbeddingModelRow[];
+export async function listEmbeddingModels(): Promise<EmbeddingModelRow[]> {
+  return await getDb().all('SELECT * FROM embedding_models ORDER BY family, priority') as EmbeddingModelRow[];
 }
 
-export function getDefaultFamily(): string {
-  return getSetting('embeddings_default_family') ?? 'gemini-embedding-001';
+export async function getDefaultFamily(): Promise<string> {
+  return await getSetting('embeddings_default_family') ?? 'gemini-embedding-001';
 }
 
 /** Map the request's `model` to a family: 'auto'/empty → default; a family
  * name → itself; a provider-specific model id → its family. */
-export function resolveFamily(model: string | undefined): string | null {
-  if (!model || model === 'auto') return getDefaultFamily();
-  const rows = listEmbeddingModels();
+export async function resolveFamily(model: string | undefined): Promise<string | null> {
+  if (!model || model === 'auto') return await getDefaultFamily();
+  const rows = await listEmbeddingModels();
   if (rows.some(r => r.family === model)) return model;
   const byModelId = rows.find(r => r.model_id === model);
   return byModelId?.family ?? null;
@@ -204,8 +204,8 @@ export interface CustomEmbeddingRegistration {
  * at a different dimension: vectors from mismatched spaces must never mix, so
  * the caller has to pick a new family name instead.
  */
-export function registerCustomEmbeddingModel(db: Db, reg: CustomEmbeddingRegistration): { modelDbId: number; created: boolean } {
-  const sibling = db.get(`
+export async function registerCustomEmbeddingModel(db: Db, reg: CustomEmbeddingRegistration): Promise<{ modelDbId: number; created: boolean }> {
+  const sibling = await db.get(`
     SELECT dimensions
       FROM embedding_models
      WHERE family = ?
@@ -219,8 +219,8 @@ export function registerCustomEmbeddingModel(db: Db, reg: CustomEmbeddingRegistr
     );
   }
 
-  const endpointKeyIds = customEndpointKeyIds(db, reg.keyId);
-  const existingModel = db.get(`
+  const endpointKeyIds = await customEndpointKeyIds(db, reg.keyId);
+  const existingModel = await db.get(`
     SELECT id, priority, key_id
       FROM embedding_models
      WHERE platform = 'custom' AND model_id = ?
@@ -232,14 +232,14 @@ export function registerCustomEmbeddingModel(db: Db, reg: CustomEmbeddingRegistr
     ? existingModel.key_id
     : reg.keyId;
   const priority = existingModel?.priority ?? (
-    (db.get('SELECT COALESCE(MAX(priority), 0) AS maxPriority FROM embedding_models WHERE family = ?', [reg.family]) as { maxPriority: number }).maxPriority + 1
+    (await db.get('SELECT COALESCE(MAX(priority), 0) AS maxPriority FROM embedding_models WHERE family = ?', [reg.family]) as { maxPriority: number }).maxPriority + 1
   );
 
   // `display_name` is optional: a new model takes its id, and a model already
   // on record keeps the name it has instead of being reset by a submit that
   // simply left the field blank (#704).
   if (existingModel) {
-    db.run(`
+    await db.run(`
       UPDATE embedding_models
          SET family = ?,
              display_name = COALESCE(?, display_name),
@@ -254,7 +254,7 @@ export function registerCustomEmbeddingModel(db: Db, reg: CustomEmbeddingRegistr
     return { modelDbId: existingModel.id, created: false };
   }
 
-  const model = db.run(`
+  const model = await db.run(`
     INSERT INTO embedding_models
       (family, platform, model_id, display_name, dimensions, max_input_tokens, priority, enabled, quota_label, key_id)
     VALUES (?, 'custom', ?, ?, ?, ?, ?, 1, ?, ?) RETURNING id
@@ -267,38 +267,38 @@ async function callProvider(row: EmbeddingModelRow, credential: ProviderCredenti
   switch (row.platform) {
     case 'custom':
       if (!credential.baseUrl) throw new EmbeddingsError('custom embedding provider is missing base_url', 500);
-      return openAiStyleEmbed(`${credential.baseUrl}/embeddings`, row.platform, key, row.model_id, inputs, {}, dimensions);
+      return await openAiStyleEmbed(`${credential.baseUrl}/embeddings`, row.platform, key, row.model_id, inputs, {}, dimensions);
     case 'google':
-      return openAiStyleEmbed('https://generativelanguage.googleapis.com/v1beta/openai/embeddings', row.platform, key, row.model_id, inputs, {}, dimensions);
+      return await openAiStyleEmbed('https://generativelanguage.googleapis.com/v1beta/openai/embeddings', row.platform, key, row.model_id, inputs, {}, dimensions);
     case 'nvidia':
       // NeMo Retriever NIMs require input_type; 'query' is the symmetric-safe
       // choice for a gateway that can't know whether this is index or query time.
       // MRL models (e.g. llama-nemotron-embed-1b-v2) accept dimensions and truncate.
-      return openAiStyleEmbed('https://integrate.api.nvidia.com/v1/embeddings', row.platform, key, row.model_id, inputs, { input_type: 'query' }, dimensions);
+      return await openAiStyleEmbed('https://integrate.api.nvidia.com/v1/embeddings', row.platform, key, row.model_id, inputs, { input_type: 'query' }, dimensions);
     case 'openrouter':
-      return openAiStyleEmbed('https://openrouter.ai/api/v1/embeddings', row.platform, key, row.model_id, inputs, {}, dimensions);
+      return await openAiStyleEmbed('https://openrouter.ai/api/v1/embeddings', row.platform, key, row.model_id, inputs, {}, dimensions);
     case 'sealion':
-      return openAiStyleEmbed('https://api.sea-lion.ai/v1/embeddings', row.platform, key, row.model_id, inputs, {}, dimensions);
+      return await openAiStyleEmbed('https://api.sea-lion.ai/v1/embeddings', row.platform, key, row.model_id, inputs, {}, dimensions);
     case 'speka':
-      return openAiStyleEmbed(`${SPEKA_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions);
+      return await openAiStyleEmbed(`${SPEKA_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions);
     case 'electronhub':
-      return openAiStyleEmbed(`${ELECTRONHUB_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions, row.dimensions);
+      return await openAiStyleEmbed(`${ELECTRONHUB_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions, row.dimensions);
     case 'inferbase':
-      return openAiStyleEmbed(`${INFERBASE_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions, row.dimensions);
+      return await openAiStyleEmbed(`${INFERBASE_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions, row.dimensions);
     case 'llmtr':
       // The catalog-approved models return fixed-width vectors. Do not send a
       // dimension override or accept a substituted model/embedding space.
       if (dimensions !== undefined && dimensions !== row.dimensions) {
         throw new EmbeddingsError('LLMTR does not support an embedding dimension override', 400);
       }
-      return openAiStyleEmbed(`${LLMTR_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, {}, undefined, row.dimensions);
+      return await openAiStyleEmbed(`${LLMTR_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, {}, undefined, row.dimensions);
     case 'cloudflare': {
       // Key is stored as "account_id:token".
       const sep = key.indexOf(':');
       if (sep === -1) throw new EmbeddingsError('cloudflare key is not in account_id:token form', 500);
       const accountId = key.slice(0, sep);
       const token = key.slice(sep + 1);
-      return openAiStyleEmbed(
+      return await openAiStyleEmbed(
         `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/embeddings`,
         row.platform, token, row.model_id, inputs, {},
       );
@@ -341,17 +341,17 @@ async function callProvider(row: EmbeddingModelRow, credential: ProviderCredenti
   }
 }
 
-function logEmbeddingRequest(
+async function logEmbeddingRequest(
   row: EmbeddingModelRow,
   keyId: number | null,
   status: 'success' | 'error',
   inputTokens: number,
   latencyMs: number,
   error: string | null,
-): void {
+): Promise<void> {
   try {
     const client = getClientContext();
-    getDb().run(`
+    await getDb().run(`
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
       VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'embedding', ?, ?, ?)
     `, [row.platform, row.model_id, keyId, status, inputTokens, latencyMs, error, client.ip, client.userAgent, client.agent]);
@@ -370,14 +370,14 @@ function logEmbeddingRequest(
  * family registry still pins the canonical dimension, this just lets callers ask
  * for a smaller vector at the cost of some accuracy. */
 export async function runEmbeddings(model: string | undefined, inputs: string[], dimensions?: number): Promise<EmbeddingsResult> {
-  const family = resolveFamily(model);
+  const family = await resolveFamily(model);
   if (!family) {
     throw new EmbeddingsError(
       `Unknown embedding model '${model}'. Use 'auto', a family name, or a provider model id.`, 400,
     );
   }
 
-  const chain = (getDb().all('SELECT * FROM embedding_models WHERE family = ? AND enabled = 1 ORDER BY priority', [family]) as EmbeddingModelRow[]);
+  const chain = (await getDb().all('SELECT * FROM embedding_models WHERE family = ? AND enabled = 1 ORDER BY priority', [family]) as EmbeddingModelRow[]);
   if (chain.length === 0) {
     throw new EmbeddingsError(`No enabled providers for embedding family '${family}'.`, 503);
   }
@@ -387,7 +387,7 @@ export async function runEmbeddings(model: string | undefined, inputs: string[],
   // limited end to end earns a Retry-After, and then the soonest one.
   const hints = new RetryHintTracker();
   for (const row of chain) {
-    const { credential, budgetBlocked } = reserveProviderCredential(row, estimateTokens(inputs));
+    const { credential, budgetBlocked } = await reserveProviderCredential(row, estimateTokens(inputs));
     if (!credential) {
       if (budgetBlocked) {
         lastError = new EmbeddingsError('Monthly key budget exhausted', 429, 'quota_exceeded');
@@ -402,7 +402,7 @@ export async function runEmbeddings(model: string | undefined, inputs: string[],
         throw new EmbeddingsError('upstream returned malformed embeddings', 502);
       }
       const tokens = out.inputTokens ?? estimateTokens(inputs);
-      logEmbeddingRequest(row, credential.id, 'success', tokens, Date.now() - started, null);
+      await logEmbeddingRequest(row, credential.id, 'success', tokens, Date.now() - started, null);
       return {
         family,
         platform: row.platform,
@@ -413,7 +413,7 @@ export async function runEmbeddings(model: string | undefined, inputs: string[],
       };
     } catch (err: any) {
       const e = err instanceof EmbeddingsError ? err : new EmbeddingsError(String(err?.message ?? err), 502);
-      logEmbeddingRequest(row, credential.id, 'error', 0, Date.now() - started, e.message.slice(0, 300));
+      await logEmbeddingRequest(row, credential.id, 'error', 0, Date.now() - started, e.message.slice(0, 300));
       lastError = e;
       hints.record(e.status, e.retryAfterMs);
       // fall through to the next provider in the family

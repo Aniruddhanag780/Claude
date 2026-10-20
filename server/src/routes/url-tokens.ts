@@ -8,9 +8,9 @@ import { validateUrlToken } from '../services/url-tokens.js';
 
 export const urlTokenRouter = Router({ mergeParams: true });
 
-urlTokenRouter.use((req: Request, res: Response, next: NextFunction) => {
+urlTokenRouter.use(async (req: Request, res: Response, next: NextFunction) => {
   const token = String(req.params.token ?? '');
-  if (!validateUrlToken(token)) {
+  if (!await validateUrlToken(token)) {
     res.status(401).json({
       error: {
         message: 'Invalid or revoked URL token',
@@ -22,7 +22,7 @@ urlTokenRouter.use((req: Request, res: Response, next: NextFunction) => {
   // Downstream protocol routers retain their normal authentication checks.
   // Supply the unified key internally only after the separately revocable URL
   // token was verified; it never appears in the public URL.
-  req.headers.authorization = `Bearer ${getUnifiedApiKey()}`;
+  req.headers.authorization = `Bearer ${await getUnifiedApiKey()}`;
   (req as Request & { urlTokenAuthenticated?: boolean }).urlTokenAuthenticated = true;
   next();
 });

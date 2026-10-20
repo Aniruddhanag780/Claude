@@ -16,8 +16,8 @@ export const ollamaRouter = Router();
 
 export type OllamaEmulationMode = 'off' | 'open-loopback' | 'key-required';
 
-export function getOllamaEmulationMode(): OllamaEmulationMode {
-  const stored = getSetting('ollama_emulation');
+export async function getOllamaEmulationMode(): Promise<OllamaEmulationMode> {
+  const stored = await getSetting('ollama_emulation');
   return stored === 'open-loopback' || stored === 'key-required' ? stored : 'off';
 }
 
@@ -36,11 +36,11 @@ export function isLoopback(req: Request): boolean {
   return !firstForwarded || isLoopbackAddress(firstForwarded);
 }
 
-function authorize(req: Request, res: Response): boolean {
+async function authorize(req: Request, res: Response): Promise<boolean> {
   if ((req as Request & { urlTokenAuthenticated?: boolean }).urlTokenAuthenticated) {
     return true;
   }
-  const mode = getOllamaEmulationMode();
+  const mode = await getOllamaEmulationMode();
   if (mode === 'off') {
     res.status(404).json({ error: 'Ollama emulation is disabled' });
     return false;
@@ -53,7 +53,7 @@ function authorize(req: Request, res: Response): boolean {
     return false;
   }
   const token = extractApiToken(req);
-  if (!token || !timingSafeStringEqual(token, getUnifiedApiKey())) {
+  if (!token || !timingSafeStringEqual(token, await getUnifiedApiKey())) {
     res.status(401).json({ error: 'Invalid API key' });
     return false;
   }
@@ -75,7 +75,7 @@ function ollamaDoneReason(finishReason: string | null | undefined): string {
 // Epoch-0 renders as "55 years ago" in Ollama UIs; boot time is honest enough.
 const CATALOG_MODIFIED_AT = new Date().toISOString();
 
-function ollamaModel(model: ReturnType<typeof buildModelListing>['models'][number]) {
+function ollamaModel(model: Awaited<ReturnType<typeof buildModelListing>>['models'][number]) {
   return {
     name: model.id,
     model: model.id,
@@ -93,9 +93,9 @@ function ollamaModel(model: ReturnType<typeof buildModelListing>['models'][numbe
   };
 }
 
-ollamaRouter.get('/api/tags', (req, res) => {
-  if (!authorize(req, res)) return;
-  const { models } = buildModelListing();
+ollamaRouter.get('/api/tags', async (req, res) => {
+  if (!await authorize(req, res)) return;
+  const { models } = await buildModelListing();
   // Ollama clients always pick an explicit model from this list, so advertise
   // `auto` and only models /api/chat will actually accept (see proxy.ts /v1/models).
   const auto = {
@@ -116,23 +116,23 @@ ollamaRouter.get('/api/tags', (req, res) => {
   res.json({ models: [auto, ...models.filter(model => model.available === 1).map(ollamaModel)] });
 });
 
-ollamaRouter.get('/api/version', (req, res) => {
-  if (!authorize(req, res)) return;
+ollamaRouter.get('/api/version', async (req, res) => {
+  if (!await authorize(req, res)) return;
   // Plain semver: a prerelease suffix would compare BELOW 0.9.9 for clients
   // that gate features on a minimum Ollama version.
   res.json({ version: '0.9.9' });
 });
 
 const showSchema = z.object({ model: z.string().optional(), name: z.string().optional() }).passthrough();
-ollamaRouter.post('/api/show', (req, res) => {
-  if (!authorize(req, res)) return;
+ollamaRouter.post('/api/show', async (req, res) => {
+  if (!await authorize(req, res)) return;
   const parsed = showSchema.safeParse(req.body);
   if (!parsed.success || !(parsed.data.model || parsed.data.name)) {
     res.status(400).json({ error: 'model is required' });
     return;
   }
   const id = normalizeOllamaModel(parsed.data.model || parsed.data.name);
-  const { models, autoContextWindow } = buildModelListing();
+  const { models, autoContextWindow } = await buildModelListing();
   if (id === 'auto') {
     // /api/tags advertises `auto`, and clients probe /api/show for
     // capabilities before using a model.
@@ -383,8 +383,8 @@ function ollamaWire(model: string): InboundChatWire {
 // the router and resurfaces as an `unhandledRejection`, which the process
 // safety net classifies as fatal for anything that is not a transport error,
 // so one failing request exited the whole gateway instead of answering 500.
-ollamaRouter.post('/api/chat', (req, res) => {
-  if (!authorize(req, res)) return;
+ollamaRouter.post('/api/chat', async (req, res) => {
+  if (!await authorize(req, res)) return;
   const parsed = chatSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: `invalid request: ${parsed.error.message}` });
@@ -408,7 +408,7 @@ ollamaRouter.post('/api/chat', (req, res) => {
   const options = body.options as Record<string, unknown> | undefined;
   const rawSession = req.headers['x-ollama-session-id'] ?? req.headers['x-session-id'];
   const sessionId = Array.isArray(rawSession) ? rawSession[0] : rawSession;
-  return runInboundChat(req, res, {
+  return await runInboundChat(req, res, {
     model,
     messages: ollamaMessages(body.messages),
     stream: body.stream !== false,
@@ -498,8 +498,8 @@ function generateWire(model: string): InboundChatWire {
   };
 }
 
-ollamaRouter.post('/api/generate', (req, res) => {
-  if (!authorize(req, res)) return;
+ollamaRouter.post('/api/generate', async (req, res) => {
+  if (!await authorize(req, res)) return;
   const parsed = generateSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: `invalid request: ${parsed.error.message}` });
@@ -528,7 +528,7 @@ ollamaRouter.post('/api/generate', (req, res) => {
       ? `${body.prompt}\n\nComplete the text before this suffix:\n${body.suffix}`
       : body.prompt,
   });
-  return runInboundChat(req, res, {
+  return await runInboundChat(req, res, {
     model,
     messages,
     stream: body.stream !== false,
@@ -557,7 +557,7 @@ const embedSchema = z.object({
 });
 
 async function handleEmbed(req: Request, res: Response, legacy: boolean): Promise<void> {
-  if (!authorize(req, res)) return;
+  if (!await authorize(req, res)) return;
   const parsed = embedSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: `invalid request: ${parsed.error.message}` });
@@ -592,26 +592,26 @@ async function handleEmbed(req: Request, res: Response, legacy: boolean): Promis
   }
 }
 
-ollamaRouter.post('/api/embed', (req, res) => {
-  return handleEmbed(req, res, false);
+ollamaRouter.post('/api/embed', async (req, res) => {
+  return await handleEmbed(req, res, false);
 });
 
 // The dashboard already owns POST /api/embeddings. A valid dashboard session
 // always falls through to that router; otherwise this exact path is Ollama's
 // legacy embeddings endpoint and is governed by the emulation auth mode.
-ollamaRouter.post('/api/embeddings', (req: Request, res: Response, next: NextFunction) => {
+ollamaRouter.post('/api/embeddings', async (req: Request, res: Response, next: NextFunction) => {
   const dashboardToken = req.headers.authorization?.replace(/^Bearer\s+/i, '')
     ?? (req.headers['x-dashboard-token'] as string | undefined);
-  if (validateSession(dashboardToken)) {
+  if (await validateSession(dashboardToken)) {
     next();
     return;
   }
   // A stale dashboard session must still surface as 401 so the SPA's
   // re-login flow triggers — unless the bearer could be a unified API key
   // for key-required Ollama mode, which handleEmbed will verify itself.
-  if (dashboardToken && getOllamaEmulationMode() !== 'key-required') {
+  if (dashboardToken && await getOllamaEmulationMode() !== 'key-required') {
     res.status(401).json({ error: { message: 'Authentication required', type: 'authentication_error' } });
     return;
   }
-  return handleEmbed(req, res, true);
+  return await handleEmbed(req, res, true);
 });

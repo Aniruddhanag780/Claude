@@ -11,7 +11,7 @@ export class LinkupProvider extends SearchOnlyProvider {
   readonly name = 'Linkup';
 
   async validateKey(apiKey: string): Promise<KeyValidationResult> {
-    return this.probe(`${LINKUP_BASE_URL}/credits/balance`, {
+    return await this.probe(`${LINKUP_BASE_URL}/credits/balance`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${apiKey}` },
     });

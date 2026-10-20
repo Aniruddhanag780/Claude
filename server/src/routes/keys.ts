@@ -195,7 +195,7 @@ function splitRawKey(rawKey: string) {
   };
 }
 
-function insertImportedKey(platform: (typeof PLATFORMS)[number], keyName: string, keyValue: string) {
+async function insertImportedKey(platform: (typeof PLATFORMS)[number], keyName: string, keyValue: string) {
   if (platform === 'custom') {
     throw new Error('Custom providers must be added with a base URL');
   }
@@ -205,7 +205,7 @@ function insertImportedKey(platform: (typeof PLATFORMS)[number], keyName: string
 
   const db = getDb();
   const { encrypted, iv, authTag } = encrypt(keyValue.trim());
-  db.run(`
+  await db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
     VALUES (?, ?, ?, ?, ?, 'unknown', 1)
   `, [platform, keyName, encrypted, iv, authTag]);
@@ -238,9 +238,9 @@ export function isExportableKey(row: { platform: string; baseUrl: string | null;
 // have a chat row, so counting `models` alone reported "no models" — and fired
 // the no-catalog notice — for them even on a fully synced Premium install
 // (#1327).
-function enabledModelCount(platform: string): number {
+async function enabledModelCount(platform: string): Promise<number> {
   const db = getDb();
-  const row = db.get(`
+  const row = await db.get(`
     SELECT (SELECT COUNT(*) FROM models           WHERE platform = ? AND enabled = 1)
          + (SELECT COUNT(*) FROM embedding_models WHERE platform = ? AND enabled = 1)
          + (SELECT COUNT(*) FROM media_models     WHERE platform = ? AND enabled = 1) AS c
@@ -265,8 +265,8 @@ function openAICompatBaseUrl(platform: string): string | null {
 // "with its base URL" without naming it — even for providers with no such
 // endpoint. The notice now matches the install's actual catalog tier, names
 // the base URL, and only offers the custom-provider route where it works.
-function noModelsNotice(platform: string): string | undefined {
-  if (enabledModelCount(platform) > 0) return undefined;
+async function noModelsNotice(platform: string): Promise<string | undefined> {
+  if (await enabledModelCount(platform) > 0) return undefined;
   // Search keys have engines, not models (#1174): a key whose engine is off
   // or not in this catalog gets told where engines live instead of the chat
   // advice below.
@@ -276,7 +276,7 @@ function noModelsNotice(platform: string): string | undefined {
   // #1348: a built-in provider the catalog does not carry fills its model list
   // from its own /models, so the Premium and custom-provider advice below
   // would send the operator the wrong way.
-  if (isBuiltinDiscoveryEligible(getDb(), platform)) {
+  if (await isBuiltinDiscoveryEligible(getDb(), platform)) {
     return builtinDiscoveryMode() === 'auto'
       ? `Key saved. The catalog does not list ${platform} models, so they are being fetched from ${platform}'s own model list. ` +
         `Use Fetch models on the key to review them or add more.`
@@ -286,7 +286,7 @@ function noModelsNotice(platform: string): string | undefined {
   const customRoute = baseUrl
     ? `add ${platform} as a custom OpenAI-compatible provider with base URL ${baseUrl}`
     : null;
-  const premium = getSyncState().appliedTier === 'live';
+  const premium = await (await getSyncState()).appliedTier === 'live';
   if (premium) {
     return (
       `Key saved, but your Premium catalog does not list any ${platform} models yet. ` +
@@ -308,9 +308,9 @@ function noModelsNotice(platform: string): string | undefined {
 // missing without enumerating the whole list by hand. `custom` is excluded —
 // it's a per-key user-defined placeholder, not a fixed free-tier provider to
 // "check off".
-keysRouter.get('/providers', (_req: Request, res: Response) => {
+keysRouter.get('/providers', async (_req: Request, res: Response) => {
   const db = getDb();
-  const countRows = db.all(`
+  const countRows = await db.all(`
     SELECT
       platform,
       COUNT(*) AS total_keys,
@@ -352,27 +352,27 @@ keysRouter.get('/providers', (_req: Request, res: Response) => {
 });
 
 // List all keys (masked)
-keysRouter.get('/', (_req: Request, res: Response) => {
+keysRouter.get('/', async (_req: Request, res: Response) => {
   const db = getDb();
-  const rows = db.all('SELECT * FROM api_keys ORDER BY created_at DESC') as any[];
+  const rows = await db.all('SELECT * FROM api_keys ORDER BY created_at DESC') as any[];
   const modelCounts = new Map<string, number>();
-  const modelCountFor = (platform: string): number => {
-    if (!modelCounts.has(platform)) modelCounts.set(platform, enabledModelCount(platform));
+  const modelCountFor = async (platform: string): Promise<number> => {
+    if (!modelCounts.has(platform)) modelCounts.set(platform, await enabledModelCount(platform));
     return modelCounts.get(platform)!;
   };
 
   const customModels = [
-    ...db.all(`
+    ...await db.all(`
       SELECT key_id, id, 'chat' AS kind, model_id, display_name, NULL AS family
         FROM models
        WHERE platform = 'custom' AND key_id IS NOT NULL
     `) as any[],
-    ...db.all(`
+    ...await db.all(`
       SELECT key_id, id, 'embedding' AS kind, model_id, display_name, family
         FROM embedding_models
        WHERE platform = 'custom' AND key_id IS NOT NULL
     `) as any[],
-    ...db.all(`
+    ...await db.all(`
       SELECT key_id, id, modality AS kind, model_id, display_name, NULL AS family
         FROM media_models
        WHERE platform = 'custom' AND key_id IS NOT NULL
@@ -411,18 +411,18 @@ keysRouter.get('/', (_req: Request, res: Response) => {
 
   // A cooling-down key reads as healthy and enabled while the router skips it,
   // so surface the cooldowns that explain the idleness. (#P0-7)
-  const cooldownsByKeyId = getActiveCooldownsForKeys(rows.map(row => Number(row.id)));
+  const cooldownsByKeyId = await getActiveCooldownsForKeys(rows.map(row => Number(row.id)));
 
   // #1348: which built-in platforms may fill their model list from their own
   // /models, so the dashboard offers Fetch models on those key rows only.
   const discoverable = new Map<string, boolean>();
-  const canDiscover = (platform: string) => {
+  const canDiscover = async (platform: string) => {
     if (platform === 'custom') return false;
-    if (!discoverable.has(platform)) discoverable.set(platform, isBuiltinDiscoveryEligible(db, platform));
+    if (!discoverable.has(platform)) discoverable.set(platform, await isBuiltinDiscoveryEligible(db, platform));
     return discoverable.get(platform)!;
   };
 
-  const keys = rows.map(row => {
+  const keys = rows.map(async row => {
     let maskedKey = '****';
     let realKey = '';
     try {
@@ -433,11 +433,11 @@ keysRouter.get('/', (_req: Request, res: Response) => {
     }
     const cooldowns = cooldownsByKeyId.get(Number(row.id)) ?? [];
     const scope = parseModelScope(row.model_scope_json);
-    const budgetCaps = getMonthlyBudgetCaps(Number(row.id));
+    const budgetCaps = await getMonthlyBudgetCaps(Number(row.id));
     // Usage alongside the caps so the dashboard can show "342 of 1,000 this
     // month" instead of only the cap (OpenRouter's GET /api/v1/key returns
     // limit_remaining for the same reason).
-    const monthlyUsage = getMonthlyUsage(Number(row.id));
+    const monthlyUsage = await getMonthlyUsage(Number(row.id));
     return {
       id: row.id,
       platform: row.platform,
@@ -469,7 +469,7 @@ keysRouter.get('/', (_req: Request, res: Response) => {
       // any of the provider's models to serve that first request with.
       autoHealthCheck: resolveProvider(row.platform)?.supportsKeyValidation !== false,
       ...(resolveProvider(row.platform)?.supportsKeyValidation === false
-        ? { modelsAvailable: modelCountFor(row.platform) }
+        ? { modelsAvailable: await modelCountFor(row.platform) }
         : {}),
       // Lets the export dialog count exactly what the export will write.
       exportable: isExportableKey({ platform: row.platform, baseUrl: row.base_url ?? null, key: realKey }),
@@ -487,7 +487,7 @@ keysRouter.get('/', (_req: Request, res: Response) => {
       // its own exit, without handing the proxy credentials back out.
       maskedProxyUrl: maskProxyUrl(decryptProxyUrl(row)),
       models: row.platform === 'custom' ? (modelsByEndpoint.get(endpointOf(Number(row.id))) ?? []) : undefined,
-      modelDiscovery: canDiscover(row.platform),
+      modelDiscovery: await canDiscover(row.platform),
       cooldowns: cooldowns.map(c => ({
         modelId: c.modelId,
         expiresAtMs: c.expiresAtMs,
@@ -502,7 +502,7 @@ keysRouter.get('/', (_req: Request, res: Response) => {
 // Clear every active cooldown for one key. An escalated cooldown can bench a key
 // for up to 24h from a single bad window; once the operator has fixed the cause
 // there is otherwise no way back short of restarting and waiting it out.
-keysRouter.delete('/:id/cooldowns', (req: Request, res: Response) => {
+keysRouter.delete('/:id/cooldowns', async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) {
     res.status(400).json({ error: 'Invalid key id' });
@@ -510,13 +510,13 @@ keysRouter.delete('/:id/cooldowns', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const exists = db.get('SELECT 1 FROM api_keys WHERE id = ?', [id]);
+  const exists = await db.get('SELECT 1 FROM api_keys WHERE id = ?', [id]);
   if (!exists) {
     res.status(404).json({ error: 'Key not found' });
     return;
   }
 
-  const cleared = clearCooldownsForKey(id);
+  const cleared = await clearCooldownsForKey(id);
   res.json({ cleared });
 });
 
@@ -547,11 +547,11 @@ function skipsReauth(req: Request): boolean {
 // The response is the raw file download (Content-Type varies by format).
 // Password re-verification via x-reauth-password header is required, except for
 // a local request on the desktop build (see skipsReauth).
-keysRouter.get('/export', (req: Request, res: Response) => {
+keysRouter.get('/export', async (req: Request, res: Response) => {
   const user = (req as any).user;
   if (!skipsReauth(req)) {
     const password = req.headers['x-reauth-password'] as string | undefined;
-    if (!password || !verifyCredentials(user.email, password)) {
+    if (!password || !await verifyCredentials(user.email, password)) {
       res.status(403).json({ error: { message: 'Password verification required to export keys', type: 'authentication_error' } });
       return;
     }
@@ -565,7 +565,7 @@ keysRouter.get('/export', (req: Request, res: Response) => {
     whereClause = "WHERE status = 'healthy'";
   }
 
-  const rows = db.all(`SELECT * FROM api_keys ${whereClause} ORDER BY platform, created_at ASC`) as any[];
+  const rows = await db.all(`SELECT * FROM api_keys ${whereClause} ORDER BY platform, created_at ASC`) as any[];
 
   // Decrypt and filter — only export keys with a real value
   const decryptedKeys = rows
@@ -668,11 +668,11 @@ keysRouter.get('/export', (req: Request, res: Response) => {
 // session alone is not enough, the password has to be re-entered — except for a
 // local request on the desktop build, which has no password to re-enter (see
 // skipsReauth; a LAN client of that same desktop server still needs one).
-keysRouter.post('/:id/reveal', (req: Request, res: Response) => {
+keysRouter.post('/:id/reveal', async (req: Request, res: Response) => {
   const user = (req as any).user;
   if (!skipsReauth(req)) {
     const password = req.headers['x-reauth-password'] as string | undefined;
-    if (!password || !verifyCredentials(user.email, password)) {
+    if (!password || !await verifyCredentials(user.email, password)) {
       res.status(403).json({ error: { message: 'Password verification required to reveal a key', type: 'authentication_error' } });
       return;
     }
@@ -684,7 +684,7 @@ keysRouter.post('/:id/reveal', (req: Request, res: Response) => {
     return;
   }
 
-  const row = getDb().get('SELECT encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?', [id]) as { encrypted_key: string; iv: string; auth_tag: string } | undefined;
+  const row = await getDb().get('SELECT encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?', [id]) as { encrypted_key: string; iv: string; auth_tag: string } | undefined;
   if (!row) {
     res.status(404).json({ error: { message: 'Key not found' } });
     return;
@@ -698,7 +698,7 @@ keysRouter.post('/:id/reveal', (req: Request, res: Response) => {
 });
 
 // Add a key
-keysRouter.post('/', (req: Request, res: Response) => {
+keysRouter.post('/', async (req: Request, res: Response) => {
   const parsed = addKeySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -724,20 +724,20 @@ keysRouter.post('/', (req: Request, res: Response) => {
   const db = getDb();
 
   if (isKeyless) {
-    const rows = db.all('SELECT id, encrypted_key, iv, auth_tag FROM api_keys WHERE platform = ? ORDER BY id', [platform]) as { id: number; encrypted_key: string; iv: string; auth_tag: string }[];
+    const rows = await db.all('SELECT id, encrypted_key, iv, auth_tag FROM api_keys WHERE platform = ? ORDER BY id', [platform]) as { id: number; encrypted_key: string; iv: string; auth_tag: string }[];
     const plaintext = (r: typeof rows[number]): string | null => {
       try { return decrypt(r.encrypted_key, r.iv, r.auth_tag); } catch { return null; }
     };
     const sentinel = rows.find(r => isAnonymousCredential(plaintext(r)));
-    const respond = (id: number, maskedKey: string) => res.status(200).json({
+    const respond = async (id: number, maskedKey: string) => res.status(200).json({
       id,
       platform,
       label: label ?? '',
       maskedKey,
       status: 'unknown',
       enabled: true,
-      modelsAvailable: enabledModelCount(platform),
-      notice: noModelsNotice(platform),
+      modelsAvailable: await enabledModelCount(platform),
+      notice: await noModelsNotice(platform),
     });
 
     if (!rawKey) {
@@ -745,8 +745,8 @@ keysRouter.post('/', (req: Request, res: Response) => {
       // piling up duplicates each time the user clicks "Enable".
       const existing = sentinel ?? rows[0];
       if (existing) {
-        db.run("UPDATE api_keys SET enabled = 1, status = 'unknown' WHERE id = ?", [existing.id]);
-        respond(existing.id, maskKey(plaintext(existing) ?? keyToStore));
+        await db.run("UPDATE api_keys SET enabled = 1, status = 'unknown' WHERE id = ?", [existing.id]);
+        await respond(existing.id, maskKey(plaintext(existing) ?? keyToStore));
         return;
       }
     } else if (sentinel) {
@@ -761,9 +761,9 @@ keysRouter.post('/', (req: Request, res: Response) => {
         updates.push('proxy_encrypted = ?', 'proxy_iv = ?', 'proxy_auth_tag = ?');
         values.push(proxy.encrypted, proxy.iv, proxy.authTag);
       }
-      db.run(`UPDATE api_keys SET ${updates.join(', ')} WHERE id = ?`, [...values, sentinel.id]);
-      clearCooldownsForKey(sentinel.id);
-      respond(sentinel.id, maskKey(rawKey));
+      await db.run(`UPDATE api_keys SET ${updates.join(', ')} WHERE id = ?`, [...values, sentinel.id]);
+      await clearCooldownsForKey(sentinel.id);
+      await respond(sentinel.id, maskKey(rawKey));
       return;
     }
   }
@@ -772,14 +772,14 @@ keysRouter.post('/', (req: Request, res: Response) => {
   // #590: the proxy URL is encrypted like the key itself — it usually embeds
   // `user:pass@` credentials. Absent/'' stores NULLs = no override.
   const proxy = encryptProxyUrl(proxyUrl);
-  const result = db.run(`
+  const result = await db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, proxy_encrypted, proxy_iv, proxy_auth_tag)
     VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?, ?, ?) RETURNING id
   `, [platform, label ?? '', encrypted, iv, authTag, proxy.encrypted, proxy.iv, proxy.authTag]);
 
   // #1348: fetch the provider's models in the background when the catalog
   // carries none for it. No-op for every other platform.
-  triggerBuiltinModelDiscovery(db, platform, 'key_added');
+  await triggerBuiltinModelDiscovery(db, platform, 'key_added');
 
   res.status(201).json({
     id: result.lastInsertRowid,
@@ -791,8 +791,8 @@ keysRouter.post('/', (req: Request, res: Response) => {
     maskedKey: maskKey(keyToStore),
     status: 'unknown',
     enabled: true,
-    modelsAvailable: enabledModelCount(platform),
-    notice: noModelsNotice(platform),
+    modelsAvailable: await enabledModelCount(platform),
+    notice: await noModelsNotice(platform),
   });
 });
 
@@ -865,12 +865,12 @@ interface CustomEndpointRef {
  * of the custom-endpoint machinery addresses an endpoint. Throws a
  * `{ status, message }` for a reference that names nothing usable.
  */
-function resolveEndpointRef(ref: { keyId?: number; baseUrl?: string }): CustomEndpointRef {
+async function resolveEndpointRef(ref: { keyId?: number; baseUrl?: string }): Promise<CustomEndpointRef> {
   const db = getDb();
   const requestedBaseUrl = ref.baseUrl === undefined ? undefined : normalizeBaseUrl(ref.baseUrl);
 
   if (ref.keyId !== undefined) {
-    const row = db.get('SELECT id, platform, base_url, encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?', [ref.keyId]) as { id: number; platform: string; base_url: string | null; encrypted_key: string; iv: string; auth_tag: string } | undefined;
+    const row = await db.get('SELECT id, platform, base_url, encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?', [ref.keyId]) as { id: number; platform: string; base_url: string | null; encrypted_key: string; iv: string; auth_tag: string } | undefined;
     if (!row || row.platform !== 'custom' || !row.base_url) {
       throw Object.assign(new Error('keyId does not name a custom endpoint'), { status: 400 });
     }
@@ -890,7 +890,7 @@ function resolveEndpointRef(ref: { keyId?: number; baseUrl?: string }): CustomEn
 
   // Any key of this base_url serves the whole endpoint (#619), so the first one
   // is as good a representative as any.
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT id, encrypted_key, iv, auth_tag FROM api_keys
      WHERE platform = 'custom' AND base_url = ? ORDER BY id
   `, [requestedBaseUrl]) as Array<{ id: number; encrypted_key: string; iv: string; auth_tag: string }>;
@@ -940,12 +940,12 @@ async function registerImportedModels(
       supportsTools: m.supportsTools,
       supportsVision: m.supportsVision,
     }));
-    registered += db.transaction(() => registerCustomChatModels(db, baseUrl, keyId, entries))().length;
+    registered += await (await db.transaction(async () => await registerCustomChatModels(db, baseUrl, keyId, entries))).length;
   }
 
   for (const m of media) {
     try {
-      registerCustomMediaModel(db, keyId, {
+      await registerCustomMediaModel(db, keyId, {
         modelId: m.id,
         displayName: null,
         modality: kindOf(m.id) as 'image' | 'audio' | 'transcription',
@@ -961,9 +961,9 @@ async function registerImportedModels(
 
   for (const m of embeds) {
     try {
-      const existing = db.get("SELECT dimensions FROM embedding_models WHERE platform = 'custom' AND model_id = ?", [m.id]) as { dimensions: number } | undefined;
+      const existing = await db.get("SELECT dimensions FROM embedding_models WHERE platform = 'custom' AND model_id = ?", [m.id]) as { dimensions: number } | undefined;
       const dimensions = existing?.dimensions ?? await probeEmbeddingDimensions(baseUrl, apiKey, m.id);
-      registerCustomEmbeddingModel(db, {
+      await registerCustomEmbeddingModel(db, {
         keyId,
         modelId: m.id,
         displayName: null,
@@ -1018,7 +1018,7 @@ keysRouter.post('/custom/discover-models', async (req: Request, res: Response) =
   // #1348: a keyId naming a BUILT-IN key asks that provider's own /models,
   // through its registered adapter, for platforms the catalog does not carry.
   if (parsed.data.keyId !== undefined && parsed.data.baseUrl === undefined) {
-    const builtin = builtinKeyRow(parsed.data.keyId);
+    const builtin = await builtinKeyRow(parsed.data.keyId);
     if (builtin) {
       await discoverForBuiltinKey(builtin, parsed.data.apiKey, res);
       return;
@@ -1027,7 +1027,7 @@ keysRouter.post('/custom/discover-models', async (req: Request, res: Response) =
 
   let endpoint: CustomEndpointRef;
   try {
-    endpoint = resolveEndpointRef(parsed.data);
+    endpoint = await resolveEndpointRef(parsed.data);
   } catch (err: any) {
     res.status(err.status ?? 400).json({ error: { message: err.message } });
     return;
@@ -1048,9 +1048,9 @@ keysRouter.post('/custom/discover-models', async (req: Request, res: Response) =
     const db = getDb();
     const registeredIds = new Set<string>();
     if (endpoint.keyId != null) {
-      const poolIds = [...customEndpointKeyIds(db, endpoint.keyId)];
+      const poolIds = [...await customEndpointKeyIds(db, endpoint.keyId)];
       const placeholders = poolIds.map(() => '?').join(', ');
-      const rows = db.all(
+      const rows = await db.all(
         `SELECT model_id FROM models WHERE platform = 'custom' AND key_id IN (${placeholders})`,
         [...poolIds],
       ) as { model_id: string }[];
@@ -1095,8 +1095,8 @@ interface BuiltinKeyRow {
   proxy_auth_tag?: string | null;
 }
 
-function builtinKeyRow(keyId: number): BuiltinKeyRow | undefined {
-  const row = getDb().get(`
+async function builtinKeyRow(keyId: number): Promise<BuiltinKeyRow | undefined> {
+  const row = await getDb().get(`
     SELECT id, platform, encrypted_key, iv, auth_tag, proxy_encrypted, proxy_iv, proxy_auth_tag
       FROM api_keys WHERE id = ?
   `, [keyId]) as BuiltinKeyRow | undefined;
@@ -1105,14 +1105,14 @@ function builtinKeyRow(keyId: number): BuiltinKeyRow | undefined {
 
 async function discoverForBuiltinKey(key: BuiltinKeyRow, apiKey: string | undefined, res: Response): Promise<void> {
   const db = getDb();
-  const eligibility = builtinDiscoveryEligibility(db, key.platform);
+  const eligibility = await builtinDiscoveryEligibility(db, key.platform);
   if (!eligibility.eligible || !eligibility.provider) {
     res.status(400).json({ error: { message: ineligibleMessage(key.platform, eligibility.reason) } });
     return;
   }
   try {
     const discovered = await discoverBuiltinModels(eligibility.provider, key, apiKey);
-    const registeredIds = registeredModelIds(db, key.platform);
+    const registeredIds = await registeredModelIds(db, key.platform);
     const models = discovered.map(m => ({ ...m, registered: registeredIds.has(m.id) }));
     res.json({
       platform: key.platform,
@@ -1140,19 +1140,19 @@ const registerDiscoveredSchema = z.object({
 // Register the models the operator ticked in Fetch models for a built-in key.
 // Chat models only: the built-in adapters route media and embeddings through
 // the catalog's own tables, so a non-chat id is reported back, not stored.
-keysRouter.post('/discovered-models', (req: Request, res: Response) => {
+keysRouter.post('/discovered-models', async (req: Request, res: Response) => {
   const parsed = registerDiscoveredSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
-  const key = builtinKeyRow(parsed.data.keyId);
+  const key = await builtinKeyRow(parsed.data.keyId);
   if (!key) {
     res.status(400).json({ error: { message: 'keyId does not name a built-in provider key' } });
     return;
   }
   const db = getDb();
-  const eligibility = builtinDiscoveryEligibility(db, key.platform);
+  const eligibility = await builtinDiscoveryEligibility(db, key.platform);
   if (!eligibility.eligible) {
     res.status(400).json({ error: { message: ineligibleMessage(key.platform, eligibility.reason) } });
     return;
@@ -1161,7 +1161,7 @@ keysRouter.post('/discovered-models', (req: Request, res: Response) => {
   const ids = [...new Set(parsed.data.models)];
   const nonChat = ids.filter(id => classifyModelId(id) !== undefined);
   const chat = ids.filter(id => classifyModelId(id) === undefined);
-  const result = registerDiscoveredModels(db, key.platform, chat.map(modelId => ({ modelId })), { explicit: true });
+  const result = await registerDiscoveredModels(db, key.platform, chat.map(modelId => ({ modelId })), { explicit: true });
   res.json({
     platform: key.platform,
     created: result.created.length,
@@ -1186,7 +1186,7 @@ keysRouter.post('/custom/probe', async (req: Request, res: Response) => {
 
   let endpoint: CustomEndpointRef;
   try {
-    endpoint = resolveEndpointRef(parsed.data);
+    endpoint = await resolveEndpointRef(parsed.data);
   } catch (err: any) {
     res.status(err.status ?? 400).json({ error: { message: err.message } });
     return;
@@ -1208,9 +1208,9 @@ keysRouter.post('/custom/probe', async (req: Request, res: Response) => {
   let poolIds: number[] = [];
   if (endpoint.keyId != null) {
     const db = getDb();
-    poolIds = [...customEndpointKeyIds(db, endpoint.keyId)];
+    poolIds = [...await customEndpointKeyIds(db, endpoint.keyId)];
     const placeholders = poolIds.map(() => '?').join(', ');
-    const row = db.get(
+    const row = await db.get(
       `SELECT model_id FROM models WHERE platform = 'custom' AND key_id IN (${placeholders}) ORDER BY id LIMIT 1`,
       [...poolIds],
     ) as { model_id: string } | undefined;
@@ -1223,14 +1223,14 @@ keysRouter.post('/custom/probe', async (req: Request, res: Response) => {
     // Only a successful probe records a sample. The row mirrors what the proxy
     // writes on a real request so the decay-weighted stats cache picks it up.
     if (endpoint.keyId != null) {
-      getDb().run(`
+      await getDb().run(`
         INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, ttfb_ms, request_type)
         VALUES ('custom', ?, ?, 'success', ?, ?, ?, ?, 'chat')
       `, [probe.modelId, endpoint.keyId, probe.inputTokens, probe.outputTokens, probe.latencyMs, probe.latencyMs]);
 
       // A real completion just succeeded, which is stronger evidence than any
       // health ping — lift whatever cooldown was still holding the key back.
-      clearCooldownsForKey(endpoint.keyId);
+      await clearCooldownsForKey(endpoint.keyId);
     }
 
     // Phase 1 (#874): a successful tool-call probe is positive evidence the
@@ -1245,7 +1245,7 @@ keysRouter.post('/custom/probe', async (req: Request, res: Response) => {
     // that were never probed.
     if (probe.toolCalls && poolIds.length > 0) {
       const placeholders = poolIds.map(() => '?').join(', ');
-      getDb().run(
+      await getDb().run(
         `UPDATE models SET supports_tools = 1
           WHERE platform = 'custom' AND model_id = ? AND key_id IN (${placeholders})`,
         [probe.modelId, ...poolIds],
@@ -1281,7 +1281,7 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
 
   let endpoint: CustomEndpointRef;
   try {
-    endpoint = resolveEndpointRef(parsed.data);
+    endpoint = await resolveEndpointRef(parsed.data);
   } catch (err: any) {
     res.status(err.status ?? 400).json({ error: { message: err.message } });
     return;
@@ -1348,12 +1348,12 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
       res.status(400).json({ error: { message: 'model or models is required to register a new endpoint' } });
       return;
     }
-    if (endpointHasCredential(db, baseUrl, providedKey)) {
+    if (await endpointHasCredential(db, baseUrl, providedKey)) {
       res.status(409).json({ error: { message: 'this endpoint already has that key' } });
       return;
     }
-    const added = resolveCustomEndpointKey(db, baseUrl, providedKey, label, endpoint.keyId);
-    if (parsed.data.groupLabel !== undefined) setCustomEndpointGroup(db, added.keyId, normalizeGroupLabel(parsed.data.groupLabel));
+    const added = await resolveCustomEndpointKey(db, baseUrl, providedKey, label, endpoint.keyId);
+    if (parsed.data.groupLabel !== undefined) await setCustomEndpointGroup(db, added.keyId, normalizeGroupLabel(parsed.data.groupLabel));
     res.status(added.created ? 201 : 200).json({
       success: true,
       keyId: added.keyId,
@@ -1383,20 +1383,20 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
   });
   const videoEntries = entries.filter(e => kindOf(e) === 'video');
 
-  const { keyId, storedKey, registered } = registerCustomModels(
+  const { keyId, storedKey, registered } = await registerCustomModels(
     db, baseUrl, providedKey, label, endpoint.keyId ?? undefined, pureChatEntries,
   );
-  if (parsed.data.groupLabel !== undefined) setCustomEndpointGroup(db, keyId, normalizeGroupLabel(parsed.data.groupLabel));
+  if (parsed.data.groupLabel !== undefined) await setCustomEndpointGroup(db, keyId, normalizeGroupLabel(parsed.data.groupLabel));
 
   const mediaRegistered: Array<{ modelDbId: number; model: string; modality: string; created: boolean }> = [];
   const perModelErrors: Array<{ model: string; error: string }> = [];
   for (const e of mediaEntries) {
     try {
-      mediaRegistered.push(db.transaction(() => registerCustomMediaModel(db, keyId, {
+      mediaRegistered.push(await db.transaction(async () => await registerCustomMediaModel(db, keyId, {
         modelId: e.modelId,
         displayName: e.displayName,
         modality: kindOf(e) as 'image' | 'audio' | 'transcription',
-      }))());
+      })));
     } catch (err: any) {
       perModelErrors.push({ model: e.modelId, error: err?.message ?? 'media registration failed' });
     }
@@ -1405,9 +1405,9 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
   const embeddingsRegistered: Array<{ model: string }> = [];
   for (const e of embedEntries) {
     try {
-      const existing = db.get("SELECT dimensions FROM embedding_models WHERE platform = 'custom' AND model_id = ?", [e.modelId]) as { dimensions: number } | undefined;
+      const existing = await db.get("SELECT dimensions FROM embedding_models WHERE platform = 'custom' AND model_id = ?", [e.modelId]) as { dimensions: number } | undefined;
       const dimensions = existing?.dimensions ?? await probeEmbeddingDimensions(baseUrl, providedKey ?? storedKey, e.modelId);
-      registerCustomEmbeddingModel(db, {
+      await registerCustomEmbeddingModel(db, {
         keyId,
         modelId: e.modelId,
         displayName: e.displayName,
@@ -1512,7 +1512,7 @@ keysRouter.post('/import', (req: Request, res: Response, next: NextFunction) => 
             // instead of treating 'no-key' as a real secret.
             const secret = keyValue.trim() === 'no-key' ? undefined : keyValue.trim() || undefined;
             const db = getDb();
-            const resolved = resolveCustomEndpointKey(db, baseUrl, secret, keyName);
+            const resolved = await resolveCustomEndpointKey(db, baseUrl, secret, keyName);
             imported.push({ keyName, platform: 'custom' });
             if (parsedKey.models?.length) {
               modelsRegistered += await registerImportedModels(
@@ -1531,7 +1531,7 @@ keysRouter.post('/import', (req: Request, res: Response, next: NextFunction) => 
         }
 
         try {
-          insertImportedKey(platformParse.data, keyName, keyValue);
+          await insertImportedKey(platformParse.data, keyName, keyValue);
           imported.push({ keyName, platform: platformParse.data });
         } catch (insertErr) {
           errors.push({ key: keyName, error: (insertErr as Error).message });
@@ -1552,7 +1552,7 @@ keysRouter.post('/import', (req: Request, res: Response, next: NextFunction) => 
 });
 
 keysRouter.post('/preview', (req: Request, res: Response, next: NextFunction) => {
-  upload.array('files', 10)(req, res, (err: any) => {
+  upload.array('files', 10)(req, res, async (err: any) => {
     if (handleUploadError(err, res, next)) return;
 
     try {
@@ -1571,7 +1571,7 @@ keysRouter.post('/preview', (req: Request, res: Response, next: NextFunction) =>
 
       // Build a set of existing decrypted key values for duplicate detection
       const db = getDb();
-      const existingRows = db.all('SELECT encrypted_key, iv, auth_tag FROM api_keys') as any[];
+      const existingRows = await db.all('SELECT encrypted_key, iv, auth_tag FROM api_keys') as any[];
       const existingKeys = new Set<string>();
       for (const row of existingRows) {
         try {
@@ -1624,7 +1624,7 @@ keysRouter.post('/import-selected', async (req: Request, res: Response) => {
 
   // Build a set of existing decrypted key values for duplicate detection
   const db = getDb();
-  const existingRows = db.all('SELECT encrypted_key, iv, auth_tag FROM api_keys') as any[];
+  const existingRows = await db.all('SELECT encrypted_key, iv, auth_tag FROM api_keys') as any[];
   const existingKeys = new Set<string>();
   for (const row of existingRows) {
     try {
@@ -1666,7 +1666,7 @@ keysRouter.post('/import-selected', async (req: Request, res: Response) => {
         // through the resolver (not a raw INSERT) keeps endpoint pooling
         // intact, so re-importing does not duplicate the row (#619).
         const secret = key.keyValue.trim() === 'no-key' ? undefined : key.keyValue.trim() || undefined;
-        const resolved = resolveCustomEndpointKey(db, baseUrl, secret, keyName);
+        const resolved = await resolveCustomEndpointKey(db, baseUrl, secret, keyName);
         imported++;
         if (key.models?.length) {
           modelsRegistered += await registerImportedModels(
@@ -1685,7 +1685,7 @@ keysRouter.post('/import-selected', async (req: Request, res: Response) => {
     }
 
     try {
-      insertImportedKey(key.platform, keyName, key.keyValue);
+      await insertImportedKey(key.platform, keyName, key.keyValue);
       imported++;
       existingKeys.add(key.keyValue.trim());
     } catch (err) {
@@ -1703,7 +1703,7 @@ keysRouter.post('/import-selected', async (req: Request, res: Response) => {
 });
 
 // Delete a key
-keysRouter.delete('/:id', (req: Request, res: Response) => {
+keysRouter.delete('/:id', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id as string, 10);
   if (isNaN(id)) {
     res.status(400).json({ error: { message: 'Invalid key ID' } });
@@ -1711,55 +1711,55 @@ keysRouter.delete('/:id', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = db.get('SELECT platform, base_url FROM api_keys WHERE id = ?', [id]) as { platform: string; base_url: string | null } | undefined;
+  const row = await db.get('SELECT platform, base_url FROM api_keys WHERE id = ?', [id]) as { platform: string; base_url: string | null } | undefined;
   if (!row) {
     res.status(404).json({ error: { message: 'Key not found' } });
     return;
   }
   // Another credential for the SAME endpoint keeps it alive — the models move
   // over to it instead of being cascaded away with this key (#619).
-  const sibling = row.platform === 'custom' ? siblingEndpointKeyId(db, id, row.base_url) : null;
+  const sibling = row.platform === 'custom' ? await siblingEndpointKeyId(db, id, row.base_url) : null;
 
-  const remove = db.transaction(() => {
+  await db.transaction(async (tx) => {
     if (sibling != null) {
       for (const table of ['models', 'embedding_models', 'media_models']) {
-        db.run(`UPDATE ${table} SET key_id = ? WHERE platform = 'custom' AND key_id = ?`, [sibling, id]);
+        await tx.run(`UPDATE ${table} SET key_id = ? WHERE platform = 'custom' AND key_id = ?`, [sibling, id]);
       }
-      db.run('DELETE FROM api_keys WHERE id = ?', [id]);
+      await tx.run('DELETE FROM api_keys WHERE id = ?', [id]);
       return;
     }
 
-    db.run('DELETE FROM api_keys WHERE id = ?', [id]);
+    await tx.run('DELETE FROM api_keys WHERE id = ?', [id]);
     // Custom models exist only because POST /custom registered them alongside
     // their endpoint key (#117) — they can't route without it. Cascade away
     // the models bound to THIS endpoint (#212); other custom providers keep
     // theirs. Legacy rows (key_id NULL) are swept once no custom keys remain,
     // so they never linger in the fallback chain forever (#189).
     if (row.platform === 'custom') {
-      const defaultEmbedding = db.get("SELECT value FROM settings WHERE key = 'embeddings_default_family'") as { value: string } | undefined;
+      const defaultEmbedding = await tx.get("SELECT value FROM settings WHERE key = 'embeddings_default_family'") as { value: string } | undefined;
       // #926: the scheduled custom-model sync only knows a model by "is it in
       // the table yet". Without a tombstone, a key the operator deleted to get
       // rid of its models would have them all re-registered by the next pass.
       const scope = endpointScopeForBaseUrl(row.base_url);
-      const doomed = db.all("SELECT model_id FROM models WHERE platform = 'custom' AND key_id = ?", [id]) as { model_id: string }[];
-      for (const m of doomed) recordCustomModelTombstone(db, scope, m.model_id);
-      db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom' AND key_id = ?)", [id]);
-      db.run("DELETE FROM models WHERE platform = 'custom' AND key_id = ?", [id]);
-      db.run("DELETE FROM embedding_models WHERE platform = 'custom' AND key_id = ?", [id]);
-      db.run("DELETE FROM media_models WHERE platform = 'custom' AND key_id = ?", [id]);
-      const remaining = db.get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'") as { n: number };
+      const doomed = await tx.all("SELECT model_id FROM models WHERE platform = 'custom' AND key_id = ?", [id]) as { model_id: string }[];
+      for (const m of doomed) await recordCustomModelTombstone(db, scope, m.model_id);
+      await tx.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom' AND key_id = ?)", [id]);
+      await tx.run("DELETE FROM models WHERE platform = 'custom' AND key_id = ?", [id]);
+      await tx.run("DELETE FROM embedding_models WHERE platform = 'custom' AND key_id = ?", [id]);
+      await tx.run("DELETE FROM media_models WHERE platform = 'custom' AND key_id = ?", [id]);
+      const remaining = await tx.get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'") as { n: number };
       if (remaining.n === 0) {
-        db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')");
-        db.run("DELETE FROM models WHERE platform = 'custom'");
-        db.run("DELETE FROM embedding_models WHERE platform = 'custom'");
-        db.run("DELETE FROM media_models WHERE platform = 'custom'");
+        await tx.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')");
+        await tx.run("DELETE FROM models WHERE platform = 'custom'");
+        await tx.run("DELETE FROM embedding_models WHERE platform = 'custom'");
+        await tx.run("DELETE FROM media_models WHERE platform = 'custom'");
       }
       if (defaultEmbedding) {
-        const stillExists = db.get('SELECT 1 FROM embedding_models WHERE family = ? LIMIT 1', [defaultEmbedding.value]);
+        const stillExists = await tx.get('SELECT 1 FROM embedding_models WHERE family = ? LIMIT 1', [defaultEmbedding.value]);
         if (!stillExists) {
-          const replacement = db.get('SELECT family FROM embedding_models ORDER BY family, priority LIMIT 1') as { family: string } | undefined;
+          const replacement = await tx.get('SELECT family FROM embedding_models ORDER BY family, priority LIMIT 1') as { family: string } | undefined;
           if (replacement) {
-            db.run("UPDATE settings SET value = ? WHERE key = 'embeddings_default_family'", [replacement.family]);
+            await tx.run("UPDATE settings SET value = ? WHERE key = 'embeddings_default_family'", [replacement.family]);
           }
         }
       }
@@ -1769,18 +1769,17 @@ keysRouter.delete('/:id', (req: Request, res: Response) => {
     // the legacy sweep); this covers key_id-pinned rows on standard
     // platforms, which the catalog prune (key_id IS NULL only) never touches.
     // Shared catalog rows (key_id NULL) are untouched.
-    db.run('DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE key_id = ?)', [id]);
-    db.run('DELETE FROM models WHERE key_id = ?', [id]);
-    db.run('DELETE FROM embedding_models WHERE key_id = ?', [id]);
-    db.run('DELETE FROM media_models WHERE key_id = ?', [id]);
+    await tx.run('DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE key_id = ?)', [id]);
+    await tx.run('DELETE FROM models WHERE key_id = ?', [id]);
+    await tx.run('DELETE FROM embedding_models WHERE key_id = ?', [id]);
+    await tx.run('DELETE FROM media_models WHERE key_id = ?', [id]);
   });
-  remove();
 
   res.json({ success: true });
 });
 
 // Toggle all keys for a platform
-keysRouter.patch('/platform/:platform', (req: Request, res: Response) => {
+keysRouter.patch('/platform/:platform', async (req: Request, res: Response) => {
   const platform = req.params.platform as string;
   if (!(PLATFORMS as readonly string[]).includes(platform)) {
     res.status(400).json({ error: { message: `Invalid platform '${platform}'` } });
@@ -1805,16 +1804,16 @@ keysRouter.patch('/platform/:platform', (req: Request, res: Response) => {
   const db = getDb();
   const groupLabel = group === undefined ? undefined : normalizeGroupLabel(group);
   const result = groupLabel === undefined
-    ? db.run('UPDATE api_keys SET enabled = ? WHERE platform = ?', [enabled ? 1 : 0, platform])
+    ? await db.run('UPDATE api_keys SET enabled = ? WHERE platform = ?', [enabled ? 1 : 0, platform])
     : groupLabel === null
-      ? db.run("UPDATE api_keys SET enabled = ? WHERE platform = 'custom' AND group_label IS NULL", [enabled ? 1 : 0])
-      : db.run("UPDATE api_keys SET enabled = ? WHERE platform = 'custom' AND group_label = ?", [enabled ? 1 : 0, groupLabel]);
+      ? await db.run("UPDATE api_keys SET enabled = ? WHERE platform = 'custom' AND group_label IS NULL", [enabled ? 1 : 0])
+      : await db.run("UPDATE api_keys SET enabled = ? WHERE platform = 'custom' AND group_label = ?", [enabled ? 1 : 0, groupLabel]);
 
   res.json({ success: true, enabled, updatedKeys: result.changes });
 });
 
 // Update key (toggle enable/disable or edit label)
-keysRouter.patch('/:id', (req: Request, res: Response) => {
+keysRouter.patch('/:id', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id as string, 10);
   if (isNaN(id)) {
     res.status(400).json({ error: { message: 'Invalid key ID' } });
@@ -1834,7 +1833,7 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
 
   if (key !== undefined) {
     const db = getDb();
-    const stored = db.get('SELECT platform, encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?', [id]) as { platform: string; encrypted_key: string; iv: string; auth_tag: string } | undefined;
+    const stored = await db.get('SELECT platform, encrypted_key, iv, auth_tag FROM api_keys WHERE id = ?', [id]) as { platform: string; encrypted_key: string; iv: string; auth_tag: string } | undefined;
     if (!stored) {
       res.status(404).json({ error: { message: 'Key not found' } });
       return;
@@ -1895,7 +1894,7 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
   // endpoint's whole key pool rather than this one row.
   const db = getDb();
   if (groupLabel !== undefined) {
-    const row = db.get('SELECT platform FROM api_keys WHERE id = ?', [id]) as { platform: string } | undefined;
+    const row = await db.get('SELECT platform FROM api_keys WHERE id = ?', [id]) as { platform: string } | undefined;
     if (!row) {
       res.status(404).json({ error: { message: 'Key not found' } });
       return;
@@ -1916,20 +1915,20 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
 
   // Re-submitting the same key satisfies "something changed" but is a no-op;
   // it must not turn into an invalid UPDATE with an empty SET list.
-  const result = db.transaction(() => {
+  const result = await db.transaction(async (tx) => {
     const changes = updates.length === 0
       ? 1
-      : db.run(`UPDATE api_keys SET ${updates.join(', ')} WHERE id = ?`, [...values]).changes;
-    if (changes > 0 && groupLabel !== undefined) setCustomEndpointGroup(db, id, normalizeGroupLabel(groupLabel));
+      : await (await tx.run(`UPDATE api_keys SET ${updates.join(', ')} WHERE id = ?`, [...values])).changes;
+    if (changes > 0 && groupLabel !== undefined) await setCustomEndpointGroup(db, id, normalizeGroupLabel(groupLabel));
     return { changes };
-  })();
+  });
 
   if (result.changes === 0) {
     res.status(404).json({ error: { message: 'Key not found' } });
     return;
   }
 
-  if (changedKey !== undefined) clearCooldownsForKey(id);
+  if (changedKey !== undefined) await clearCooldownsForKey(id);
 
   const response: Record<string, unknown> = { success: true };
   if (enabled !== undefined) response.enabled = enabled;

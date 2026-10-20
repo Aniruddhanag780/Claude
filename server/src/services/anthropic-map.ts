@@ -48,8 +48,8 @@ export function parseTierSelector(value: string): TierSelector | null {
   return (TIER_SELECTORS as readonly string[]).includes(v) ? (v as TierSelector) : null;
 }
 
-export function getClaudeModelMap(): AnthropicModelMap {
-  const raw = getSetting(SETTING_KEY);
+export async function getClaudeModelMap(): Promise<AnthropicModelMap> {
+  const raw = await getSetting(SETTING_KEY);
   if (!raw) return { ...DEFAULT_MAP };
   try {
     const p = JSON.parse(raw) as Partial<AnthropicModelMap>;
@@ -64,16 +64,16 @@ export function getClaudeModelMap(): AnthropicModelMap {
   }
 }
 
-export function setClaudeModelMap(input: unknown): AnthropicModelMap {
+export async function setClaudeModelMap(input: unknown): Promise<AnthropicModelMap> {
   const patch = anthropicModelMapSchema.parse(input);
-  const current = getClaudeModelMap();
+  const current = await getClaudeModelMap();
   const next: AnthropicModelMap = {
     default: patch.default ?? current.default,
     opus: patch.opus ?? current.opus,
     sonnet: patch.sonnet ?? current.sonnet,
     haiku: patch.haiku ?? current.haiku,
   };
-  setSetting(SETTING_KEY, JSON.stringify(next));
+  await setSetting(SETTING_KEY, JSON.stringify(next));
   return next;
 }
 
@@ -111,11 +111,11 @@ export interface ResolvedAnthropicModel {
 
 // Resolve the db ids of every enabled model whose size_label belongs to the
 // tier, ordered by the same chain priority the rest of the router uses.
-function lookupTierDbIds(tier: TierSelector): number[] {
+async function lookupTierDbIds(tier: TierSelector): Promise<number[]> {
   const labels = TIER_SIZE_LABELS[tier];
   const placeholders = labels.map(() => '?').join(', ');
   const db = getDb();
-  const rows = db.all( `
+  const rows = await db.all( `
     SELECT m.id as id
     FROM models m
     LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
@@ -128,15 +128,15 @@ function lookupTierDbIds(tier: TierSelector): number[] {
 // Resolve the model a `/v1/messages` request should route to, honoring the
 // operator's family map. Returns undefined preferredModelDbId to mean
 // "auto-route" (the default for every family unless the operator pinned one).
-export function resolveAnthropicModel(model?: string): ResolvedAnthropicModel {
+export async function resolveAnthropicModel(model?: string): Promise<ResolvedAnthropicModel> {
   const db = getDb();
   // A model_id can exist on several platforms at once (the same open-weights
   // model relayed by two providers). The row we pin is only the head hint —
   // the caller routes over the whole group — but an arbitrary SQLite row order
   // made the head flap between providers run to run, so pick deterministically:
   // chain priority first (ascending, as everywhere else), then insertion order.
-  const lookupEnabled = (modelId: string): { id: number; model_id: string } | undefined =>
-    db.get(`
+  const lookupEnabled = async (modelId: string): Promise<{ id: number; model_id: string } | undefined> =>
+    await db.get(`
       SELECT m.id as id, m.model_id as model_id
       FROM models m
       LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
@@ -147,26 +147,26 @@ export function resolveAnthropicModel(model?: string): ResolvedAnthropicModel {
 
   const family = classifyClaudeFamily(model);
   if (family) {
-    const target = getClaudeModelMap()[family];
+    const target = await (await getClaudeModelMap())[family];
     // A tier selector routes over the whole tier pool rather than pinning one
     // model: `pinned` stays false (it is not a single model), and the caller
     // restricts the chain to tierDbIds.
     const tier = target ? parseTierSelector(target) : null;
     if (tier) {
-      const tierDbIds = lookupTierDbIds(tier);
+      const tierDbIds = await lookupTierDbIds(tier);
       // An empty tier (operator re-labeled everything, or labels not yet
       // seeded) degrades gracefully to auto rather than failing the request.
       return tierDbIds.length ? { pinned: false, tierDbIds } : { pinned: false };
     }
     if (!target || target === 'auto') return { pinned: false };
-    const row = lookupEnabled(target);
+    const row = await lookupEnabled(target);
     // A pinned-but-now-disabled/removed target degrades gracefully to auto.
     return row ? { preferredModelDbId: row.id, modelId: row.model_id, pinned: true } : { pinned: false };
   }
 
   // Not a Claude alias: treat as a concrete catalog model id and pin it if it
   // exists and is enabled; otherwise auto-route (lenient, like the OpenAI route).
-  const row = lookupEnabled((model ?? '').trim());
+  const row = await lookupEnabled((model ?? '').trim());
   return row ? { preferredModelDbId: row.id, modelId: row.model_id, pinned: true } : { pinned: false };
 }
 
@@ -193,8 +193,8 @@ export const CLAUDE_FAMILY_ALIASES: { id: string; family: ClaudeFamily; label: s
 
 // Discovery entries for the family aliases, named after where each one routes:
 // the pinned catalog model when the operator pinned one, otherwise the router.
-export function claudeFamilyDiscoveryEntries(): { id: string; displayName: string }[] {
-  const map = getClaudeModelMap();
+export async function claudeFamilyDiscoveryEntries(): Promise<{ id: string; displayName: string }[]> {
+  const map = await getClaudeModelMap();
   return CLAUDE_FAMILY_ALIASES.map(({ id, family, label }) => {
     const target = map[family];
     return {

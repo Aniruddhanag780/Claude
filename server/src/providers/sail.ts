@@ -174,8 +174,8 @@ export class SailProvider extends BaseProvider {
     };
   }
 
-  private buildBody(messages: ChatMessage[], modelId: string, options?: CompletionOptions): Record<string, unknown> {
-    const maxOutputTokens = resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget);
+  private async buildBody(messages: ChatMessage[], modelId: string, options?: CompletionOptions): Promise<Record<string, unknown>> {
+    const maxOutputTokens = await resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget);
     const reasoningEffort = this.reasoningEffort(modelId, options);
     const textFormat = this.textFormat(options);
     const tools = options?.tools?.map(tool => ({
@@ -211,8 +211,8 @@ export class SailProvider extends BaseProvider {
     return statusText || `HTTP ${status}`;
   }
 
-  private recordQuota(res: Response, modelId: string | undefined, quotaContext?: QuotaObservationContext): void {
-    recordQuotaObservationsFromResponse(res, {
+  private async  recordQuota(res: Response, modelId: string | undefined, quotaContext?: QuotaObservationContext): Promise<void> {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -267,9 +267,9 @@ export class SailProvider extends BaseProvider {
     const submit = await this.fetchWithTimeout(`${BASE_URL}/responses`, {
       method: 'POST',
       headers: this.authHeaders(apiKey),
-      body: JSON.stringify(this.buildBody(messages, modelId, options)),
+      body: JSON.stringify(await this.buildBody(messages, modelId, options)),
     }, requestTimeout(), { signal: options?.signal, timeoutBounds: 'request' });
-    this.recordQuota(submit, modelId, quotaContext);
+    await this.recordQuota(submit, modelId, quotaContext);
     let response = await this.parseResponse(submit);
 
     if (!response.id) throw new Error(`${this.name} returned no response id`);
@@ -283,7 +283,7 @@ export class SailProvider extends BaseProvider {
         method: 'GET',
         headers: this.authHeaders(apiKey),
       }, requestTimeout(), { signal: options?.signal, timeoutBounds: 'request' });
-      this.recordQuota(poll, modelId, quotaContext);
+      await this.recordQuota(poll, modelId, quotaContext);
       response = await this.parseResponse(poll);
     }
 
@@ -391,13 +391,13 @@ export class SailProvider extends BaseProvider {
       method: 'GET',
       headers: this.authHeaders(apiKey),
     }, POLL_REQUEST_TIMEOUT_MS, { timeoutBounds: 'request' });
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
       quotaPoolKey: quotaContext?.quotaPoolKey,
       endpoint: 'models',
     });
-    return this.validationResult(res);
+    return await this.validationResult(res);
   }
 }

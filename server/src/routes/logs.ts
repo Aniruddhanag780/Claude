@@ -53,7 +53,7 @@ function toJson(entry: ServerLogEntry) {
   };
 }
 
-logsRouter.get('/', (req: Request, res: Response) => {
+logsRouter.get('/', async (req: Request, res: Response) => {
   const rawLevels = firstParam(req.query.levels);
   let levels: ServerLogLevel[] | undefined;
   if (rawLevels !== undefined && rawLevels.trim() !== '') {
@@ -85,7 +85,7 @@ logsRouter.get('/', (req: Request, res: Response) => {
   const rawLimit = firstParam(req.query.limit);
   const limit = rawLimit !== undefined && rawLimit.trim() !== '' ? Number(rawLimit) : undefined;
 
-  const entries = queryLogs({
+  const entries = await queryLogs({
     levels,
     q: firstParam(req.query.q),
     provider: firstParam(req.query.provider),
@@ -95,12 +95,12 @@ logsRouter.get('/', (req: Request, res: Response) => {
 
   res.json({
     entries: entries.map(toJson),
-    nextId: currentMaxId(),
-    counts: levelCounts(),
+    nextId: await currentMaxId(),
+    counts: await levelCounts(),
   });
 });
 
-logsRouter.post('/clear', (_req: Request, res: Response) => {
-  clearLogs();
+logsRouter.post('/clear', async (_req: Request, res: Response) => {
+  await clearLogs();
   res.json({ ok: true });
 });

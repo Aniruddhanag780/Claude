@@ -182,7 +182,7 @@ function missingKeyWarning(input: z.infer<typeof keySchema>): string | null {
   return `${hint}; entry skipped`;
 }
 
-function upsertApiKey(db: Db, input: z.infer<typeof keySchema>): number {
+async function upsertApiKey(db: Db, input: z.infer<typeof keySchema>): Promise<number> {
   const platform = input.platform.trim();
   const enabled = input.enabled === false ? 0 : 1;
   const isCustom = platform === 'custom';
@@ -196,32 +196,32 @@ function upsertApiKey(db: Db, input: z.infer<typeof keySchema>): number {
 
   if (isCustom) {
     if (!baseUrl) throw new Error('baseUrl is required for custom keys');
-    const existing = db.get("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ?", [baseUrl]) as { id: number } | undefined;
+    const existing = await db.get("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ?", [baseUrl]) as { id: number } | undefined;
     if (existing) {
-      db.run(`
+      await db.run(`
         UPDATE api_keys
            SET label = ?, encrypted_key = ?, iv = ?, auth_tag = ?, enabled = ?, status = 'unknown'
          WHERE id = ?
       `, [label, key.encrypted, key.iv, key.authTag, enabled, existing.id]);
       return existing.id;
     }
-    const inserted = db.run(`
+    const inserted = await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
       VALUES ('custom', ?, ?, ?, ?, 'unknown', ?, ?) RETURNING id
     `, [label, key.encrypted, key.iv, key.authTag, enabled, baseUrl]);
     return Number(inserted.lastInsertRowid);
   }
 
-  const existing = db.get('SELECT id FROM api_keys WHERE platform = ? AND label = ? AND base_url IS NULL LIMIT 1', [platform, label]) as { id: number } | undefined;
+  const existing = await db.get('SELECT id FROM api_keys WHERE platform = ? AND label = ? AND base_url IS NULL LIMIT 1', [platform, label]) as { id: number } | undefined;
   if (existing) {
-    db.run(`
+    await db.run(`
       UPDATE api_keys
          SET encrypted_key = ?, iv = ?, auth_tag = ?, enabled = ?, status = 'unknown'
        WHERE id = ?
     `, [key.encrypted, key.iv, key.authTag, enabled, existing.id]);
     return existing.id;
   }
-  const inserted = db.run(`
+  const inserted = await db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
     VALUES (?, ?, ?, ?, ?, 'unknown', ?) RETURNING id
   `, [platform, label, key.encrypted, key.iv, key.authTag, enabled]);
@@ -234,25 +234,25 @@ function normalizeModelEntry(entry: z.infer<typeof modelEntrySchema>): Normalize
   return { ...entry, modelId, displayName: entry.displayName?.trim() || modelId };
 }
 
-function ensureFallbackRow(db: Db, modelDbId: number, enabled = true, updateExisting = true): void {
-  const existing = db.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [modelDbId]);
+async function ensureFallbackRow(db: Db, modelDbId: number, enabled = true, updateExisting = true): Promise<void> {
+  const existing = await db.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [modelDbId]);
   if (existing) {
     if (updateExisting) {
-      db.run('UPDATE fallback_config SET enabled = ? WHERE model_db_id = ?', [enabled ? 1 : 0, modelDbId]);
+      await db.run('UPDATE fallback_config SET enabled = ? WHERE model_db_id = ?', [enabled ? 1 : 0, modelDbId]);
     }
     return;
   }
-  const max = db.get('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config') as { m: number };
-  db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, ?)', [modelDbId, max.m + 1, enabled ? 1 : 0]);
+  const max = await db.get('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config') as { m: number };
+  await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, ?)', [modelDbId, max.m + 1, enabled ? 1 : 0]);
   // A chain row alone is not enough to be routable: when a profile is active the
   // router reads profile_models, so a declaratively-added model would be present
   // in the dashboard yet never selected. routes/keys.ts does the same after its
   // own fallback_config insert.
-  ensureModelInProfiles(db, modelDbId);
+  await ensureModelInProfiles(db, modelDbId);
 }
 
-function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSchema>): number {
-  const keyId = upsertApiKey(db, {
+async function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSchema>): Promise<number> {
+  const keyId = await upsertApiKey(db, {
     platform: 'custom',
     key: input.apiKey,
     label: input.label,
@@ -262,7 +262,7 @@ function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSche
   // Same median seeding as the dashboard's custom-model path (#488): an
   // undeclared rank means "unknown", not "worst". An explicitly declared rank
   // always wins.
-  const seed = customModelSeed(db);
+  const seed = await customModelSeed(db);
   // Model identity is per endpoint (#651): declaring the same model id under a
   // second base_url adds a row for that endpoint instead of stealing the first
   // one's.
@@ -270,7 +270,7 @@ function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSche
   let registered = 0;
   for (const entry of input.models) {
     const model = normalizeModelEntry(entry);
-    db.run(`
+    await db.run(`
       INSERT INTO models
         (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
@@ -289,8 +289,8 @@ function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSche
         key_id = excluded.key_id,
         enabled = 1
     `, [model.modelId, model.displayName, model.intelligenceRank ?? seed.intelligenceRank, model.speedRank ?? seed.speedRank, model.sizeLabel ?? seed.sizeLabel, model.monthlyTokenBudget ?? '', model.contextWindow ?? null, model.supportsVision ? 1 : 0, model.supportsTools ? 1 : 0, keyId, endpointScope]);
-    const row = db.get("SELECT id FROM models WHERE platform = 'custom' AND model_id = ? AND endpoint_scope = ?", [model.modelId, endpointScope]) as { id: number };
-    ensureFallbackRow(db, row.id, model.fallbackEnabled !== false);
+    const row = await db.get("SELECT id FROM models WHERE platform = 'custom' AND model_id = ? AND endpoint_scope = ?", [model.modelId, endpointScope]) as { id: number };
+    await ensureFallbackRow(db, row.id, model.fallbackEnabled !== false);
     registered++;
   }
   return registered;
@@ -327,13 +327,13 @@ interface DeclaredModelRow {
  * to return — silently editing the wrong relay. So an ambiguous entry is
  * refused, and the config author gets the endpoints to choose from.
  */
-function resolveDeclaredModel(
+async function resolveDeclaredModel(
   db: Db,
   platform: string,
   modelId: string,
   endpoint: string | undefined,
-): DeclaredModelRow | undefined {
-  const rows = db.all('SELECT id, platform, model_id, key_id, source, endpoint_scope FROM models WHERE platform = ? AND model_id = ? ORDER BY id', [platform, modelId]) as DeclaredModelRow[];
+): Promise<DeclaredModelRow | undefined> {
+  const rows = await db.all('SELECT id, platform, model_id, key_id, source, endpoint_scope FROM models WHERE platform = ? AND model_id = ? ORDER BY id', [platform, modelId]) as DeclaredModelRow[];
 
   if (endpoint) {
     const named = rows.filter(r => r.endpoint_scope && endpointRefMatches(endpoint, r.endpoint_scope));
@@ -357,26 +357,26 @@ function resolveDeclaredModel(
   return rows[0];
 }
 
-function upsertModel(db: Db, input: z.infer<typeof modelSchema>): void {
+async function upsertModel(db: Db, input: z.infer<typeof modelSchema>): Promise<void> {
   const platform = input.platform.trim();
   const modelId = input.modelId.trim();
-  clearCatalogModelTombstone(db, 'chat', platform, modelId);
-  const existing = resolveDeclaredModel(db, platform, modelId, input.endpoint);
+  await clearCatalogModelTombstone(db, 'chat', platform, modelId);
+  const existing = await resolveDeclaredModel(db, platform, modelId, input.endpoint);
 
   if (!existing) {
     // A declaratively-created model is user-owned: catalog sync must never
     // update or prune it (see applyCatalog). Patching an EXISTING catalog row
     // below does NOT flip ownership — the row's existence is still catalog-
     // managed and the edit is recorded as an override instead.
-    db.run(`
+    await db.run(`
       INSERT INTO models
         (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
          enabled, supports_vision, supports_tools, source)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'user')
     `, [platform, modelId, input.displayName ?? modelId, input.intelligenceRank ?? 50, input.speedRank ?? 50, input.sizeLabel ?? 'User', input.rpmLimit ?? null, input.rpdLimit ?? null, input.tpmLimit ?? null, input.tpdLimit ?? null, input.monthlyTokenBudget ?? '', input.contextWindow ?? null, input.enabled === false ? 0 : 1, input.supportsVision ? 1 : 0, input.supportsTools ? 1 : 0]);
-    const created = db.get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [platform, modelId]) as { id: number };
-    ensureFallbackRow(db, created.id, input.fallbackEnabled ?? input.enabled !== false);
+    const created = await db.get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [platform, modelId]) as { id: number };
+    await ensureFallbackRow(db, created.id, input.fallbackEnabled ?? input.enabled !== false);
     return;
   }
 
@@ -408,27 +408,27 @@ function upsertModel(db: Db, input: z.infer<typeof modelSchema>): void {
   }
   if (assignments.length > 0) {
     values.push(existing.id);
-    db.run( `UPDATE models SET ${assignments.join(', ')} WHERE id = ?`, [...values]);
+    await db.run( `UPDATE models SET ${assignments.join(', ')} WHERE id = ?`, [...values]);
   }
   if (isCatalogManagedModel(existing) && Object.keys(patch).length > 0) {
-    upsertModelOverrides(db, platform, modelId, patch);
+    await upsertModelOverrides(db, platform, modelId, patch);
   }
-  ensureFallbackRow(db, existing.id, input.fallbackEnabled ?? input.enabled !== false, input.fallbackEnabled !== undefined);
+  await ensureFallbackRow(db, existing.id, input.fallbackEnabled ?? input.enabled !== false, input.fallbackEnabled !== undefined);
 }
 
 function applyFallback(db: Db, entries: z.infer<typeof fallbackEntrySchema>[]): number {
   let changed = 0;
-  entries.forEach((entry, i) => {
-    const row = resolveDeclaredModel(db, entry.platform, entry.modelId, entry.endpoint);
+  entries.forEach(async (entry, i) => {
+    const row = await resolveDeclaredModel(db, entry.platform, entry.modelId, entry.endpoint);
     if (!row) return;
-    ensureFallbackRow(db, row.id, entry.enabled !== false);
-    db.run('UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?', [entry.priority ?? i + 1, entry.enabled === false ? 0 : 1, row.id]);
+    await ensureFallbackRow(db, row.id, entry.enabled !== false);
+    await db.run('UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?', [entry.priority ?? i + 1, entry.enabled === false ? 0 : 1, row.id]);
     changed++;
   });
   return changed;
 }
 
-export function applyDeclarativeConfig(input: unknown, source = 'inline'): DeclarativeConfigResult {
+export async function applyDeclarativeConfig(input: unknown, source = 'inline'): Promise<DeclarativeConfigResult> {
   const parsed = declarativeConfigSchema.safeParse(input);
   if (!parsed.success) {
     throw new Error(`invalid declarative config: ${parsed.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ')}`);
@@ -448,10 +448,10 @@ export function applyDeclarativeConfig(input: unknown, source = 'inline'): Decla
     warnings: [],
   };
 
-  const apply = db.transaction(() => {
+  await db.transaction(async () => {
     if (parsed.data.admin) {
-      if (userCount() === 0) {
-        createUser(parsed.data.admin.email, parsed.data.admin.password);
+      if (await userCount() === 0) {
+        await createUser(parsed.data.admin.email, parsed.data.admin.password);
         result.admin = true;
       } else {
         const warning = 'admin: a dashboard account already exists — entry ignored';
@@ -466,29 +466,28 @@ export function applyDeclarativeConfig(input: unknown, source = 'inline'): Decla
         console.warn(`[config] ${warning}`);
         continue;
       }
-      upsertApiKey(db, key);
+      await upsertApiKey(db, key);
       result.keys++;
     }
     for (const customProvider of parsed.data.customProviders ?? []) {
-      result.customModels += registerCustomProvider(db, customProvider);
+      result.customModels += await registerCustomProvider(db, customProvider);
     }
     for (const model of parsed.data.models ?? []) {
-      upsertModel(db, model);
+      await upsertModel(db, model);
       result.models++;
     }
     if (parsed.data.fallback) {
       result.fallback = applyFallback(db, parsed.data.fallback);
     }
     if (parsed.data.routing) {
-      if (parsed.data.routing.weights) setCustomWeights(parsed.data.routing.weights);
-      setRoutingStrategy(parsed.data.routing.strategy);
+      if (parsed.data.routing.weights) await setCustomWeights(parsed.data.routing.weights);
+      await setRoutingStrategy(parsed.data.routing.strategy);
       if (parsed.data.routing.keySelectionStrategy) {
-        setKeySelectionStrategy(parsed.data.routing.keySelectionStrategy);
+        await setKeySelectionStrategy(parsed.data.routing.keySelectionStrategy);
       }
       result.routing = true;
     }
   });
-  apply();
 
   // License activation needs the license service — network I/O has no place in
   // the synchronous DB apply. It runs detached so a slow or unreachable
@@ -510,7 +509,7 @@ export function applyDeclarativeConfig(input: unknown, source = 'inline'): Decla
 export async function activateConfiguredLicense(key: string): Promise<void> {
   const trimmed = key.trim();
   try {
-    if (getSetting(SETTING_LICENSE_KEY) === trimmed) return;
+    if (await getSetting(SETTING_LICENSE_KEY) === trimmed) return;
     const result = await validateLicenseKey(trimmed);
     if (result === null) {
       console.warn('[config] license: could not reach the license service — key left unconfigured');
@@ -520,7 +519,7 @@ export async function activateConfiguredLicense(key: string): Promise<void> {
       console.warn(`[config] license: key rejected (${result.reason ?? 'invalid'}) — left unconfigured`);
       return;
     }
-    setSetting(SETTING_LICENSE_KEY, trimmed);
+    await setSetting(SETTING_LICENSE_KEY, trimmed);
     await refreshLicenseStatus();
     // Live-tier sync kicks off right away so the upgrade is visible within
     // seconds; its own catch-all logs failures.
@@ -531,12 +530,12 @@ export async function activateConfiguredLicense(key: string): Promise<void> {
   }
 }
 
-export function applyDeclarativeConfigFromEnv(): DeclarativeConfigResult {
+export async function applyDeclarativeConfigFromEnv(): Promise<DeclarativeConfigResult> {
   const loaded = readConfigFromEnv();
   if (!loaded) {
     return { applied: false, admin: false, license: false, keys: 0, customModels: 0, models: 0, fallback: 0, routing: false, warnings: [] };
   }
-  const result = applyDeclarativeConfig(loaded.value, loaded.source);
+  const result = await applyDeclarativeConfig(loaded.value, loaded.source);
   console.log(
     `[config] applied ${loaded.source}: ${result.keys} keys, ${result.customModels} custom models, ` +
       `${result.models} model edits, ${result.fallback} fallback rows${result.routing ? ', routing' : ''}` +

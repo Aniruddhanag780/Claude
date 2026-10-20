@@ -168,7 +168,7 @@ export async function maybeServeResponsesWebSearch(
   if (body.fusion != null || body.model === 'fusion') return false;
   if (typeof body.input !== 'string' && !Array.isArray(body.input)) return false;
   const searchTool = body.tools.find(isResponsesWebSearchTool);
-  if (!searchTool || !hasSearchCapability()) return false;
+  if (!searchTool || !await hasSearchCapability()) return false;
 
   const filter: DomainFilter = {
     allowedDomains: Array.isArray(searchTool.filters?.allowed_domains) ? searchTool.filters.allowed_domains.filter((d: unknown) => typeof d === 'string') : undefined,

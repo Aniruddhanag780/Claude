@@ -34,18 +34,16 @@
  * the DB in a mixed-key state that is exactly the failure this script exists
  * to prevent.
  */
-import Database from 'better-sqlite3';
 import crypto from 'crypto';
-import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { closeDb, connectDb } from '../db/index.js';
+import type { Db } from '../db/types.js';
 
 const ALGORITHM = 'aes-256-gcm';
 const KEY_HEX_LEN = 64;
 const AUTH_TAG_BYTES = 16;
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_DB = path.resolve(__dirname, '../../data/freeapi.db');
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -139,20 +137,8 @@ export interface RotateResult {
   error?: string;
 }
 
-/** The read surface rotateSecrets needs — better-sqlite3 and the app's Db both satisfy it. */
-export interface RotateReadDb {
-  prepare(sql: string): { all(...args: unknown[]): unknown[]; get(...args: unknown[]): unknown };
-}
-
-/** The write surface applyRotation needs, including better-sqlite3's transaction(). */
-export interface RotateWriteDb {
-  prepare(sql: string): { run(...args: unknown[]): unknown };
-  // Deliberately phrased as "a callable taking the same arguments" rather than
-  // "returns F": better-sqlite3 hands back a Transaction<F> (F plus .deferred
-  // and friends) while the app's Db type returns F itself, and both satisfy
-  // this shape.
-  transaction<A extends unknown[]>(fn: (...args: A) => void): (...args: A) => unknown;
-}
+/** The database surface the rotate routine needs (the app's async Db). */
+export type RotateDb = Db;
 
 /**
  * Core rotate routine, exported so tests can drive it against an in-memory
@@ -161,16 +147,19 @@ export interface RotateWriteDb {
  * value fails to decrypt — the caller must treat the error case as "nothing
  * written".
  */
-export function rotateSecrets(
-  db: RotateReadDb,
+export async function rotateSecrets(
+  db: RotateDb,
   oldKey: Buffer,
   newKey: Buffer,
-): RotateResult {
+): Promise<RotateResult> {
   const rowsToRotate: RowToRotate[] = [];
 
   for (const group of ENCRYPTION_GROUPS) {
-    const cols = db.all(`PRAGMA table_info(${group.table})`) as Array<{ name: string }>;
-    const names = new Set(cols.map((c) => c.name));
+    const cols = await db.all<{ column_name: string }>(
+      'SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2',
+      ['public', group.table],
+    );
+    const names = new Set(cols.map((c) => c.column_name));
 
     // Ciphertext held as (encrypted, iv, auth_tag) columns.
     if (group.kind === 'columns') {
@@ -178,8 +167,10 @@ export function rotateSecrets(
         continue;
       }
 
-      const rows = db.all(`SELECT ${group.idColumn} AS id, ${group.encrypted} AS enc, ${group.iv} AS iv, ${group.authTag} AS tag ` +
-        `FROM ${group.table} WHERE ${group.encrypted} IS NOT NULL`) as Array<{ id: number; enc: string; iv: string; tag: string }>;
+      const rows = await db.all<{ id: number; enc: string; iv: string; tag: string }>(
+        `SELECT ${group.idColumn} AS id, ${group.encrypted} AS enc, ${group.iv} AS iv, ${group.authTag} AS tag ` +
+        `FROM ${group.table} WHERE ${group.encrypted} IS NOT NULL`,
+      );
 
       for (const row of rows) {
         let plaintext: string;
@@ -199,7 +190,7 @@ export function rotateSecrets(
     // Ciphertext held as a JSON blob in settings.value.
     if (!names.has('key') || !names.has('value')) continue;
 
-    const row = db.get('SELECT value FROM settings WHERE key = ?', [group.settingKey]) as { value: string } | undefined;
+    const row = await db.get<{ value: string }>('SELECT value FROM settings WHERE key = ?', [group.settingKey]);
     // An unset or cleared setting stores '' rather than a blob — nothing to do.
     if (!row || !row.value) continue;
 
@@ -238,28 +229,26 @@ export function rotateSecrets(
  * Apply a rotate result: write every re-encrypted value back to its row, in
  * one transaction. Exported so main() and tests share the exact write path.
  */
-export function applyRotation(
-  db: RotateWriteDb,
+export async function applyRotation(
+  db: RotateDb,
   rows: RowToRotate[],
-): void {
-  const write = db.transaction((items: RowToRotate[]) => {
-    for (const r of items) {
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    for (const r of rows) {
       if (r.group.kind === 'setting') {
         // Same encoding encodeFetchRelayToken() writes, so the running server
         // reads it back unchanged.
-        db.run('UPDATE settings SET value = ? WHERE key = ?', [JSON.stringify(r.reEncrypted), r.group.settingKey]);
+        await tx.run('UPDATE settings SET value = ? WHERE key = ?', [JSON.stringify(r.reEncrypted), r.group.settingKey]);
         continue;
       }
-      db.run(`UPDATE ${r.group.table} SET ${r.group.encrypted} = ?, ${r.group.iv} = ?, ${r.group.authTag} = ? WHERE ${r.group.idColumn} = ?`, [r.reEncrypted.encrypted, r.reEncrypted.iv, r.reEncrypted.authTag, r.id]);
+      await tx.run(`UPDATE ${r.group.table} SET ${r.group.encrypted} = ?, ${r.group.iv} = ?, ${r.group.authTag} = ? WHERE ${r.group.idColumn} = ?`, [r.reEncrypted.encrypted, r.reEncrypted.iv, r.reEncrypted.authTag, r.id]);
     }
   });
-  write(rows);
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const oldKeyHex = arg('old-key') ?? process.env.ENCRYPTION_KEY;
   const newKeyHex = arg('new-key');
-  const dbPath = arg('db') ?? DEFAULT_DB;
   const dryRun = flag('dry-run');
 
   if (!oldKeyHex) {
@@ -270,11 +259,6 @@ function main(): void {
     console.error('error: --new-key is required');
     process.exit(1);
   }
-  if (!fs.existsSync(dbPath)) {
-    console.error(`error: database not found at ${dbPath}`);
-    process.exit(1);
-  }
-
   const oldKey = parseHexKey(oldKeyHex, 'old');
   const newKey = parseHexKey(newKeyHex, 'new');
   if (oldKey.equals(newKey)) {
@@ -282,9 +266,9 @@ function main(): void {
     process.exit(1);
   }
 
-  const db = new Database(dbPath, { readonly: dryRun });
+  const db = await connectDb();
   try {
-    const result = rotateSecrets(db, oldKey, newKey);
+    const result = await rotateSecrets(db, oldKey, newKey);
     if (result.error) {
       console.error(`error: ${result.error}`);
       process.exit(1);
@@ -305,17 +289,17 @@ function main(): void {
       return;
     }
 
-    applyRotation(db, rowsToRotate);
+    await applyRotation(db, rowsToRotate);
 
     console.log(`Rotated ${rowsToRotate.length} value(s) to the new key.`);
     console.log('Next steps: set ENCRYPTION_KEY to the new key (or overwrite the .encryption-key file next to the DB) and restart the server.');
   } finally {
-    db.close();
+    await closeDb();
   }
 }
 
 // Only run when invoked directly (`tsx src/scripts/rotate-encryption-key.ts`),
 // not when the module is imported by tests for `rotateSecrets`/`encryptWith`.
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main();
+  void main();
 }

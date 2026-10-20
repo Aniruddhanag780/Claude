@@ -383,12 +383,12 @@ export function maxTokensCapFor(platform: string): number | undefined {
  * openai-compat (and its subclasses), cloudflare, cohere, google and aihorde
  * all do.
  */
-export function resolveMaxTokens(platform: string, requested: number | undefined, contextBudget?: number): number | undefined {
+export async function resolveMaxTokens(platform: string, requested: number | undefined, contextBudget?: number): Promise<number | undefined> {
   const resolved = requested ?? defaultMaxTokensFor(platform);
   if (resolved == null) return resolved;
   // The tighter ceiling wins: a platform's hard reject applies even with the
   // operator cap off, and an operator cap below it applies everywhere.
-  const caps = [unifiedMaxTokensCap(), maxTokensCapFor(platform), contextBudget].filter((c): c is number => c != null && c > 0);
+  const caps = [await unifiedMaxTokensCap(), maxTokensCapFor(platform), contextBudget].filter((c): c is number => c != null && c > 0);
   return caps.length === 0 ? resolved : Math.max(1, Math.min(resolved, ...caps));
 }
 
@@ -412,10 +412,10 @@ export const UNIFIED_MAX_TOKENS_AUTO = 32768;
  *  requests. Reads the settings table on every call — cheap (better-sqlite3
  *  sync read) and picks up dashboard changes without a restart, mirroring
  *  guardrails.ts. */
-export function unifiedMaxTokensCap(): number | null {
+export async function unifiedMaxTokensCap(): Promise<number | null> {
   let raw: string | undefined;
   try {
-    raw = getSetting(UNIFIED_MAX_TOKENS_SETTING);
+    raw = await getSetting(UNIFIED_MAX_TOKENS_SETTING);
   } catch {
     return null; // DB not ready — never throw on the proxy hot path
   }

@@ -113,7 +113,7 @@ describe('Moondream hosted adapter', () => {
     { model: 'wrong' }, { model: undefined }, { choices: [] },
     { choices: [{ message: { content: '' }, finish_reason: 'stop' }] },
     { choices: [{ message: { content: 'unfinished' }, finish_reason: null }] },
-  ])('rejects substituted or invalid completions: %j', async override => {
+  ])('rejects substituted or invalid completions: %j', override async => {
     vi.spyOn(global, 'fetch').mockResolvedValue(json({ ...completion(), ...override }));
     await expect(new MoondreamProvider().chatCompletion('k', messages, model)).rejects.toMatchObject({ status: 502 });
   });

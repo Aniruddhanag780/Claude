@@ -21,7 +21,7 @@ export class ExaProvider extends SearchOnlyProvider {
   }
 
   async validateKey(apiKey: string): Promise<KeyValidationResult> {
-    return this.probe(`${EXA_BASE_URL}/search`, {
+    return await this.probe(`${EXA_BASE_URL}/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
       body: JSON.stringify({}),

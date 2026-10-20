@@ -64,13 +64,13 @@ export class ZhipuProvider extends OpenAICompatProvider {
     return GLOBAL_BASE_URL + url.slice(DOMESTIC_BASE_URL.length);
   }
 
-  protected override fetchWithTimeout(
+  protected override async fetchWithTimeout(
     url: string,
     init: RequestInit,
     timeoutMs?: number,
     fetchOpts?: ProviderFetchOptions,
   ): Promise<Response> {
-    return super.fetchWithTimeout(this.resolveUrl(url, init), init, timeoutMs, fetchOpts);
+    return await super.fetchWithTimeout(this.resolveUrl(url, init), init, timeoutMs, fetchOpts);
   }
 
   override async validateKey(apiKey: string, quotaContext?: QuotaObservationContext): Promise<KeyValidationResult> {
@@ -81,7 +81,7 @@ export class ZhipuProvider extends OpenAICompatProvider {
 
     const domesticRes = await this.fetchCatalogEndpoint(`${DOMESTIC_BASE_URL}/models`, apiKey, quotaContext);
     if (domesticRes.status !== 401 && domesticRes.status !== 403) {
-      return this.validationResult(domesticRes);
+      return await this.validationResult(domesticRes);
     }
 
     // Only reached when the domestic host said "not my key" — which is exactly
@@ -94,16 +94,16 @@ export class ZhipuProvider extends OpenAICompatProvider {
       // api.z.ai unreachable (no route, blocked, timeout). Nothing new learned,
       // so report the domestic rejection rather than turning a plainly invalid
       // key into a transport error that health.ts would log as 'error'.
-      return this.validationResult(domesticRes);
+      return await this.validationResult(domesticRes);
     }
 
     if (globalRes.status !== 401 && globalRes.status !== 403) {
       this.globalKeys.add(apiKey);
-      return this.validationResult(globalRes);
+      return await this.validationResult(globalRes);
     }
 
     // Rejected by both consoles. Report the domestic failure: that is the host
     // the key is used against by default, so its message is the relevant one.
-    return this.validationResult(domesticRes);
+    return await this.validationResult(domesticRes);
   }
 }

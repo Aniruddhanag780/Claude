@@ -56,9 +56,9 @@ function envNum(name: string, fallback: number): number {
 
 // DB-absent-safe settings read: a not-yet-initialized DB (or any read error)
 // must not throw on the proxy hot path, so it degrades to "no setting stored".
-function readSetting(key: string): string | undefined {
+async function readSetting(key: string): Promise<string | undefined> {
   try {
-    return getSetting(key);
+    return await getSetting(key);
   } catch {
     return undefined;
   }
@@ -72,8 +72,8 @@ export const CACHE_ENABLED_SETTING = 'response_cache_enabled';
  * settings-table value wins when present (dashboard toggle, no restart), then
  * the RESPONSE_CACHE env var, then off.
  */
-export function isCacheEnabled(): boolean {
-  const stored = readSetting(CACHE_ENABLED_SETTING);
+export async function isCacheEnabled(): Promise<boolean> {
+  const stored = await readSetting(CACHE_ENABLED_SETTING);
   if (stored !== undefined && stored.trim() !== '') {
     return /^(1|true|on|yes)$/i.test(stored.trim());
   }
@@ -86,8 +86,8 @@ export function isCacheEnabled(): boolean {
  * Separately switchable because persisting plaintext model responses to disk is
  * a privacy decision an operator may want to decline while still caching.
  */
-export function cachePersistenceEnabled(): boolean {
-  return isCacheEnabled() && envFlag('RESPONSE_CACHE_PERSIST', true);
+export async function cachePersistenceEnabled(): Promise<boolean> {
+  return await isCacheEnabled() && envFlag('RESPONSE_CACHE_PERSIST', true);
 }
 
 /** Entry lifetime. Default 1h: long enough to absorb retries and agent re-runs,
@@ -137,10 +137,10 @@ export function parseCacheDirective(
 }
 
 /** Resolve the global switch + per-request directive into a single yes/no. */
-export function cacheActive(directive: CacheDirective): boolean {
+export async function cacheActive(directive: CacheDirective): Promise<boolean> {
   if (directive === 'off') return false;
   if (directive === 'on') return true;
-  return isCacheEnabled();
+  return await isCacheEnabled();
 }
 
 // ── Canonical key ──
@@ -311,7 +311,7 @@ function lastUsedAtMs(entry: { createdAtMs: number; lastHitAtMs: number | null }
  * Each map is itself in LRU order, so only their two front entries can be the
  * coldest; the older of the two goes first.
  */
-function enforceCombinedCap(): void {
+async function enforceCombinedCap(): Promise<void> {
   const cap = cacheMaxEntries();
   while (store.size + streamStore.size > cap) {
     const jsonKey = store.keys().next().value as string | undefined;
@@ -324,7 +324,7 @@ function enforceCombinedCap(): void {
       store.delete(jsonKey);
       // Evicting in memory but not on disk would let the table grow without
       // bound and let a restart resurrect entries the LRU already gave up on.
-      scheduleRowDelete(jsonKey);
+      await scheduleRowDelete(jsonKey);
     } else {
       break; // both stores empty; cap is 0
     }
@@ -356,8 +356,8 @@ let lookupMisses = 0;
 const pendingWrites: Array<() => void> = [];
 let drainScheduled = false;
 
-function schedulePersist(op: () => void): void {
-  if (!cachePersistenceEnabled()) return;
+async function schedulePersist(op: () => void): Promise<void> {
+  if (!await cachePersistenceEnabled()) return;
   pendingWrites.push(op);
   if (drainScheduled) return;
   drainScheduled = true;
@@ -376,9 +376,9 @@ function drainPendingWrites(): void {
   }
 }
 
-function scheduleRowDelete(cacheKey: string): void {
-  schedulePersist(() => {
-    getDb().run('DELETE FROM response_cache WHERE cache_key = ?', [cacheKey]);
+async function scheduleRowDelete(cacheKey: string): Promise<void> {
+  await schedulePersist(async () => {
+    await getDb().run('DELETE FROM response_cache WHERE cache_key = ?', [cacheKey]);
   });
 }
 
@@ -391,13 +391,13 @@ const dirtyHitCounts = new Map<string, { hitCount: number; lastHitAtMs: number }
 let hitFlushTimer: NodeJS.Timeout | undefined;
 function scheduleHitCountFlush(): void {
   if (hitFlushTimer) return;
-  hitFlushTimer = setTimeout(() => {
+  hitFlushTimer = setTimeout(async () => {
     hitFlushTimer = undefined;
     if (dirtyHitCounts.size === 0) return;
     const batch = new Map(dirtyHitCounts);
     dirtyHitCounts.clear();
-    schedulePersist(() => {
-      for (const [cacheKey, hit] of batch) getDb().run('UPDATE response_cache SET hit_count = ?, last_hit_at_ms = ? WHERE cache_key = ?', [hit.hitCount, hit.lastHitAtMs, cacheKey]);
+    await schedulePersist(async () => {
+      for (const [cacheKey, hit] of batch) await getDb().run('UPDATE response_cache SET hit_count = ?, last_hit_at_ms = ? WHERE cache_key = ?', [hit.hitCount, hit.lastHitAtMs, cacheKey]);
     });
   }, HIT_FLUSH_DELAY_MS);
   hitFlushTimer.unref();
@@ -437,7 +437,7 @@ export function __resetMemoryForTests(): void {
  * past the TTL (expired entries are deleted lazily on read, in memory and on
  * disk). A hit bumps the entry's hit_count and moves it to most-recently-used.
  */
-export function getCachedResponse(cacheKey: string, now = Date.now()): CachedResponse | null {
+export async function getCachedResponse(cacheKey: string, now = Date.now()): Promise<CachedResponse | null> {
   const entry = store.get(cacheKey);
   if (!entry) {
     lookupMisses += 1;
@@ -447,7 +447,7 @@ export function getCachedResponse(cacheKey: string, now = Date.now()): CachedRes
   if (now - entry.createdAtMs > cacheTtlMs()) {
     store.delete(cacheKey);
     // The row would otherwise outlive its memory entry until the next restart.
-    scheduleRowDelete(cacheKey);
+    await scheduleRowDelete(cacheKey);
     lookupMisses += 1;
     return null;
   }
@@ -489,7 +489,7 @@ export function getCachedResponse(cacheKey: string, now = Date.now()): CachedRes
  * it never sits on — or throws into — the proxy hot path; a DB failure degrades
  * to in-memory-only, exactly as before.
  */
-export function storeCachedResponse(cacheKey: string, input: StoreInput, now = Date.now()): void {
+export async function storeCachedResponse(cacheKey: string, input: StoreInput, now = Date.now()): Promise<void> {
   // Reject bodies that can't be JSON-serialized; a hit must be replayable.
   let bodyJson: string;
   try {
@@ -517,7 +517,7 @@ export function storeCachedResponse(cacheKey: string, input: StoreInput, now = D
   // Evict least-recently-used beyond the cap, which is shared with the
   // streaming store. The count only drifts by one per insert, so at most one
   // entry is removed per call in steady state.
-  enforceCombinedCap();
+  await enforceCombinedCap();
 
   // Write-through to SQLite. hit_count is stored at its current in-memory value
   // (0 for a fresh store, since an overwrite resets the rolling stat with the
@@ -525,8 +525,8 @@ export function storeCachedResponse(cacheKey: string, input: StoreInput, now = D
   const entry = store.get(cacheKey);
   if (!entry) return; // cap of 0: the entry was evicted by the loop above
   const expiresAtMs = now + cacheTtlMs();
-  schedulePersist(() => {
-    getDb().run(`INSERT INTO response_cache
+  await schedulePersist(async () => {
+    await getDb().run(`INSERT INTO response_cache
          (cache_key, body_json, platform, model_id, key_id, prompt_tokens, completion_tokens, hit_count, created_at_ms, last_hit_at_ms, expires_at_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(cache_key) DO UPDATE SET
@@ -550,17 +550,17 @@ export function storeCachedResponse(cacheKey: string, input: StoreInput, now = D
  * are purged opportunistically. Best-effort: any DB error leaves the cache
  * empty (memory-only), matching the pre-persistence behavior.
  */
-export function loadCacheFromDb(now = Date.now()): void {
+export async function loadCacheFromDb(now = Date.now()): Promise<void> {
   try {
     const db = getDb();
     // Purge expired rows lazily on startup so the table doesn't accumulate
     // dead entries between restarts. Unconditional: rows written while the
     // cache was on must still age out after it is switched off.
-    db.run('DELETE FROM response_cache WHERE expires_at_ms <= ?', [now]);
+    await db.run('DELETE FROM response_cache WHERE expires_at_ms <= ?', [now]);
     // Hydration only when the operator actually wants the cache (and its
     // on-disk half). Off by default, so this is inert on an untouched install.
-    if (!cachePersistenceEnabled()) return;
-    const rows = db.all(`SELECT cache_key, body_json, platform, model_id, key_id, prompt_tokens, completion_tokens, hit_count, created_at_ms, last_hit_at_ms
+    if (!await cachePersistenceEnabled()) return;
+    const rows = await db.all(`SELECT cache_key, body_json, platform, model_id, key_id, prompt_tokens, completion_tokens, hit_count, created_at_ms, last_hit_at_ms
          FROM response_cache
         ORDER BY created_at_ms ASC`) as Array<{
       cache_key: string;
@@ -672,7 +672,7 @@ export function getCachedStreamResponse(cacheKey: string, now = Date.now()): Cac
  * the JSON store: an empty or oversize sequence is silently skipped, and the
  * entry shares the JSON store's entry cap.
  */
-export function storeCachedStreamResponse(cacheKey: string, input: StoreStreamInput, now = Date.now()): void {
+export async function storeCachedStreamResponse(cacheKey: string, input: StoreStreamInput, now = Date.now()): Promise<void> {
   if (!Array.isArray(input.frames) || input.frames.length === 0) return;
   const sse = input.frames.join('');
   if (sse.length === 0 || Buffer.byteLength(sse) > STREAM_CACHE_MAX_BYTES) return;
@@ -690,7 +690,7 @@ export function storeCachedStreamResponse(cacheKey: string, input: StoreStreamIn
     lastHitAtMs: null,
   });
 
-  enforceCombinedCap();
+  await enforceCombinedCap();
 }
 
 // ── Stats / admin ──
@@ -762,7 +762,7 @@ export function getCacheStats(): CacheStats {
  * restart. Queued write-through is discarded for the same reason. Runs inline
  * rather than deferred: this is an admin route, not the proxy hot path.
  */
-export function clearCache(): number {
+export async function clearCache(): Promise<number> {
   const removed = store.size + streamStore.size;
   store.clear();
   streamStore.clear();
@@ -773,7 +773,7 @@ export function clearCache(): number {
   lookupHits = 0;
   lookupMisses = 0;
   try {
-    getDb().run('DELETE FROM response_cache');
+    await getDb().run('DELETE FROM response_cache');
   } catch {
     // best-effort: no DB (or no table yet) means there is nothing persisted
   }

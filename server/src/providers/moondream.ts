@@ -22,7 +22,7 @@ export class MoondreamProvider extends BaseProvider {
     return { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
   }
 
-  private body(messages: ChatMessage[], modelId: string, options: CompletionOptions | undefined, stream: boolean): Record<string, unknown> {
+  private async body(messages: ChatMessage[], modelId: string, options: CompletionOptions | undefined, stream: boolean): Promise<Record<string, unknown>> {
     if (options?.tools?.length || options?.tool_choice && options.tool_choice !== 'none') {
       throw unsupported('does not support tool calling');
     }
@@ -52,14 +52,14 @@ export class MoondreamProvider extends BaseProvider {
     return {
       model: modelId, messages: input, stream,
       temperature: options?.temperature, top_p: options?.top_p,
-      max_completion_tokens: resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
+      max_completion_tokens: await resolveMaxTokens(this.platform, options?.max_tokens, options?.contextBudget),
       ...(options?.reasoning_effort !== undefined ? { reasoning: options.reasoning_effort !== 'none' } : {}),
       ...(stream && options?.stream_options ? { stream_options: options.stream_options } : {}),
     };
   }
 
-  private record(res: Response, endpoint: string, context?: QuotaObservationContext, modelId?: string): void {
-    recordQuotaObservationsFromResponse(res, { ...context, platform: this.platform, endpoint, modelId });
+  private async  record(res: Response, endpoint: string, context?: QuotaObservationContext, modelId?: string): Promise<void> {
+    await recordQuotaObservationsFromResponse(res, { ...context, platform: this.platform, endpoint, modelId });
   }
 
   async validateKey(apiKey: string, quotaContext?: QuotaObservationContext): Promise<KeyValidationResult> {
@@ -68,8 +68,8 @@ export class MoondreamProvider extends BaseProvider {
     if (!apiKey.trim()) return { valid: false, error: 'Moondream API key is required' };
     const res = await this.fetchWithTimeout(`${BASE_URL}/models`, { headers: this.headers(apiKey) },
       providerTimeoutMs(this.platform, 30_000), { timeoutBounds: 'request' });
-    this.record(res, 'models', quotaContext);
-    if ([401, 403].includes(res.status)) return this.validationResult(res);
+    await this.record(res, 'models', quotaContext);
+    if ([401, 403].includes(res.status)) return await this.validationResult(res);
     if (!res.ok) throw providerHttpError(res, 'Moondream key validation is temporarily inconclusive');
     const roster = await res.json() as { data?: unknown };
     if (!Array.isArray(roster.data)) throw upstreamError('returned an invalid model roster');
@@ -79,10 +79,10 @@ export class MoondreamProvider extends BaseProvider {
   private async request(apiKey: string, messages: ChatMessage[], modelId: string,
     options: CompletionOptions | undefined, stream: boolean, quotaContext?: QuotaObservationContext): Promise<Response> {
     const res = await this.fetchWithTimeout(`${BASE_URL}/chat/completions`, {
-      method: 'POST', headers: this.headers(apiKey), body: JSON.stringify(this.body(messages, modelId, options, stream)),
+      method: 'POST', headers: this.headers(apiKey), body: JSON.stringify(await this.body(messages, modelId, options, stream)),
     }, options?.timeoutMs ?? providerTimeoutMs(this.platform, 60_000),
     { signal: options?.signal, timeoutBounds: stream ? 'headers' : 'request' });
-    this.record(res, 'chat/completions', quotaContext, modelId);
+    await this.record(res, 'chat/completions', quotaContext, modelId);
     if (!res.ok) {
       const text = await res.text();
       let detail: unknown = text;

@@ -353,7 +353,7 @@ export function parseQuotaObservationsFromResponse(
   return observations;
 }
 
-export function recordQuotaObservation(input: QuotaObservationInput): ProviderQuotaObservation | null {
+export async function recordQuotaObservation(input: QuotaObservationInput): Promise<ProviderQuotaObservation | null> {
   const context = getQuotaObservationContext();
   const platform = input.platform ?? context?.platform;
   if (!platform) return null;
@@ -385,8 +385,8 @@ export function recordQuotaObservation(input: QuotaObservationInput): ProviderQu
   const nowSql = toSqliteUtc(observedAt);
   const updatedAt = nowSql;
 
-  db.transaction(() => {
-    db.run(`
+  await db.transaction(async (tx) => {
+    await tx.run(`
       INSERT INTO provider_quota_state (
         platform, key_id, quota_pool_key, metric, limit_value, remaining_value,
         reset_at, reset_strategy, source, confidence, notes, observed_at, updated_at
@@ -405,17 +405,17 @@ export function recordQuotaObservation(input: QuotaObservationInput): ProviderQu
       -- make an older balance, reset or confidence appear freshly measured.
       WHERE excluded.remaining_value IS NOT NULL
         AND (provider_quota_state.remaining_value IS NULL
-          OR julianday(excluded.observed_at) >= julianday(provider_quota_state.observed_at))
+          OR excluded.observed_at::timestamp >= provider_quota_state.observed_at::timestamp)
     `, [platform, keyId, quotaPoolKey, metric, limitValue, remainingValue, resetAt, resetStrategy, source, confidence, notes, nowSql, updatedAt]);
 
-    db.run(`
+    await tx.run(`
       INSERT INTO provider_quota_observations (
         id, platform, key_id, provider_account_id, model_id, quota_pool_key, metric,
         status_code, limit_value, remaining_value, reset_at, retry_after_ms,
         reset_strategy, source, confidence, notes, raw_json, endpoint, observed_at, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [id, platform, keyId, providerAccountId, modelId, quotaPoolKey, metric, statusCode, limitValue, remainingValue, resetAt, retryAfterMs, resetStrategy, source, confidence, notes, rawJson, endpoint, nowSql, nowSql]);
-  })();
+  });
 
   // The row just moved, so the memoised headroom for this platform is wrong —
   // drop it rather than let a 5s window hide a fresh 429 from the router.
@@ -446,13 +446,14 @@ export function recordQuotaObservation(input: QuotaObservationInput): ProviderQu
   };
 }
 
-export function recordQuotaObservationsFromResponse(
+export async function recordQuotaObservationsFromResponse(
   response: Response,
   opts: Pick<QuotaObservationInput, 'platform' | 'modelId' | 'quotaPoolKey' | 'keyId' | 'providerAccountId' | 'endpoint'> = {},
-): ProviderQuotaObservation[] {
-  return parseQuotaObservationsFromResponse(response, opts)
-    .map(recordQuotaObservation)
-    .filter((row): row is ProviderQuotaObservation => row !== null);
+): Promise<ProviderQuotaObservation[]> {
+  const recorded = await Promise.all(
+    parseQuotaObservationsFromResponse(response, opts).map(recordQuotaObservation),
+  );
+  return recorded.filter((row): row is ProviderQuotaObservation => row !== null);
 }
 
 // The router needs a smaller view than the panel's joined observation rows:
@@ -482,7 +483,7 @@ const headroomCache = new Map<string, { db: unknown; at: number; map: Map<number
  * constraint is what 429s, so a key with 90% of its requests but 2% of its
  * tokens left has 2% of headroom, not 90%.
  */
-export function getKeyQuotaHeadroom(platform: Platform): Map<number, number> {
+export async function getKeyQuotaHeadroom(platform: Platform): Promise<Map<number, number>> {
   let db;
   try {
     db = getDb();
@@ -493,11 +494,11 @@ export function getKeyQuotaHeadroom(platform: Platform): Map<number, number> {
   const cached = headroomCache.get(platform);
   if (cached && cached.db === db && now - cached.at < HEADROOM_TTL_MS) return cached.map;
 
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT key_id AS keyId,
            limit_value AS limitValue,
            remaining_value AS remainingValue,
-           CASE WHEN reset_at IS NOT NULL AND julianday(reset_at) < julianday('now')
+           CASE WHEN reset_at IS NOT NULL AND reset_at::timestamp < (now() at time zone 'utc')
                 THEN 1 ELSE 0 END AS expired
       FROM provider_quota_state
      WHERE platform = ?
@@ -531,7 +532,7 @@ export function invalidateKeyQuotaHeadroom(platform?: Platform): void {
   else headroomCache.clear();
 }
 
-export function getQuotaStateForKeys(options: { normalizeExpired?: boolean } = {}): QuotaObservationView[] {
+export async function getQuotaStateForKeys(options: { normalizeExpired?: boolean } = {}): Promise<QuotaObservationView[]> {
   let db;
   try {
     db = getDb();
@@ -544,7 +545,7 @@ export function getQuotaStateForKeys(options: { normalizeExpired?: boolean } = {
   // (platform, key_id, quota_pool_key, metric, observed_at DESC, created_at
   // DESC) and stops at the first entry. The window-function form it replaces
   // ranked the entire table, raw_json included, on every dashboard poll.
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT
       pqs.platform,
       pqs.key_id AS keyId,

@@ -20,21 +20,21 @@ function maskKey(key: string): string {
   return `${key.slice(0, 7)}…${key.slice(-4)}`;
 }
 
-function statusPayload() {
-  const key = getSetting(SETTING_LICENSE_KEY);
+async function statusPayload() {
+  const key = await getSetting(SETTING_LICENSE_KEY);
   return {
     hasKey: Boolean(key),
     maskedKey: key ? maskKey(key) : null,
-    license: getCachedLicenseStatus(),
-    catalog: getSyncState(),
+    license: await getCachedLicenseStatus(),
+    catalog: await getSyncState(),
     // Where "Go Premium" / "recover key" links point. Overridable for forks.
     siteUrl: (process.env.PREMIUM_SITE_URL ?? 'https://freellmapi.co').replace(/\/$/, ''),
   };
 }
 
 /** GET /api/premium — everything the Premium page renders. */
-premiumRouter.get('/', (_req: Request, res: Response) => {
-  res.json(statusPayload());
+premiumRouter.get('/', async (_req: Request, res: Response) => {
+  res.json(await statusPayload());
 });
 
 /**
@@ -67,27 +67,27 @@ premiumRouter.post('/key', async (req: Request, res: Response) => {
     return;
   }
 
-  setSetting(SETTING_LICENSE_KEY, key);
+  await setSetting(SETTING_LICENSE_KEY, key);
   await refreshLicenseStatus();
   const sync = await syncCatalog(true);
-  res.json({ ...statusPayload(), sync });
+  res.json({ ...await statusPayload(), sync });
 });
 
 /** DELETE /api/premium/key — deactivate locally (the purchase itself is untouched). */
 premiumRouter.delete('/key', async (_req: Request, res: Response) => {
   const db = getDb();
-  db.run('DELETE FROM settings WHERE key IN (?, ?)', [SETTING_LICENSE_KEY, SETTING_LICENSE_STATUS]);
+  await db.run('DELETE FROM settings WHERE key IN (?, ?)', [SETTING_LICENSE_KEY, SETTING_LICENSE_STATUS]);
   // Drop back to the free tier in the background; failure just means the next
   // scheduled poll handles it.
   void syncCatalog(true);
-  res.json(statusPayload());
+  res.json(await statusPayload());
 });
 
 /** POST /api/premium/sync — manual "check for updates now". */
 premiumRouter.post('/sync', async (_req: Request, res: Response) => {
   await refreshLicenseStatus();
   const sync = await syncCatalog(true);
-  res.json({ ...statusPayload(), sync });
+  res.json({ ...await statusPayload(), sync });
 });
 
 /**
@@ -96,7 +96,7 @@ premiumRouter.post('/sync', async (_req: Request, res: Response) => {
  * entirely self-serve.
  */
 premiumRouter.post('/portal', async (_req: Request, res: Response) => {
-  const key = getSetting(SETTING_LICENSE_KEY);
+  const key = await getSetting(SETTING_LICENSE_KEY);
   if (!key) {
     res.status(400).json({ error: 'No license key configured.' });
     return;

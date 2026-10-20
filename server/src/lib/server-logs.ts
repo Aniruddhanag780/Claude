@@ -184,12 +184,12 @@ export interface RecordLogOptions extends ServerLogMeta {
  *
  * Returns the stored entry, or null when the line was filtered out.
  */
-export function recordLogEntry(options: RecordLogOptions): ServerLogEntry | null {
+export async function recordLogEntry(options: RecordLogOptions): Promise<ServerLogEntry | null> {
   const message = truncate(options.message);
   if (message.trim() === '') return null;
   if (NOISE_RE.test(message)) return null;
 
-  ensureSeeded();
+  await ensureSeeded();
 
   const entry: ServerLogEntry = {
     id: ++lastId,
@@ -209,11 +209,11 @@ export function recordLogEntry(options: RecordLogOptions): ServerLogEntry | null
   if (requestId) entry.requestId = requestId;
 
   push(entry);
-  if (PERSISTED_LEVELS.has(entry.level)) persistCapped(entry);
+  if (PERSISTED_LEVELS.has(entry.level)) await persistCapped(entry);
   return entry;
 }
 
-function persistCapped(entry: ServerLogEntry): void {
+async function persistCapped(entry: ServerLogEntry): Promise<void> {
   if (entry.tsMs - persistWindowStartMs >= PERSIST_WINDOW_MS || entry.tsMs < persistWindowStartMs) {
     const dropped = persistSuppressed;
     persistWindowStartMs = entry.tsMs;
@@ -232,7 +232,7 @@ function persistCapped(entry: ServerLogEntry): void {
       entry.id = ++lastId;
       ring.splice(ring.length - 1, 0, summary);
       if (ring.length > RING_CAPACITY) ring.shift();
-      persist(summary);
+      await persist(summary);
       persistWindowCount++;
     }
   }
@@ -241,7 +241,7 @@ function persistCapped(entry: ServerLogEntry): void {
     return;
   }
   persistWindowCount++;
-  persist(entry);
+  await persist(entry);
 }
 
 function push(entry: ServerLogEntry): void {
@@ -253,10 +253,10 @@ function push(entry: ServerLogEntry): void {
  * Called by the console wrapper in lib/log-redaction.ts, AFTER redaction. Never
  * throws: a log line must not be able to fail the call that emitted it.
  */
-export function recordConsoleLine(level: ServerLogLevel, args: readonly unknown[]): void {
+export async function recordConsoleLine(level: ServerLogLevel, args: readonly unknown[]): Promise<void> {
   if (mirroring) return;
   try {
-    recordLogEntry({ level, message: formatLogArgs(args) });
+    await recordLogEntry({ level, message: formatLogArgs(args) });
   } catch {
     // Swallowed on purpose — see above.
   }
@@ -272,14 +272,14 @@ export function recordConsoleLine(level: ServerLogLevel, args: readonly unknown[
  * console (already-redacted text is idempotent under a second pass) so that a
  * restored console — tests, an embedder — still sees the line.
  */
-export function providerLog(
+export async function providerLog(
   level: ServerLogLevel,
   message: string,
   meta: ServerLogMeta = {},
-): void {
+): Promise<void> {
   const redacted = redactSecrets(message);
   try {
-    recordLogEntry({ level, message: redacted, ...meta });
+    await recordLogEntry({ level, message: redacted, ...meta });
   } catch {
     // Never let the store break the caller's control flow.
   }
@@ -323,21 +323,21 @@ function tryDb(): Db | null {
   }
 }
 
-function hasTable(db: Db): boolean {
+async function hasTable(db: Db): Promise<boolean> {
   try {
-    return !!db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='server_logs'");
+    return !!await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='server_logs'");
   } catch {
     return false;
   }
 }
 
-function persist(entry: ServerLogEntry): void {
+async function persist(entry: ServerLogEntry): Promise<void> {
   if (persisting) return;
   persisting = true;
   try {
     const db = tryDb();
     if (!db) return;
-    db.run(`
+    await db.run(`
       INSERT INTO server_logs (id, level, source, provider, model, event, request_id, message, created_at_ms)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [entry.id, entry.level, entry.source ?? null, entry.provider ?? null, entry.model ?? null, entry.event ?? null, entry.requestId ?? null, entry.message, entry.tsMs]);
@@ -377,31 +377,31 @@ function rowToEntry(row: ServerLogRow): ServerLogEntry {
  * re-stamped ABOVE the persisted maximum, because ids have to be unique across
  * both tiers and a pre-DB line was numbered from a counter that started at zero.
  */
-function ensureSeeded(): void {
+async function ensureSeeded(): Promise<void> {
   if (seeded || seeding) return;
   // Same reasoning as `persisting`: the two probes below touch the DB layer,
   // which can log, and that log comes straight back into recordLogEntry.
   seeding = true;
   try {
-    seedNow();
+    await seedNow();
   } finally {
     seeding = false;
   }
 }
 
-function seedNow(): void {
+async function seedNow(): Promise<void> {
   const db = tryDb();
-  if (!db || !hasTable(db)) return;
+  if (!db || !await hasTable(db)) return;
   seeded = true;
 
   try {
     const pending = ring.splice(0, ring.length);
-    const max = db.get('SELECT MAX(id) AS maxId FROM server_logs') as
+    const max = await db.get('SELECT MAX(id) AS maxId FROM server_logs') as
       | { maxId: number | null }
       | undefined;
     lastId = Math.max(lastId, max?.maxId ?? 0);
 
-    const rows = db.all(`
+    const rows = await db.all(`
       SELECT id, level, source, provider, model, event, request_id, message, created_at_ms
         FROM server_logs
        ORDER BY created_at_ms DESC, id DESC
@@ -413,7 +413,7 @@ function seedNow(): void {
     for (const entry of pending) {
       entry.id = ++lastId;
       push(entry);
-      if (PERSISTED_LEVELS.has(entry.level)) persist(entry);
+      if (PERSISTED_LEVELS.has(entry.level)) await persist(entry);
     }
   } catch {
     // A seed that fails leaves the counter where it was; ids stay increasing
@@ -423,8 +423,8 @@ function seedNow(): void {
 
 /** Force the seed/preload now (the route calls this so an idle server still
  *  shows persisted history on the first poll). */
-export function initServerLogs(): void {
-  ensureSeeded();
+export async function initServerLogs(): Promise<void> {
+  await ensureSeeded();
 }
 
 // ── Read side ────────────────────────────────────────────────────────────────
@@ -458,13 +458,13 @@ export function clampLimit(raw: number | undefined): number {
 
 /** Highest id handed out so far — what the client sends back as sinceId, even
  *  when every entry it would have matched was filtered away. */
-export function currentMaxId(): number {
-  ensureSeeded();
+export async function currentMaxId(): Promise<number> {
+  await ensureSeeded();
   return lastId;
 }
 
-export function levelCounts(): LogLevelCounts {
-  ensureSeeded();
+export async function levelCounts(): Promise<LogLevelCounts> {
+  await ensureSeeded();
   const counts: LogLevelCounts = { debug: 0, info: 0, warn: 0, error: 0 };
   for (const entry of ring) {
     if (entry.level === 'trace' || entry.level === 'debug') counts.debug++;
@@ -484,8 +484,8 @@ function matches(entry: ServerLogEntry, levels: Set<ServerLogLevel> | null, need
 }
 
 /** The newest `limit` entries of the filtered set, oldest→newest. */
-export function queryLogs(query: LogQuery = {}): ServerLogEntry[] {
-  ensureSeeded();
+export async function queryLogs(query: LogQuery = {}): Promise<ServerLogEntry[]> {
+  await ensureSeeded();
   const sinceId = query.sinceId;
   // A caller already caught up costs one comparison, not a scan.
   if (sinceId !== undefined && sinceId >= lastId) return [];
@@ -507,13 +507,13 @@ export function queryLogs(query: LogQuery = {}): ServerLogEntry[] {
 
 /** Empty both tiers. The id counter is deliberately NOT reset: a dashboard tab
  *  holding a cursor would otherwise be handed ids it has already seen. */
-export function clearLogs(): void {
-  ensureSeeded();
+export async function clearLogs(): Promise<void> {
+  await ensureSeeded();
   ring = [];
   const db = tryDb();
   if (!db) return;
   try {
-    db.run('DELETE FROM server_logs');
+    await db.run('DELETE FROM server_logs');
   } catch {
     // Same best-effort contract as persist().
   }

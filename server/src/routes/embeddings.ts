@@ -17,23 +17,23 @@ import {
 export const embeddingsRouter = Router();
 
 // Families with their provider chains, for the dashboard Embeddings tab.
-embeddingsRouter.get('/', (_req: Request, res: Response) => {
+embeddingsRouter.get('/', async (_req: Request, res: Response) => {
   const db = getDb();
   const keyCounts = new Map(
-    (db.all("SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; n: number }[]).map(r => [r.platform, r.n]),
+    (await db.all("SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; n: number }[]).map(r => [r.platform, r.n]),
   );
   const customKeyIds = new Set(
-    (db.all("SELECT id FROM api_keys WHERE platform = 'custom' AND enabled = 1 AND status IN ('healthy', 'unknown')") as { id: number }[]).map(r => r.id),
+    (await db.all("SELECT id FROM api_keys WHERE platform = 'custom' AND enabled = 1 AND status IN ('healthy', 'unknown')") as { id: number }[]).map(r => r.id),
   );
 
   const byFamily = new Map<string, EmbeddingModelRow[]>();
-  for (const row of listEmbeddingModels()) {
+  for (const row of await listEmbeddingModels()) {
     const list = byFamily.get(row.family) ?? [];
     list.push(row);
     byFamily.set(row.family, list);
   }
 
-  const defaultFamily = getDefaultFamily();
+  const defaultFamily = await getDefaultFamily();
   res.json({
     defaultFamily,
     families: [...byFamily.entries()].map(([family, rows]) => ({
@@ -101,7 +101,7 @@ embeddingsRouter.post('/custom', async (req: Request, res: Response) => {
   const label = parsed.data.label?.trim() || undefined;
   const quotaLabel = parsed.data.quotaLabel?.trim() || 'custom endpoint';
 
-  const existingKey = db.get(`
+  const existingKey = await db.get(`
     SELECT id, encrypted_key, iv, auth_tag
       FROM api_keys
      WHERE platform = 'custom' AND base_url = ?
@@ -120,27 +120,25 @@ embeddingsRouter.post('/custom', async (req: Request, res: Response) => {
     return;
   }
 
-  const upsert = db.transaction(() => {
-    // A new secret for a known endpoint is an ADDITIONAL credential, never a
-    // replacement for the stored one (#619).
-    const { keyId, storedKey: storedKeyForMask } = resolveCustomEndpointKey(db, baseUrl, providedKey, label);
-    const { modelDbId } = registerCustomEmbeddingModel(db, {
-      keyId,
-      modelId,
-      displayName: submittedName,
-      family,
-      dimensions,
-      maxInputTokens: parsed.data.maxInputTokens ?? null,
-      quotaLabel,
-    });
-    return { modelDbId, keyId, storedKeyForMask };
-  });
-
   // A family-dimension conflict aborts the transaction, so a rejected submit
   // leaves no half-registered key row behind.
   let result: { modelDbId: number; keyId: number; storedKeyForMask: string };
   try {
-    result = upsert();
+    result = await db.transaction(async () => {
+      // A new secret for a known endpoint is an ADDITIONAL credential, never a
+      // replacement for the stored one (#619).
+      const { keyId, storedKey: storedKeyForMask } = await resolveCustomEndpointKey(db, baseUrl, providedKey, label);
+      const { modelDbId } = await registerCustomEmbeddingModel(db, {
+        keyId,
+        modelId,
+        displayName: submittedName,
+        family,
+        dimensions,
+        maxInputTokens: parsed.data.maxInputTokens ?? null,
+        quotaLabel,
+      });
+      return { modelDbId, keyId, storedKeyForMask };
+    });
   } catch (err: any) {
     if (err instanceof EmbeddingsError) {
       // `upstream_error`, never `authentication_error`: this status is relayed
@@ -151,7 +149,7 @@ embeddingsRouter.post('/custom', async (req: Request, res: Response) => {
     }
     throw err;
   }
-  const storedName = (db.get('SELECT display_name FROM embedding_models WHERE id = ?', [result.modelDbId]) as { display_name: string }).display_name;
+  const storedName = (await db.get('SELECT display_name FROM embedding_models WHERE id = ?', [result.modelDbId]) as { display_name: string }).display_name;
   res.status(201).json({
     success: true,
     keyId: result.keyId,
@@ -175,7 +173,7 @@ const updateSchema = z.object({
   })).optional(),
 });
 
-embeddingsRouter.put('/', (req: Request, res: Response) => {
+embeddingsRouter.put('/', async (req: Request, res: Response) => {
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: 'Invalid request body' } });
@@ -184,25 +182,26 @@ embeddingsRouter.put('/', (req: Request, res: Response) => {
   const db = getDb();
 
   if (parsed.data.defaultFamily) {
-    const exists = db.get('SELECT 1 FROM embedding_models WHERE family = ?', [parsed.data.defaultFamily]);
+    const exists = await db.get('SELECT 1 FROM embedding_models WHERE family = ?', [parsed.data.defaultFamily]);
     if (!exists) {
       res.status(400).json({ error: { message: `Unknown family '${parsed.data.defaultFamily}'` } });
       return;
     }
-    setSetting('embeddings_default_family', parsed.data.defaultFamily);
+    await setSetting('embeddings_default_family', parsed.data.defaultFamily);
   }
 
   if (parsed.data.providers) {
-    const apply = db.transaction((rows: { id: number; priority: number; enabled: boolean }[]) => {
-      for (const r of rows) db.run('UPDATE embedding_models SET priority = ?, enabled = ? WHERE id = ?', [r.priority, r.enabled ? 1 : 0, r.id]);
+    await db.transaction(async (tx) => {
+      for (const r of parsed.data.providers ?? []) {
+        await tx.run('UPDATE embedding_models SET priority = ?, enabled = ? WHERE id = ?', [r.priority, r.enabled ? 1 : 0, r.id]);
+      }
     });
-    apply(parsed.data.providers);
   }
 
   res.json({ success: true });
 });
 
-embeddingsRouter.delete('/custom/:id', (req: Request, res: Response) => {
+embeddingsRouter.delete('/custom/:id', async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) {
     res.status(400).json({ error: { message: 'Invalid id' } });
@@ -210,20 +209,19 @@ embeddingsRouter.delete('/custom/:id', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = db.get("SELECT family, key_id FROM embedding_models WHERE id = ? AND platform = 'custom'", [id]) as { family: string; key_id: number | null } | undefined;
+  const row = await db.get("SELECT family, key_id FROM embedding_models WHERE id = ? AND platform = 'custom'", [id]) as { family: string; key_id: number | null } | undefined;
   if (!row) {
     res.status(404).json({ error: { message: `Unknown custom embedding model ${id}` } });
     return;
   }
 
-  const remove = db.transaction(() => {
-    db.run("DELETE FROM embedding_models WHERE id = ? AND platform = 'custom'", [id]);
-    deleteUnusedCustomEndpointKey(db, row.key_id);
+  await db.transaction(async (tx) => {
+    await tx.run("DELETE FROM embedding_models WHERE id = ? AND platform = 'custom'", [id]);
+    await deleteUnusedCustomEndpointKey(db, row.key_id);
   });
-  remove();
-  if (getDefaultFamily() === row.family) {
-    const replacement = db.get('SELECT family FROM embedding_models ORDER BY family, priority LIMIT 1') as { family: string } | undefined;
-    if (replacement) setSetting('embeddings_default_family', replacement.family);
+  if (await getDefaultFamily() === row.family) {
+    const replacement = await db.get('SELECT family FROM embedding_models ORDER BY family, priority LIMIT 1') as { family: string } | undefined;
+    if (replacement) await setSetting('embeddings_default_family', replacement.family);
   }
   res.json({ success: true });
 });
@@ -237,25 +235,25 @@ embeddingsRouter.delete('/custom/:id', (req: Request, res: Response) => {
 // no honest conversion from Cloudflare Neurons or dollar credits to tokens. So
 // the summary reports what was actually spent and shows each provider's quota
 // label verbatim, rather than inventing a ceiling to draw a percentage against.
-embeddingsRouter.get('/usage', (_req: Request, res: Response) => {
+embeddingsRouter.get('/usage', async (_req: Request, res: Response) => {
   const db = getDb();
-  const usage = db.all(`
+  const usage = await db.all(`
     SELECT em.family,
-           COALESCE(SUM(CASE WHEN r.created_at >= datetime('now', 'start of day') THEN 1 ELSE 0 END), 0) AS requests_today,
-           COALESCE(SUM(CASE WHEN r.created_at >= datetime('now', 'start of month') THEN r.input_tokens ELSE 0 END), 0) AS tokens_month
+           COALESCE(SUM(CASE WHEN r.created_at >= to_char(now() at time zone 'utc', 'YYYY-MM-DD') THEN 1 ELSE 0 END), 0) AS requests_today,
+           COALESCE(SUM(CASE WHEN r.created_at >= to_char(date_trunc('month', now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS') THEN r.input_tokens ELSE 0 END), 0) AS tokens_month
     FROM embedding_models em
     LEFT JOIN requests r
       ON r.request_type = 'embedding'
      AND r.status = 'success'
      AND r.platform = em.platform
      AND r.model_id = em.model_id
-     AND r.created_at >= datetime('now', 'start of month')
+     AND r.created_at >= to_char(date_trunc('month', now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS')
     GROUP BY em.family
   `) as { family: string; requests_today: number; tokens_month: number }[];
 
   // One representative provider per family for the legend: the highest-priority
   // enabled row, so the label matches whoever actually serves the family first.
-  const meta = db.all(`
+  const meta = await db.all(`
     SELECT family, platform, quota_label
     FROM embedding_models
     WHERE enabled = 1

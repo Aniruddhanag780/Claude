@@ -90,14 +90,14 @@ export type IdempotencyClaimResult =
  *   - { kind: 'miss' } when there is no usable claim — proceed normally and
  *     persist the result on success.
  */
-export function lookupIdempotencyReplay(
+export async function lookupIdempotencyReplay(
   keyHash: string,
   fingerprint: string,
   now = Date.now(),
-): IdempotencyClaimResult {
+): Promise<IdempotencyClaimResult> {
   try {
     const db = getDb();
-    const row = db.get(`SELECT request_fingerprint, response_status, response_body
+    const row = await db.get(`SELECT request_fingerprint, response_status, response_body
          FROM idempotency_claims
         WHERE key_hash = ? AND expires_at_ms > ?`, [keyHash, now]) as
       | { request_fingerprint: string; response_status: number; response_body: string }
@@ -122,19 +122,19 @@ export function lookupIdempotencyReplay(
  * Persist a completed response for future replays. Replaces any previous claim
  * for the same key hash. Expired rows are swept lazily for this key first.
  */
-export function storeIdempotencyResult(
+export async function storeIdempotencyResult(
   keyHash: string,
   fingerprint: string,
   status: number,
   body: unknown,
   executionId?: string,
   now = Date.now(),
-): void {
+): Promise<void> {
   try {
     const db = getDb();
     const ttl = idempotencyTtlMs();
-    db.run('DELETE FROM idempotency_claims WHERE key_hash = ? AND expires_at_ms <= ?', [keyHash, now]);
-    db.run(`INSERT INTO idempotency_claims
+    await db.run('DELETE FROM idempotency_claims WHERE key_hash = ? AND expires_at_ms <= ?', [keyHash, now]);
+    await db.run(`INSERT INTO idempotency_claims
          (key_hash, request_fingerprint, response_status, response_body, execution_id, created_at_ms, expires_at_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(key_hash) DO UPDATE SET
@@ -153,9 +153,9 @@ export function storeIdempotencyResult(
  * Delete an idempotency claim (e.g. after a failed generation that the caller
  * does not want replayed). Fail-safe.
  */
-export function clearIdempotencyResult(keyHash: string): void {
+export async function clearIdempotencyResult(keyHash: string): Promise<void> {
   try {
-    getDb().run('DELETE FROM idempotency_claims WHERE key_hash = ?', [keyHash]);
+    await getDb().run('DELETE FROM idempotency_claims WHERE key_hash = ?', [keyHash]);
   } catch {
     // best-effort
   }

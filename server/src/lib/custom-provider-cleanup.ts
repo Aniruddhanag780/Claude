@@ -1,21 +1,21 @@
 import type { Db } from '../db/types.js';
 
-function boundModelCount(db: Db, keyId: number): number {
-  const chat = db.get("SELECT COUNT(*) AS n FROM models WHERE platform = 'custom' AND key_id = ?", [keyId]) as { n: number };
-  const embeddings = db.get("SELECT COUNT(*) AS n FROM embedding_models WHERE platform = 'custom' AND key_id = ?", [keyId]) as { n: number };
-  const media = db.get("SELECT COUNT(*) AS n FROM media_models WHERE platform = 'custom' AND key_id = ?", [keyId]) as { n: number };
+async function boundModelCount(db: Db, keyId: number): Promise<number> {
+  const chat = await db.get("SELECT COUNT(*) AS n FROM models WHERE platform = 'custom' AND key_id = ?", [keyId]) as { n: number };
+  const embeddings = await db.get("SELECT COUNT(*) AS n FROM embedding_models WHERE platform = 'custom' AND key_id = ?", [keyId]) as { n: number };
+  const media = await db.get("SELECT COUNT(*) AS n FROM media_models WHERE platform = 'custom' AND key_id = ?", [keyId]) as { n: number };
   return chat.n + embeddings.n + media.n;
 }
 
 /** Everything still registered against an endpoint, across every key of its pool. */
-function endpointModelCount(db: Db, baseUrl: string): number {
-  const count = (table: string) => (db.get(`
+async function endpointModelCount(db: Db, baseUrl: string): Promise<number> {
+  const count = async (table: string) => (await db.get(`
     SELECT COUNT(*) AS n
       FROM ${table} m
       JOIN api_keys k ON k.id = m.key_id
      WHERE m.platform = 'custom' AND k.platform = 'custom' AND k.base_url = ?
   `, [baseUrl]) as { n: number }).n;
-  return count('models') + count('embedding_models') + count('media_models');
+  return await count('models') + await count('embedding_models') + await count('media_models');
 }
 
 /**
@@ -28,19 +28,19 @@ function endpointModelCount(db: Db, baseUrl: string): number {
  * not dead weight. Reaping on the key's own count deleted such a spare as soon
  * as the model it happened to arrive with was removed (#702).
  */
-export function deleteUnusedCustomEndpointKey(db: Db, keyId: number | null | undefined) {
+export async function deleteUnusedCustomEndpointKey(db: Db, keyId: number | null | undefined) {
   if (keyId == null) return;
 
-  const row = db.get("SELECT base_url FROM api_keys WHERE id = ? AND platform = 'custom'", [keyId]) as { base_url: string | null } | undefined;
+  const row = await db.get("SELECT base_url FROM api_keys WHERE id = ? AND platform = 'custom'", [keyId]) as { base_url: string | null } | undefined;
 
   // No base_url means no pool to belong to, so the key answers for itself.
   if (!row?.base_url) {
-    if (boundModelCount(db, keyId) > 0) return;
-    db.run("DELETE FROM api_keys WHERE id = ? AND platform = 'custom'", [keyId]);
+    if (await boundModelCount(db, keyId) > 0) return;
+    await db.run("DELETE FROM api_keys WHERE id = ? AND platform = 'custom'", [keyId]);
     return;
   }
 
-  if (endpointModelCount(db, row.base_url) > 0) return;
+  if (await endpointModelCount(db, row.base_url) > 0) return;
 
-  db.run("DELETE FROM api_keys WHERE platform = 'custom' AND base_url = ?", [row.base_url]);
+  await db.run("DELETE FROM api_keys WHERE platform = 'custom' AND base_url = ?", [row.base_url]);
 }

@@ -100,23 +100,23 @@ interface ResolvedPin {
   pinnedLabel: string | null;
 }
 
-function resolvePin(model: string | undefined, messages: ChatMessage[], sessionId?: string): ResolvedPin {
+async function resolvePin(model: string | undefined, messages: ChatMessage[], sessionId?: string): Promise<ResolvedPin> {
   const requested = model?.trim();
   const auto = !requested || requested.toLowerCase() === 'auto' || requested.toLowerCase().startsWith('auto:');
   if (auto) {
     return {
-      preferredModel: resolveStickyPreference(getStickyModel(messages, sessionId)),
+      preferredModel: await resolveStickyPreference(getStickyModel(messages, sessionId)),
       pinnedLabel: null,
     };
   }
 
   const db = getDb();
   const resolved = isUnifyEnabled()
-    ? resolveRequestedIdForDispatch(requested, getModelGroups())
+    ? resolveRequestedIdForDispatch(requested, await getModelGroups())
     : null;
   const members = resolved?.memberDbIds ?? null;
   if (members?.length) {
-    const strictChain = resolveModelGroupCandidates(members, resolved!.demotedDbIds);
+    const strictChain = await resolveModelGroupCandidates(members, resolved!.demotedDbIds);
     if (strictChain.length === 0) {
       const err = new Error(`Model '${requested}' has no enabled provider with a usable key`) as Error & { status?: number; code?: string };
       err.status = 503;
@@ -133,7 +133,7 @@ function resolvePin(model: string | undefined, messages: ChatMessage[], sessionI
     };
   }
 
-  const enabled = db.get('SELECT id FROM models WHERE model_id = ? AND enabled = 1', [requested]) as { id: number } | undefined;
+  const enabled = await db.get('SELECT id FROM models WHERE model_id = ? AND enabled = 1', [requested]) as { id: number } | undefined;
   if (!enabled) {
     const err = new Error(`Model '${requested}' is disabled or is not in the catalog`) as Error & { status?: number; code?: string };
     err.status = 404;
@@ -143,13 +143,13 @@ function resolvePin(model: string | undefined, messages: ChatMessage[], sessionI
   return { preferredModel: enabled.id, pinnedLabel: requested };
 }
 
-function sendExhaustion(
+async function sendExhaustion(
   res: Response,
   wire: InboundChatWire,
   exhaustion: ExhaustionBody,
   attempts: AttemptRecord[],
-): void {
-  setFallbackHeaders(res, attempts.length, attempts);
+): Promise<void> {
+  await setFallbackHeaders(res, attempts.length, attempts);
   setExhaustionHeaders(res, exhaustion);
   wire.sendError(res, exhaustion.status, exhaustion.message, exhaustion.code);
 }
@@ -172,7 +172,7 @@ export async function runInboundChat(
   // bytes (see lib/image-normalize.ts). Mutates the image blocks in place.
   await normalizeMessageImages(input.messages);
   const estimatedInputTokens = estimateInputTokens(input.messages, input.tools);
-  const budget = applyTokenBudget(estimatedInputTokens, input.maxTokens);
+  const budget = await applyTokenBudget(estimatedInputTokens, input.maxTokens);
   if (budget.rejection) {
     wire.sendError(res, 413, tokenBudgetMessage(budget.rejection), 'request_token_budget');
     return;
@@ -182,7 +182,7 @@ export async function runInboundChat(
 
   let pin: ResolvedPin;
   try {
-    pin = resolvePin(input.model, input.messages, input.sessionId);
+    pin = await resolvePin(input.model, input.messages, input.sessionId);
   } catch (error: any) {
     wire.sendError(res, error.status ?? 404, error.message, error.code ?? 'model_not_found');
     return;
@@ -228,13 +228,13 @@ export async function runInboundChat(
     attemptLog,
     logIdentity: { surface: 'inbound chat', requestedModel: input.model ?? 'auto' },
     clientGone: () => clientGone,
-    route: () => {
+    route: async () => {
       // #507: after the first 413 / context-length rejection the parser
       // latches the provider-reported REQUESTED size onto state. Inflate the
       // routing estimate on the next attempt so low-tpm / small-window models
       // are skipped by the existing gates in router.ts instead of re-firing.
       const routingTotal = fallbackRoutingTokens(state, estimatedTotal, outputReserve);
-      return routeRequest(
+      return await routeRequest(
         routingTotal,
         state.skipKeys.size ? state.skipKeys : undefined,
         pin.preferredModel,
@@ -308,7 +308,7 @@ export async function runInboundChat(
         }
         // Opt-in schema verdict on what the repair could not fix. Nothing has
         // been written yet on this path, so the failover hop is invisible.
-        if (isToolArgumentValidationEnabled() && toolCalls.length > 0) {
+        if (await isToolArgumentValidationEnabled() && toolCalls.length > 0) {
           const invalid = invalidToolCallReasons(toolCalls, schemas);
           if (invalid.length > 0) throw invalidToolArgumentsError(route.displayName, invalid);
         }
@@ -327,11 +327,11 @@ export async function runInboundChat(
           promptTokens,
           completionTokens,
         };
-        recordUpstreamSuccess(route, result.usage?.total_tokens ?? promptTokens + completionTokens, state);
+        await recordUpstreamSuccess(route, result.usage?.total_tokens ?? promptTokens + completionTokens, state);
         if (pin.pinnedLabel == null) setStickyModel(input.messages, route.modelDbId, input.sessionId);
         res.setHeader('X-Routed-Via', routedViaValue(route.platform, route.modelId));
-        setFallbackHeaders(res, attempt, attemptLog);
-        logRequest(
+        await setFallbackHeaders(res, attempt, attemptLog);
+        await logRequest(
           route.platform,
           route.modelId,
           route.keyId,
@@ -363,10 +363,10 @@ export async function runInboundChat(
       // invisibly, instead of locking the ladder on a blank reply. Flushed in
       // order (before the text/tool output) the moment the stream commits.
       let heldReasoning = '';
-      const commit = () => {
+      const commit = async () => {
         if (committed) return;
         res.setHeader('X-Routed-Via', routedViaValue(route.platform, route.modelId));
-        setFallbackHeaders(res, attempt, attemptLog);
+        await setFallbackHeaders(res, attempt, attemptLog);
         wire.startStream(res, route);
         committed = true;
         if (heldReasoning) {
@@ -397,7 +397,7 @@ export async function runInboundChat(
             text += deltaText;
             outputTokens += Math.ceil(deltaText.length / 4);
             if (!wantsTools || dialectMode === 'passthrough') {
-              commit();
+              await commit();
               wire.sendTextDelta(res, route, deltaText);
             } else {
               heldText += deltaText;
@@ -406,7 +406,7 @@ export async function runInboundChat(
                 dialectMode = 'dialect';
               } else if (!couldBecomeDialectMarker(probe) || heldText.length > 256) {
                 dialectMode = 'passthrough';
-                commit();
+                await commit();
                 wire.sendTextDelta(res, route, heldText);
                 heldText = '';
               }
@@ -448,7 +448,7 @@ export async function runInboundChat(
           if (rescue.detected && rescue.calls) {
             text = text.slice(0, Math.max(0, text.length - heldText.length)) + rescue.cleanText;
             if (rescue.cleanText) {
-              commit();
+              await commit();
               wire.sendTextDelta(res, route, rescue.cleanText);
             }
             rescue.calls.forEach((call, index) => {
@@ -458,7 +458,7 @@ export async function runInboundChat(
               });
             });
           } else {
-            commit();
+            await commit();
             wire.sendTextDelta(res, route, heldText);
           }
           heldText = '';
@@ -480,12 +480,12 @@ export async function runInboundChat(
         // tool-only turn has sent nothing yet and can still fail over. A turn
         // that already streamed text is past its commit point — leave it
         // alone rather than tearing down a stream the client is reading.
-        if (isToolArgumentValidationEnabled() && toolCalls.length > 0 && !committed) {
+        if (await isToolArgumentValidationEnabled() && toolCalls.length > 0 && !committed) {
           const invalid = invalidToolCallReasons(toolCalls, schemas);
           if (invalid.length > 0) throw invalidToolArgumentsError(route.displayName, invalid);
         }
         if (toolCalls.length) {
-          commit();
+          await commit();
           wire.sendToolCalls?.(res, route, toolCalls);
           outputTokens += Math.ceil(toolCalls.reduce(
             (n, call) => n + call.function.name.length + call.function.arguments.length,
@@ -523,9 +523,9 @@ export async function runInboundChat(
           completionTokens: outputTokens,
         };
         wire.finishStream(res, normalized);
-        recordUpstreamSuccess(route, estimatedInputTokens + outputTokens, state);
+        await recordUpstreamSuccess(route, estimatedInputTokens + outputTokens, state);
         if (pin.pinnedLabel == null) setStickyModel(input.messages, route.modelDbId, input.sessionId);
-        logRequest(
+        await logRequest(
           route.platform,
           route.modelId,
           route.keyId,
@@ -544,7 +544,7 @@ export async function runInboundChat(
         if (!committed) throw error;
         wire.sendStreamError?.(res, sanitizeProviderErrorMessage(error.message));
         if (!res.writableEnded) res.end();
-        logRequest(
+        await logRequest(
           route.platform,
           route.modelId,
           route.keyId,
@@ -561,8 +561,8 @@ export async function runInboundChat(
         return 'committed';
       }
     },
-    logFailure: (route, error) => {
-      logRequest(
+    logFailure: async (route, error) => {
+      await logRequest(
         route.platform,
         route.modelId,
         route.keyId,
@@ -577,8 +577,8 @@ export async function runInboundChat(
         'http',
       );
     },
-    onFatal: (route, error, attempt) => {
-      setFallbackHeaders(res, attempt, attemptLog);
+    onFatal: async (route, error, attempt) => {
+      await setFallbackHeaders(res, attempt, attemptLog);
       wire.sendError(
         res,
         502,
@@ -586,11 +586,11 @@ export async function runInboundChat(
         'upstream_error',
       );
     },
-    onRoutingExhausted: (_lastError, _routeError, exhaustion, info) => {
-      sendExhaustion(res, wire, exhaustion, info.attempts);
+    onRoutingExhausted: async (_lastError, _routeError, exhaustion, info) => {
+      await sendExhaustion(res, wire, exhaustion, info.attempts);
     },
-    onExhausted: (exhaustion, info) => {
-      sendExhaustion(res, wire, exhaustion, info.attempts);
+    onExhausted: async (exhaustion, info) => {
+      await sendExhaustion(res, wire, exhaustion, info.attempts);
     },
   });
 }

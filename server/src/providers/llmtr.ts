@@ -97,24 +97,24 @@ export class LlmtrProvider extends OpenAICompatProvider {
    * summed — quota observations are booked per platform+key, and a single
    * response carries a single set of headers to book.
    */
-  override validateKey(apiKey: string, quotaContext?: QuotaObservationContext): Promise<KeyValidationResult> {
+  override async validateKey(apiKey: string, quotaContext?: QuotaObservationContext): Promise<KeyValidationResult> {
     const inFlight = this.inFlightValidations.get(apiKey);
-    if (inFlight) return inFlight;
+    if (inFlight) return await inFlight;
 
-    const probe = this.queuedValidation(() => this.probeKey(apiKey, quotaContext));
+    const probe = this.queuedValidation(async () => this.probeKey(apiKey, quotaContext));
     this.inFlightValidations.set(apiKey, probe);
     // Drop the entry once settled so the next question is a fresh probe, but
     // never before: a caller that arrives while this one is still open gets
     // the answer it would otherwise have to pay for again.
     void probe.then(
-      () => { this.retireValidation(apiKey, probe); },
-      () => { this.retireValidation(apiKey, probe); },
+      () => { this.retireValidation(apiKey); },
+      () => { this.retireValidation(apiKey); },
     );
-    return probe;
+    return await probe;
   }
 
-  private retireValidation(apiKey: string, probe: Promise<KeyValidationResult>): void {
-    if (this.inFlightValidations.get(apiKey) === probe) this.inFlightValidations.delete(apiKey);
+  private retireValidation(apiKey: string): void {
+    this.inFlightValidations.delete(apiKey);
   }
 
   /**
@@ -149,7 +149,7 @@ export class LlmtrProvider extends OpenAICompatProvider {
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: VALIDATION_MODEL, messages: [{ role: 'user', content: 'key validation' }], max_tokens: 1, stream: false }),
     }, providerTimeoutMs(this.platform, 30_000), { timeoutBounds: 'request' });
-    recordQuotaObservationsFromResponse(res, { ...quotaContext, platform: this.platform, endpoint: 'key-validation' });
+    await recordQuotaObservationsFromResponse(res, { ...quotaContext, platform: this.platform, endpoint: 'key-validation' });
     if ([401, 403].includes(res.status)) {
       // #1390: LLMTR answers the probe itself with 403 "Automated API key
       // validation tools are not supported." That is a verdict about the
@@ -161,7 +161,7 @@ export class LlmtrProvider extends OpenAICompatProvider {
       if (res.status === 403 && await blocksAutomatedValidation(res)) {
         throw providerHttpError(res, 'LLMTR rejected the key-validation probe itself (automated validation not supported); the key was not checked');
       }
-      return this.validationResult(res);
+      return await this.validationResult(res);
     }
     if (res.status === 404) {
       const body = await res.clone().json().catch(() => null) as { error?: { type?: string } } | null;

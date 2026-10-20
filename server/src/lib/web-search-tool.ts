@@ -39,9 +39,9 @@ const EXTRACT_CHARS = 1_200;
 /** True when at least one enabled search engine has a usable key — the same
  *  check /v1/search routes with, so agents' web search only switches on when a
  *  search can actually run. */
-export function hasSearchCapability(): boolean {
+export async function hasSearchCapability(): Promise<boolean> {
   try {
-    return searchAvailable();
+    return await searchAvailable();
   } catch {
     return false;
   }

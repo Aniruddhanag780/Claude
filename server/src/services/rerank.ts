@@ -37,8 +37,8 @@ interface RerankCandidate {
 const FETCH_TIMEOUT_MS = 30_000;
 const MAX_DOCUMENTS = 100;
 
-function candidates(): RerankCandidate[] {
-  const rows = getDb().all("SELECT id, platform, base_url, encrypted_key, iv, auth_tag FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') AND platform IN ('cohere', 'custom') ORDER BY platform, created_at") as { id: number; platform: string; base_url: string | null; encrypted_key: string; iv: string; auth_tag: string }[];
+async function candidates(): Promise<RerankCandidate[]> {
+  const rows = await getDb().all("SELECT id, platform, base_url, encrypted_key, iv, auth_tag FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') AND platform IN ('cohere', 'custom') ORDER BY platform, created_at") as { id: number; platform: string; base_url: string | null; encrypted_key: string; iv: string; auth_tag: string }[];
   const out: RerankCandidate[] = [];
   for (const row of rows) {
     if (row.platform === 'custom' && !row.base_url) continue;
@@ -89,7 +89,7 @@ export async function runRerank(model: string | undefined, query: string, docume
   if (documents.length > MAX_DOCUMENTS) {
     throw new RerankError(`Too many documents: ${documents.length} (max ${MAX_DOCUMENTS})`, 400);
   }
-  const chain = candidates();
+  const chain = await candidates();
   if (chain.length === 0) {
     throw new RerankError('No rerank-capable key configured. Add a Cohere key or a custom rerank endpoint.', 503);
   }

@@ -39,21 +39,21 @@ async function main() {
   const scheduler = new NodeScheduler();
 
   await initDb();
-  applyDeclarativeConfigFromEnv();
+  await applyDeclarativeConfigFromEnv();
   // After initDb: the unknown-model half of this check reads the catalog.
-  warnOnRoutingOverrideDrift();
+  await warnOnRoutingOverrideDrift();
 
   // Reload the persisted response cache into the in-memory LRU so entries
   // survive a restart (the daily quota-reset re-run pattern). Best-effort:
   // a DB failure leaves the cache empty (memory-only), exactly as before.
-  loadCacheFromDb();
+  await loadCacheFromDb();
 
   // Cooldowns persist across restarts on purpose, but their expiry is collected
   // lazily (isOnCooldown, per model+key). Rows for routes nothing asks about
   // again — retired models, deleted keys, a shutdown taken while everything was
   // benched — would otherwise stay in the table forever and weigh down every
   // cooldown rollup. One sweep at boot, while the DB is quiet.
-  const expiredCooldowns = cleanupExpiredCooldowns();
+  const expiredCooldowns = await cleanupExpiredCooldowns();
   if (expiredCooldowns > 0) {
     console.log(`[ratelimit] cleared ${expiredCooldowns} expired cooldown${expiredCooldowns === 1 ? '' : 's'}`);
   }
@@ -61,24 +61,24 @@ async function main() {
   // First-run hardening: when the dashboard is still unclaimed, mint a one-time
   // setup code and log it. A loopback browser can finish setup without it; a
   // remote caller must supply it (see routes/auth.ts). Regenerated each boot.
-  if (userCount() === 0) {
+  if (await userCount() === 0) {
     generateSetupCode();
   }
 
   // Load the persisted proxy settings from the DB (env var wins if set).
   // Must happen after initDb so the settings table is ready.
-  restoreProxySettings();
+  await restoreProxySettings();
 
   const app = createApp(config);
 
-  const onReady = (host: string) => () => {
+  const onReady = (host: string) => async () => {
     const display = host.includes(':') ? `[${host}]` : host;
     console.log(`Server running on http://${display}:${PORT}`);
     console.log(`Proxy endpoint: http://${display}:${PORT}/v1/chat/completions`);
     startHealthChecker(scheduler);
-    startCatalogSync(scheduler);
+    await startCatalogSync(scheduler);
     startCooldownProbe(scheduler);
-    startBackupScheduler(scheduler);
+    await startBackupScheduler(scheduler);
     startCustomModelSync(getDb(), scheduler);
     startBuiltinModelDiscovery(getDb(), scheduler);
 
@@ -119,7 +119,7 @@ async function main() {
   const server = app.listen(Number(PORT), HOST, onReady(HOST));
   tuneKeepAlive(server);
   const servers = [server];
-  installGracefulShutdown({ servers: () => servers.filter(s => s.listening), closeDb: () => getDb().close?.() });
+  installGracefulShutdown({ servers: () => servers.filter(s => s.listening), closeDb: async () => await getDb().close?.() });
   server.on('error', (err: NodeJS.ErrnoException) => {
     // The default '::' bind fails where IPv6 is disabled (kernel
     // ipv6.disable=1 and the like) — retry IPv4-only rather than dying.
@@ -137,7 +137,7 @@ async function main() {
   });
 }
 
-main().catch((err) => {
+await main().catch((err) => {
   // A boot failure (e.g. a missing production ENCRYPTION_KEY) must exit
   // non-zero rather than leaving a half-initialized process that never starts
   // listening — that silent state is what surfaces in the client as

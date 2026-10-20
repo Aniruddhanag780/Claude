@@ -80,13 +80,13 @@ export interface RecentQuotaActivity {
   count: number;
 }
 
-export function getRecentQuotaActivity(now: number): RecentQuotaActivity[] {
+export async function getRecentQuotaActivity(now: number): Promise<RecentQuotaActivity[]> {
   const sqliteUtc = (ms: number) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
   const since = sqliteUtc(now - RATE_OBSERVATION_WINDOW_MINUTES * 60_000);
-  const rows = getDb().all(`
+  const rows = await getDb().all(`
     SELECT platform, key_id AS keyId, model_id AS modelId, COUNT(*) AS count
       FROM requests
-     WHERE created_at >= ? AND datetime(created_at) >= ? AND datetime(created_at) <= ?
+     WHERE created_at >= ? AND created_at::timestamp >= ? AND created_at::timestamp <= ?
        AND status = 'success'
      GROUP BY platform, key_id, model_id
   `, [since, since, sqliteUtc(now)]) as { platform: Platform; keyId: number | null; modelId: string; count: number }[];
@@ -163,25 +163,26 @@ function entryFor(row: QuotaObservationView, ratePerMin: number | null, now: num
 // Dedupe to the TIGHTEST row per platform+pool: a platform with several keys
 // sharing one account pool reports the same window per key, and the number that
 // matters for "can I keep calling" is the least headroom left.
-export function getQuotaForecast(
-  rows = getQuotaStateForKeys(), now = Date.now(),
-): QuotaForecastEntry[] {
+export async function getQuotaForecast(
+  rows?: Awaited<ReturnType<typeof getQuotaStateForKeys>>, now = Date.now(),
+): Promise<QuotaForecastEntry[]> {
+  const quotaRows = rows ?? await getQuotaStateForKeys();
   const byKey = new Map<string, QuotaForecastEntry>();
-  const activity = rows.length ? getRecentQuotaActivity(now) : [];
+  const activity = quotaRows.length ? await getRecentQuotaActivity(now) : [];
   const counts = new Map<string, number>();
   for (const row of activity) {
     const identity = JSON.stringify([row.platform, row.pool, row.keyId]);
     counts.set(identity, (counts.get(identity) ?? 0) + row.count);
   }
   const poolKeys = new Map<string, Set<string>>();
-  for (const row of rows) {
+  for (const row of quotaRows) {
     if (row.metric !== 'requests') continue;
     const pool = JSON.stringify([row.platform, row.quotaPoolKey]);
     const keys = poolKeys.get(pool) ?? new Set<string>();
     keys.add(JSON.stringify([row.platform, row.quotaPoolKey, row.keyId]));
     poolKeys.set(pool, keys);
   }
-  for (const row of rows) {
+  for (const row of quotaRows) {
     const keys = poolKeys.get(JSON.stringify([row.platform, row.quotaPoolKey])) ?? [];
     let count = 0;
     for (const key of keys) count += counts.get(key) ?? 0;

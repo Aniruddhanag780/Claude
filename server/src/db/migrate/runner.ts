@@ -34,7 +34,7 @@ const DEFAULT_MIGRATIONS_DIR = path.resolve(__dirname, '../migrations');
 
 // PostgreSQL dialect: identity primary key (no AUTOINCREMENT), and an applied
 // timestamp stored as TEXT in the same UTC `YYYY-MM-DD HH:MM:SS` shape
-// SQLite's datetime('now') produced, so downstream code that string-operates on
+// SQLite's to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS') produced, so downstream code that string-operates on
 // applied_at keeps behaving identically.
 const CREATE_MIGRATIONS_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS migrations (

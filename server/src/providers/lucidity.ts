@@ -23,7 +23,7 @@ export class LucidityProvider extends OpenAICompatProvider {
     if (!response.ok && ![401, 403].includes(response.status)) {
       throw providerHttpError(response, 'Lucidity Composite key validation is temporarily inconclusive');
     }
-    return super.validationResult(response);
+    return await super.validationResult(response);
   }
 
   constructor() {

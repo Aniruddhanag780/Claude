@@ -6,7 +6,7 @@ import { logRequest } from '../lib/request-log.js';
 // rejection being visible only in the container log.
 const INFERENCE_PATH_PREFIXES = ['/v1', '/v1beta', '/mcp'];
 
-export function errorHandler(err: Error, req: Request, res: Response, next: NextFunction) {
+export async function errorHandler(err: Error, req: Request, res: Response, next: NextFunction) {
   const isProduction = (process.env.NODE_ENV ?? 'development') === 'production';
   console.error('[Error]', isProduction ? err : err.message);
 
@@ -26,7 +26,7 @@ export function errorHandler(err: Error, req: Request, res: Response, next: Next
       `${typeof limit === 'number' ? ` for the ${limit}-byte limit` : ''}. ` +
       'Vision requests embed base64 images in the body; raise REQUEST_BODY_LIMIT_MB (default 25) to accept larger payloads.';
     if (INFERENCE_PATH_PREFIXES.some(prefix => req.path.startsWith(prefix))) {
-      logRequest('proxy', 'payload-too-large', null, 'error', 0, 0, 0, message);
+      await logRequest('proxy', 'payload-too-large', null, 'error', 0, 0, 0, message);
     }
     res.status(413).json({
       error: {

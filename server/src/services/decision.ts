@@ -109,8 +109,8 @@ function parseMeta(raw: string | null): DecisionModelMeta {
   }
 }
 
-function allDecisionRows(): DecisionModelRow[] {
-  return getDb().all(`SELECT id, platform, model_id, display_name, priority, enabled, quota_label, meta_json
+async function allDecisionRows(): Promise<DecisionModelRow[]> {
+  return await getDb().all(`SELECT id, platform, model_id, display_name, priority, enabled, quota_label, meta_json
                 FROM media_models WHERE modality = ? ORDER BY priority, id`, [DECISION_MODALITY]) as DecisionModelRow[];
 }
 
@@ -155,7 +155,7 @@ async function upstream(url: string, platform: string, init: RequestInit, signal
       parseRetryAfterMs(res.headers?.get('retry-after') ?? null) ?? statedBodyRetryMs(text),
     );
   }
-  return res.json();
+  return await res.json();
 }
 
 function usageOf(raw: unknown): AdapterResult['usage'] {
@@ -272,9 +272,9 @@ export const DECISION_PLATFORMS = new Set(Object.keys(ADAPTERS));
 
 // ── Routing ─────────────────────────────────────────────────────────────────
 
-function logDecision(row: DecisionModelRow, keyId: number | null, status: 'ok' | 'error', latencyMs: number, questionCount: number, inputTokens: number, clientAgent: string | null, error: string | null): void {
+async function logDecision(row: DecisionModelRow, keyId: number | null, status: 'ok' | 'error', latencyMs: number, questionCount: number, inputTokens: number, clientAgent: string | null, error: string | null): Promise<void> {
   try {
-    getDb().run(`INSERT INTO decision_requests (model_id, platform, key_id, status, latency_ms, question_count, input_tokens, client_agent, error)
+    await getDb().run(`INSERT INTO decision_requests (model_id, platform, key_id, status, latency_ms, question_count, input_tokens, client_agent, error)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [row.model_id, row.platform, keyId, status, latencyMs, questionCount, inputTokens, clientAgent, error]);
   } catch (e) {
     console.error('Failed to log decision request:', e);
@@ -291,21 +291,21 @@ function coolDown(row: DecisionModelRow, keyId: number, e: DecisionError): void 
   }
 }
 
-function hasUsableKey(platform: string): boolean {
-  return !!getDb().get("SELECT 1 FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') LIMIT 1", [platform]);
+async function hasUsableKey(platform: string): Promise<boolean> {
+  return !!await getDb().get("SELECT 1 FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') LIMIT 1", [platform]);
 }
 
 /** True when at least one enabled decision model has a usable key. */
-export function decisionsAvailable(): boolean {
-  return allDecisionRows().some(r => r.enabled === 1 && ADAPTERS[r.platform] && hasUsableKey(r.platform));
+export async function decisionsAvailable(): Promise<boolean> {
+  return await (await allDecisionRows()).some(async r => r.enabled === 1 && ADAPTERS[r.platform] && await hasUsableKey(r.platform));
 }
 
-function decisionChain(model: string | undefined, skipPlatforms?: ReadonlySet<string>): DecisionModelRow[] {
-  const enabled = allDecisionRows().filter(r => r.enabled === 1 && ADAPTERS[r.platform]);
+async function decisionChain(model: string | undefined, skipPlatforms?: ReadonlySet<string>): Promise<DecisionModelRow[]> {
+  const enabled = await (await allDecisionRows()).filter(r => r.enabled === 1 && ADAPTERS[r.platform]);
   if (!model || model === 'auto') return skipPlatforms ? enabled.filter(r => !skipPlatforms.has(r.platform)) : enabled;
   const pinned = enabled.filter(r => r.model_id === model);
   if (pinned.length === 0) {
-    const known = allDecisionRows().some(r => r.model_id === model);
+    const known = await (await allDecisionRows()).some(r => r.model_id === model);
     throw new DecisionError(
       known
         ? `Decision model '${model}' is turned off. Turn it on from Models → Decision, or use 'auto'.`
@@ -317,7 +317,7 @@ function decisionChain(model: string | undefined, skipPlatforms?: ReadonlySet<st
 }
 
 export async function runDecision(body: DecisionRequest, opts: DecisionOptions = {}): Promise<DecisionResponse> {
-  const chain = decisionChain(opts.model, opts.skipPlatforms);
+  const chain = await decisionChain(opts.model, opts.skipPlatforms);
   const clientAgent = opts.clientAgent !== undefined ? opts.clientAgent : getClientContext().agent;
   const questionCount = Object.keys(body.questions).length;
 
@@ -328,10 +328,10 @@ export async function runDecision(body: DecisionRequest, opts: DecisionOptions =
     const tried = new Set<number>();
     for (;;) {
       if (opts.signal?.aborted) throw new DecisionError('decision cancelled by the client', 499);
-      const { credential, budgetBlocked } = reserveProviderCredential(
+      const { credential, budgetBlocked } = await reserveProviderCredential(
         { platform: row.platform, key_id: null },
         ESTIMATED_TOKENS,
-        keyId => tried.has(keyId) || isOnCooldown(row.platform, row.model_id, keyId),
+        async keyId => tried.has(keyId) || (await isOnCooldown(row.platform, row.model_id, keyId)),
       );
       if (!credential) {
         if (budgetBlocked) {
@@ -345,11 +345,11 @@ export async function runDecision(body: DecisionRequest, opts: DecisionOptions =
       const started = Date.now();
       try {
         const out = await ADAPTERS[row.platform]!(credential, row.model_id, body, opts.signal);
-        logDecision(row, credential.id, 'ok', Date.now() - started, questionCount, out.usage.input_tokens, clientAgent, null);
+        await logDecision(row, credential.id, 'ok', Date.now() - started, questionCount, out.usage.input_tokens, clientAgent, null);
         return { model: row.model_id, provider: row.platform, answers: out.answers, usage: out.usage };
       } catch (err: any) {
         const e = err instanceof DecisionError ? err : new DecisionError(String(err?.message ?? err), 502);
-        logDecision(row, credential.id, 'error', Date.now() - started, questionCount, 0, clientAgent, e.message.slice(0, 300));
+        await logDecision(row, credential.id, 'error', Date.now() - started, questionCount, 0, clientAgent, e.message.slice(0, 300));
         coolDown(row, credential.id, e);
         lastError = e;
         hints.record(e.status, e.retryAfterMs);
@@ -364,7 +364,7 @@ export async function runDecision(body: DecisionRequest, opts: DecisionOptions =
   }
 
   if (attempted === 0 && !lastError) {
-    if (decisionsAvailable()) {
+    if (await decisionsAvailable()) {
       throw new DecisionError(
         'Every decision key is cooling down (rate limited or rejected). Try again later.',
         429,
@@ -411,22 +411,22 @@ export interface DecisionModelView {
   decisionsThisMonth: number;
 }
 
-export function listDecisionModels(): DecisionModelView[] {
+export async function listDecisionModels(): Promise<DecisionModelView[]> {
   const db = getDb();
   const platforms = [...DECISION_PLATFORMS];
-  const keyRows = db.all( `
+  const keyRows = await db.all( `
     SELECT platform, enabled, status FROM api_keys
      WHERE platform IN (${platforms.map(() => '?').join(', ')})
   `, [...platforms]) as { platform: string; enabled: number; status: string }[];
   const healthy = (k: { enabled: number; status: string }) => k.enabled === 1 && (k.status === 'healthy' || k.status === 'unknown');
   const monthCounts = new Map(
-    (db.all(`
+    (await db.all(`
       SELECT platform, model_id, COUNT(*) AS n FROM decision_requests
-       WHERE status = 'ok' AND created_at >= datetime('now', 'start of month')
+       WHERE status = 'ok' AND created_at >= to_char(date_trunc('month', now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS')
        GROUP BY platform, model_id
     `) as { platform: string; model_id: string; n: number }[]).map(r => [`${r.platform}:${r.model_id}`, r.n]),
   );
-  return allDecisionRows().map(row => {
+  return await (await allDecisionRows()).map(row => {
     const meta = parseMeta(row.meta_json);
     const keys = keyRows.filter(k => k.platform === row.platform);
     return {
@@ -446,7 +446,7 @@ export function listDecisionModels(): DecisionModelView[] {
 }
 
 /** Turn a decision model on or off. False when the id is not a decision model. */
-export function setDecisionModelEnabled(id: number, enabled: boolean): boolean {
-  const info = getDb().run('UPDATE media_models SET enabled = ? WHERE id = ? AND modality = ?', [enabled ? 1 : 0, id, DECISION_MODALITY]);
+export async function setDecisionModelEnabled(id: number, enabled: boolean): Promise<boolean> {
+  const info = await getDb().run('UPDATE media_models SET enabled = ? WHERE id = ? AND modality = ?', [enabled ? 1 : 0, id, DECISION_MODALITY]);
   return info.changes > 0;
 }

@@ -83,7 +83,7 @@ export class AIHordeProvider extends BaseProvider {
 
   /** Build the upstream body, normalizing the OpenAI params the proxy rejects
    * (see class doc). No `stream` — we never stream upstream. */
-  private buildBody(messages: ChatMessage[], modelId: string, options?: CompletionOptions): Record<string, unknown> {
+  private async buildBody(messages: ChatMessage[], modelId: string, options?: CompletionOptions): Promise<Record<string, unknown>> {
     const body: Record<string, unknown> = {
       model: modelId,
       messages,
@@ -92,7 +92,7 @@ export class AIHordeProvider extends BaseProvider {
       // applies to it as well — it can only ever lower what we send.
       max_tokens: Math.max(
         MIN_MAX_TOKENS,
-        resolveMaxTokens(this.platform, options?.max_tokens ?? DEFAULT_MAX_TOKENS, options?.contextBudget) ?? DEFAULT_MAX_TOKENS,
+        await resolveMaxTokens(this.platform, options?.max_tokens ?? DEFAULT_MAX_TOKENS, options?.contextBudget) ?? DEFAULT_MAX_TOKENS,
       ),
     };
     if (options?.temperature != null) body.temperature = options.temperature;
@@ -144,12 +144,12 @@ export class AIHordeProvider extends BaseProvider {
         'Authorization': `Bearer ${this.resolveBearer(apiKey)}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(this.buildBody(messages, modelId, options)),
+      body: JSON.stringify(await this.buildBody(messages, modelId, options)),
       // 'request' bounds: the queued generation is one blocking body read, so
       // the deadline must cover it too (a hung body used to stall forever).
     }, options?.timeoutMs ?? HORDE_TIMEOUT_MS, { signal: options?.signal, timeoutBounds: 'request' });
 
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
@@ -210,13 +210,13 @@ export class AIHordeProvider extends BaseProvider {
       method: 'GET',
       headers: { 'Authorization': `Bearer ${this.resolveBearer(apiKey)}` },
     }, 30000, { timeoutBounds: 'request' });
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId,
       quotaPoolKey: quotaContext?.quotaPoolKey,
       endpoint: 'models',
     });
-    return this.validationResult(res);
+    return await this.validationResult(res);
   }
 }

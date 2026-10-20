@@ -90,12 +90,12 @@ function emptyStats(chars: number, started: number): CompressionRequestStats {
   };
 }
 
-export function compressRequest(
+export async function compressRequest(
   messages: ChatMessage[],
   options: CompressRequestOptions = {},
-): CompressionResult {
+): Promise<CompressionResult> {
   const started = performance.now();
-  const config = options.config ?? getCompressionConfig();
+  const config = options.config ?? await getCompressionConfig();
   const directive = parseCompressionDirective(options.header);
   const originalChars = messageChars(messages);
   const originalEstimate = estimateTokensFromChars(originalChars);

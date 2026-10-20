@@ -23,12 +23,12 @@ export class Router9Provider extends OpenAICompatProvider {
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: [] }),
     }, 30_000, { timeoutBounds: 'request' });
-    recordQuotaObservationsFromResponse(res, {
+    await recordQuotaObservationsFromResponse(res, {
       platform: this.platform, keyId: quotaContext?.keyId,
       providerAccountId: quotaContext?.providerAccountId, quotaPoolKey: quotaContext?.quotaPoolKey,
       endpoint: 'chat/completions:auth-probe',
     });
-    if (res.status === 401) return this.validationResult(res);
+    if (res.status === 401) return await this.validationResult(res);
 
     const body = await res.json().catch(() => null) as { error?: { code?: string } } | null;
     const accountHeaders = ['x-credits-limit', 'x-credits-remaining'].every(name => {

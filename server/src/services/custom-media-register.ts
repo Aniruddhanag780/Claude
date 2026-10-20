@@ -32,16 +32,16 @@ export interface RegisteredCustomMediaModel {
  * no endpoint_scope — a model already on this endpoint keeps the key it has;
  * only a move to a different endpoint re-binds it (#619 semantics).
  */
-export function registerCustomMediaModel(
+export async function registerCustomMediaModel(
   db: Db,
   keyId: number,
   entry: CustomMediaEntry,
-): RegisteredCustomMediaModel {
-  const endpointKeyIds = customEndpointKeyIds(db, keyId);
+): Promise<RegisteredCustomMediaModel> {
+  const endpointKeyIds = await customEndpointKeyIds(db, keyId);
   const modelId = entry.modelId;
   const quotaLabel = entry.quotaLabel?.trim() || 'custom endpoint';
 
-  const existingModel = db.get(`
+  const existingModel = await db.get(`
     SELECT id, modality, priority, key_id
       FROM media_models
      WHERE platform = 'custom' AND model_id = ?
@@ -52,10 +52,10 @@ export function registerCustomMediaModel(
     : keyId;
   const priority = existingModel && existingModel.modality === entry.modality
     ? existingModel.priority
-    : (db.get('SELECT COALESCE(MAX(priority), 0) AS maxPriority FROM media_models WHERE modality = ?', [entry.modality]) as { maxPriority: number }).maxPriority + 1;
+    : (await db.get('SELECT COALESCE(MAX(priority), 0) AS maxPriority FROM media_models WHERE modality = ?', [entry.modality]) as { maxPriority: number }).maxPriority + 1;
 
   if (existingModel) {
-    db.run(`
+    await db.run(`
       UPDATE media_models
          SET display_name = COALESCE(?, display_name),
              modality = ?,
@@ -68,7 +68,7 @@ export function registerCustomMediaModel(
     return { modelDbId: existingModel.id, model: modelId, modality: entry.modality, created: false };
   }
 
-  const model = db.run(`
+  const model = await db.run(`
     INSERT INTO media_models
       (platform, model_id, display_name, modality, priority, enabled, quota_label, key_id)
     VALUES ('custom', ?, ?, ?, ?, 1, ?, ?) RETURNING id

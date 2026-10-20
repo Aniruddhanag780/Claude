@@ -15,8 +15,8 @@ export interface UrlTokenRow {
   revokedAt: string | null;
 }
 
-export function listUrlTokens(): UrlTokenRow[] {
-  const rows = getDb().all(`
+export async function listUrlTokens(): Promise<UrlTokenRow[]> {
+  const rows = await getDb().all(`
     SELECT id, label, token_prefix, created_at, last_used_at, revoked_at
     FROM url_tokens
     ORDER BY id DESC
@@ -38,37 +38,37 @@ export function listUrlTokens(): UrlTokenRow[] {
   }));
 }
 
-export function mintUrlToken(label: string): UrlTokenRow & { token: string } {
+export async function mintUrlToken(label: string): Promise<UrlTokenRow & { token: string }> {
   const token = `flmurl_${crypto.randomBytes(24).toString('base64url')}`;
   const prefix = `${token.slice(0, 12)}…`;
-  const result = getDb().run(`
+  const result = await getDb().run(`
     INSERT INTO url_tokens (token_hash, label, token_prefix)
     VALUES (?, ?, ?) RETURNING id
   `, [hashToken(token), label.trim(), prefix]);
-  const row = listUrlTokens().find(entry => entry.id === Number(result.lastInsertRowid))!;
+  const row = await (await listUrlTokens()).find(entry => entry.id === Number(result.lastInsertRowid))!;
   return { ...row, token };
 }
 
-export function revokeUrlToken(id: number): boolean {
-  return getDb().run(`
-    UPDATE url_tokens SET revoked_at = datetime('now')
+export async function revokeUrlToken(id: number): Promise<boolean> {
+  return await (await getDb().run(`
+    UPDATE url_tokens SET revoked_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')
     WHERE id = ? AND revoked_at IS NULL
-  `, [id]).changes > 0;
+  `, [id])).changes > 0;
 }
 
-export function validateUrlToken(token: string): boolean {
-  if (!token || timingSafeStringEqual(token, getUnifiedApiKey())) {
+export async function validateUrlToken(token: string): Promise<boolean> {
+  if (!token || timingSafeStringEqual(token, await getUnifiedApiKey())) {
     if (token) {
       console.warn('[URL tokens] Rejected a raw unified API key in a tokenized URL');
     }
     return false;
   }
   const hash = hashToken(token);
-  const row = getDb().get(`
+  const row = await getDb().get(`
     SELECT id FROM url_tokens
     WHERE token_hash = ? AND revoked_at IS NULL
   `, [hash]) as { id: number } | undefined;
   if (!row) return false;
-  getDb().run("UPDATE url_tokens SET last_used_at = datetime('now') WHERE id = ?", [row.id]);
+  await getDb().run("UPDATE url_tokens SET last_used_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [row.id]);
   return true;
 }

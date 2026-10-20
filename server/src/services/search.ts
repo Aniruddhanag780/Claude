@@ -134,8 +134,8 @@ function engineKey(row: Pick<SearchEngineRow, 'platform' | 'model_id'>): string 
   return `${row.platform}:${row.model_id}`;
 }
 
-function readPriorityOverrides(): Record<string, number> {
-  const raw = getSetting(PRIORITY_OVERRIDES_SETTING);
+async function readPriorityOverrides(): Promise<Record<string, number>> {
+  const raw = await getSetting(PRIORITY_OVERRIDES_SETTING);
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -149,16 +149,16 @@ function readPriorityOverrides(): Record<string, number> {
   }
 }
 
-function allEngineRows(): SearchEngineRow[] {
-  return getDb().all(`SELECT id, platform, model_id, display_name, priority, enabled, quota_label, key_id, meta_json
+async function allEngineRows(): Promise<SearchEngineRow[]> {
+  return await getDb().all(`SELECT id, platform, model_id, display_name, priority, enabled, quota_label, key_id, meta_json
                 FROM media_models WHERE modality = ? ORDER BY priority, id`, [SEARCH_MODALITY]) as SearchEngineRow[];
 }
 
 /** Every search engine row in effective order (local reorder over catalog
  *  priority), each carrying its effective priority. */
-function orderedEngines(): Array<SearchEngineRow & { effectivePriority: number }> {
-  const overrides = readPriorityOverrides();
-  return allEngineRows()
+async function orderedEngines(): Promise<Array<SearchEngineRow & { effectivePriority: number }>> {
+  const overrides = await readPriorityOverrides();
+  return await (await allEngineRows())
     .map(row => ({ ...row, effectivePriority: overrides[engineKey(row)] ?? row.priority }))
     .sort((a, b) => a.effectivePriority - b.effectivePriority || a.id - b.id);
 }
@@ -202,7 +202,7 @@ async function upstream(url: string, platform: string, init: RequestInit, signal
   if ((res.headers?.get('content-type') ?? '').includes('text/event-stream')) {
     return lastSseJson(await res.text());
   }
-  return res.json();
+  return await res.json();
 }
 
 /** The JSON payload of the last `data:` event in an SSE body. */
@@ -311,11 +311,11 @@ const ADAPTERS: Record<string, Adapter> = {
     }));
     return { results: keepHits(hits).slice(0, n) };
   },
-  tavily: (cred, query, opts, n) => tavilyShaped(`${TAVILY_BASE_URL}/search`, 'tavily', cred, query, opts, n),
+  tavily: async (cred, query, opts, n) => await tavilyShaped(`${TAVILY_BASE_URL}/search`, 'tavily', cred, query, opts, n),
 
-  custom: (cred, query, opts, n) => {
+  custom: async (cred, query, opts, n) => {
     if (!cred.baseUrl) throw new SearchError('custom search endpoint has no base URL', 502);
-    return tavilyShaped(`${cred.baseUrl}/search`, 'custom', cred, query, opts, n);
+    return await tavilyShaped(`${cred.baseUrl}/search`, 'custom', cred, query, opts, n);
   },
 
   exa: async (cred, query, opts, n) => {
@@ -413,9 +413,9 @@ export const SEARCH_ENGINE_PLATFORMS = new Set(Object.keys(ADAPTERS).filter(p =>
 
 // ── Routing ─────────────────────────────────────────────────────────────────
 
-function logSearch(row: SearchEngineRow, keyId: number | null, status: 'ok' | 'error', latencyMs: number, resultCount: number, clientAgent: string | null, error: string | null): void {
+async function logSearch(row: SearchEngineRow, keyId: number | null, status: 'ok' | 'error', latencyMs: number, resultCount: number, clientAgent: string | null, error: string | null): Promise<void> {
   try {
-    getDb().run(`INSERT INTO search_requests (engine_id, platform, key_id, status, latency_ms, result_count, client_agent, error)
+    await getDb().run(`INSERT INTO search_requests (engine_id, platform, key_id, status, latency_ms, result_count, client_agent, error)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [row.model_id, row.platform, keyId, status, latencyMs, resultCount, clientAgent, error]);
   } catch (e) {
     console.error('Failed to log search request:', e);
@@ -441,31 +441,31 @@ function coolDown(row: SearchEngineRow, keyId: number, e: SearchError): void {
 
 /** True when at least one enabled engine has a usable key, i.e. a search can
  *  be attempted. The agents' web_search integration keys off this. */
-export function searchAvailable(): boolean {
+export async function searchAvailable(): Promise<boolean> {
   const db = getDb();
-  for (const row of orderedEngines()) {
+  for (const row of await orderedEngines()) {
     if (row.enabled !== 1) continue;
     if (row.platform === 'custom') {
       if (row.key_id == null) continue;
-      const k = db.get("SELECT 1 FROM api_keys WHERE id = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [row.key_id]);
+      const k = await db.get("SELECT 1 FROM api_keys WHERE id = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [row.key_id]);
       if (k) return true;
       continue;
     }
     if (!ADAPTERS[row.platform]) continue;
-    const k = db.get("SELECT 1 FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') LIMIT 1", [row.platform]);
+    const k = await db.get("SELECT 1 FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') LIMIT 1", [row.platform]);
     if (k) return true;
   }
   return false;
 }
 
-function searchChain(engine: string | undefined): SearchEngineRow[] {
-  const enabled = orderedEngines().filter(r => r.enabled === 1 && ADAPTERS[r.platform]);
+async function searchChain(engine: string | undefined): Promise<SearchEngineRow[]> {
+  const enabled = await (await orderedEngines()).filter(r => r.enabled === 1 && ADAPTERS[r.platform]);
   // Custom relays first, catalog engines after, each group in effective order.
   const chain = [...enabled.filter(r => r.platform === 'custom'), ...enabled.filter(r => r.platform !== 'custom')];
   if (!engine || engine === 'auto') return chain;
   const pinned = chain.filter(r => r.model_id === engine);
   if (pinned.length === 0) {
-    const known = orderedEngines().some(r => r.model_id === engine);
+    const known = await (await orderedEngines()).some(r => r.model_id === engine);
     throw new SearchError(
       known
         ? `Search engine '${engine}' is turned off. Turn it on from Models → Search, or use 'auto'.`
@@ -477,7 +477,7 @@ function searchChain(engine: string | undefined): SearchEngineRow[] {
 }
 
 export async function runSearch(query: string, opts: SearchOptions = {}): Promise<SearchResponse> {
-  const chain = searchChain(opts.engine);
+  const chain = await searchChain(opts.engine);
   const maxResults = Math.min(Math.max(1, Math.floor(opts.maxResults ?? DEFAULT_RESULTS)), MAX_RESULTS);
   const clientAgent = opts.clientAgent !== undefined ? opts.clientAgent : getClientContext().agent;
 
@@ -490,10 +490,10 @@ export async function runSearch(query: string, opts: SearchOptions = {}): Promis
     const tried = new Set<number>();
     for (;;) {
       if (opts.signal?.aborted) throw new SearchError('search cancelled by the client', 499);
-      const { credential, budgetBlocked } = reserveProviderCredential(
+      const { credential, budgetBlocked } = await reserveProviderCredential(
         row,
         0,
-        keyId => tried.has(keyId) || isOnCooldown(row.platform, row.model_id, keyId),
+        async keyId => tried.has(keyId) || await isOnCooldown(row.platform, row.model_id, keyId),
       );
       if (!credential) {
         if (budgetBlocked) {
@@ -508,7 +508,7 @@ export async function runSearch(query: string, opts: SearchOptions = {}): Promis
       try {
         const out = await ADAPTERS[row.platform]!(credential, query, opts, maxResults);
         if (out.results.length === 0) throw new SearchError('upstream returned no valid search hits', 502);
-        logSearch(row, credential.id, 'ok', Date.now() - started, out.results.length, clientAgent, null);
+        await logSearch(row, credential.id, 'ok', Date.now() - started, out.results.length, clientAgent, null);
         return {
           query,
           ...(out.answer ? { answer: out.answer } : {}),
@@ -518,7 +518,7 @@ export async function runSearch(query: string, opts: SearchOptions = {}): Promis
         };
       } catch (err: any) {
         const e = err instanceof SearchError ? err : new SearchError(String(err?.message ?? err), 502);
-        logSearch(row, credential.id, 'error', Date.now() - started, 0, clientAgent, e.message.slice(0, 300));
+        await logSearch(row, credential.id, 'error', Date.now() - started, 0, clientAgent, e.message.slice(0, 300));
         coolDown(row, credential.id, e);
         lastError = e;
         hints.record(e.status, e.retryAfterMs);
@@ -535,7 +535,7 @@ export async function runSearch(query: string, opts: SearchOptions = {}): Promis
   if (attempted === 0 && !lastError) {
     // Keys exist but every one is benched (rate limited, out of credits or
     // rejected recently): a retryable condition, not a setup problem.
-    if (searchAvailable()) {
+    if (await searchAvailable()) {
       throw new SearchError(
         'Every search key is cooling down (rate limited or out of credits). Try again later or add another search key.',
         429,
@@ -590,22 +590,22 @@ export interface SearchEngineView {
 
 const FREE_LAG_MS = 30 * 24 * 60 * 60 * 1000;
 
-export function listSearchEngines(): SearchEngineView[] {
+export async function listSearchEngines(): Promise<SearchEngineView[]> {
   const db = getDb();
-  const keyRows = db.all( `
+  const keyRows = await db.all( `
     SELECT id, platform, enabled, status FROM api_keys
      WHERE platform = 'custom' OR platform IN (${[...SEARCH_ENGINE_PLATFORMS].map(() => '?').join(', ')})
   `, [...SEARCH_ENGINE_PLATFORMS]) as { id: number; platform: string; enabled: number; status: string }[];
   const healthy = (k: { enabled: number; status: string }) => k.enabled === 1 && (k.status === 'healthy' || k.status === 'unknown');
   const monthCounts = new Map(
-    (db.all(`
+    (await db.all(`
       SELECT platform, engine_id, COUNT(*) AS n FROM search_requests
-       WHERE status = 'ok' AND created_at >= datetime('now', 'start of month')
+       WHERE status = 'ok' AND created_at >= to_char(date_trunc('month', now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS')
        GROUP BY platform, engine_id
     `) as { platform: string; engine_id: string; n: number }[]).map(r => [`${r.platform}:${r.engine_id}`, r.n]),
   );
 
-  return orderedEngines().map(row => {
+  return await (await orderedEngines()).map(row => {
     const meta = parseSearchMeta(row.meta_json);
     const keys = row.platform === 'custom'
       ? keyRows.filter(k => k.id === row.key_id)
@@ -635,13 +635,13 @@ export function listSearchEngines(): SearchEngineView[] {
 /** Turn an engine on/off and/or move it to `priority` (0 = first/default).
  *  A move renumbers every engine 0..n-1 in the new order and stores that as
  *  the local order. Returns false when the id is not a search engine. */
-export function updateSearchEngine(id: number, patch: { enabled?: boolean; priority?: number }): boolean {
+export async function updateSearchEngine(id: number, patch: { enabled?: boolean; priority?: number }): Promise<boolean> {
   const db = getDb();
-  const ordered = orderedEngines();
+  const ordered = await orderedEngines();
   const target = ordered.find(r => r.id === id);
   if (!target) return false;
   if (patch.enabled !== undefined) {
-    db.run('UPDATE media_models SET enabled = ? WHERE id = ?', [patch.enabled ? 1 : 0, id]);
+    await db.run('UPDATE media_models SET enabled = ? WHERE id = ?', [patch.enabled ? 1 : 0, id]);
   }
   if (patch.priority !== undefined) {
     const rest = ordered.filter(r => r.id !== id);
@@ -649,7 +649,7 @@ export function updateSearchEngine(id: number, patch: { enabled?: boolean; prior
     rest.splice(index, 0, target);
     const overrides: Record<string, number> = {};
     rest.forEach((r, i) => { overrides[engineKey(r)] = i; });
-    setSetting(PRIORITY_OVERRIDES_SETTING, JSON.stringify(overrides));
+    await setSetting(PRIORITY_OVERRIDES_SETTING, JSON.stringify(overrides));
   }
   return true;
 }
@@ -677,31 +677,31 @@ function rangeSince(range: SearchAnalyticsRange): string | null {
 /** Searches over a range: totals count successful searches; successRate and
  *  latency are over every attempt (a failed attempt that failed over is
  *  still a cost the operator wants to see). */
-export function searchAnalytics(range: SearchAnalyticsRange): SearchAnalytics {
+export async function searchAnalytics(range: SearchAnalyticsRange): Promise<SearchAnalytics> {
   const db = getDb();
   const since = rangeSince(range);
   const where = since ? 'WHERE created_at >= ?' : '';
   const args = since ? [since] : [];
 
-  const totals = db.get( `
+  const totals = await db.get( `
     SELECT COUNT(*) AS attempts,
            COALESCE(SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END), 0) AS ok,
            COALESCE(AVG(latency_ms), 0) AS avg_latency
       FROM search_requests ${where}
   `, [...args]) as { attempts: number; ok: number; avg_latency: number };
-  const today = (db.get(`
-    SELECT COUNT(*) AS n FROM search_requests WHERE status = 'ok' AND created_at >= datetime('now', 'start of day')
+  const today = (await db.get(`
+    SELECT COUNT(*) AS n FROM search_requests WHERE status = 'ok' AND created_at >= to_char(now() at time zone 'utc', 'YYYY-MM-DD')
   `) as { n: number }).n;
 
-  const names = new Map(allEngineRows().map(r => [r.model_id, r.display_name]));
-  const byEngine = (db.all(`
+  const names = new Map(await (await allEngineRows()).map(r => [r.model_id, r.display_name]));
+  const byEngine = (await db.all(`
     SELECT engine_id, COUNT(*) AS n FROM search_requests
      ${where ? `${where} AND` : 'WHERE'} status = 'ok'
      GROUP BY engine_id ORDER BY n DESC, engine_id
   `, [...args]) as { engine_id: string; n: number }[])
     .map(r => ({ engineId: r.engine_id, displayName: names.get(r.engine_id) ?? r.engine_id, count: r.n }));
-  const series = (db.all(`
-    SELECT date(created_at) AS day, engine_id, COUNT(*) AS n FROM search_requests
+  const series = (await db.all(`
+    SELECT to_char(created_at::timestamp, 'YYYY-MM-DD') AS day, engine_id, COUNT(*) AS n FROM search_requests
      ${where ? `${where} AND` : 'WHERE'} status = 'ok'
      GROUP BY day, engine_id ORDER BY day, engine_id
   `, [...args]) as { day: string; engine_id: string; n: number }[])

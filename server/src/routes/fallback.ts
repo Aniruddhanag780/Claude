@@ -24,37 +24,37 @@ export const fallbackRouter = Router();
 
 // Dashboard-session authenticated by app.ts. Polling only reads saved quota
 // observations and request history, never provider endpoints or key material.
-fallbackRouter.get('/quota-forecast', (_req: Request, res: Response) => {
-  res.json(getQuotaOutlook());
+fallbackRouter.get('/quota-forecast', async (_req: Request, res: Response) => {
+  res.json(await getQuotaOutlook());
 });
 
 // ── Bandit routing strategy ─────────────────────────────────────────────────
 // GET  /routing → active strategy, preset weights, and the per-model score
 //                 breakdown (reliability / speed / intelligence + guardrails).
-fallbackRouter.get('/routing', (_req: Request, res: Response) => {
-  const { peakHours, ...rest } = getRoutingScores();
+fallbackRouter.get('/routing', async (_req: Request, res: Response) => {
+  const { peakHours, ...rest } = await getRoutingScores();
   res.json({
     ...rest,
     peakHoursAdjust: peakHours.enabled,
     peakStartHour: peakHours.startHour,
     peakEndHour: peakHours.endHour,
     peakTimezone: peakHours.timezone,
-    cooldownCeilingMs: getCooldownCeilingMs(),
+    cooldownCeilingMs: await getCooldownCeilingMs(),
     // Decision routing (#1354): its settings, whether a decision model is
     // usable, and since-boot picks. Present whatever the active strategy is.
-    decision: getDecisionRoutingStatus(),
+    decision: await getDecisionRoutingStatus(),
   });
 });
 
-fallbackRouter.get('/penalty-inspector', (_req: Request, res: Response) => {
-  res.json(getPenaltyInspector());
+fallbackRouter.get('/penalty-inspector', async (_req: Request, res: Response) => {
+  res.json(await getPenaltyInspector());
 });
 
 // DELETE /penalty-inspector → lift every cooldown, penalty and failure streak
 // at once (#952). The per-key DELETE /api/keys/:id/cooldowns stays for the
 // surgical case; this is the escape hatch for a pool that cannot route at all.
-fallbackRouter.delete('/penalty-inspector', (_req: Request, res: Response) => {
-  res.json(clearRouterPressure());
+fallbackRouter.delete('/penalty-inspector', async (_req: Request, res: Response) => {
+  res.json(await clearRouterPressure());
 });
 
 const routingSchema = z.object({
@@ -95,7 +95,7 @@ const routingSchema = z.object({
 // PUT /routing → switch strategy. Presets are just weight vectors over the three
 // axes; 'priority' falls back to the legacy manual chain order; 'custom' uses
 // the user's saved weights (optionally updated in the same request).
-fallbackRouter.put('/routing', (req: Request, res: Response) => {
+fallbackRouter.put('/routing', async (req: Request, res: Response) => {
   const parsed = routingSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -105,25 +105,25 @@ fallbackRouter.put('/routing', (req: Request, res: Response) => {
   // intended vector immediately. setCustomWeights throws on an all-zero vector.
   if (parsed.data.weights) {
     try {
-      setCustomWeights(parsed.data.weights);
+      await setCustomWeights(parsed.data.weights);
     } catch (err: any) {
       res.status(400).json({ error: { message: err?.message ?? 'Invalid custom weights' } });
       return;
     }
   }
-  setRoutingStrategy(parsed.data.strategy as RoutingStrategy);
+  await setRoutingStrategy(parsed.data.strategy as RoutingStrategy);
   if (parsed.data.exploreEnabled !== undefined) {
-    setExploreEnabled(parsed.data.exploreEnabled);
+    await setExploreEnabled(parsed.data.exploreEnabled);
   }
   if (parsed.data.keySelectionStrategy !== undefined) {
-    setKeySelectionStrategy(parsed.data.keySelectionStrategy);
+    await setKeySelectionStrategy(parsed.data.keySelectionStrategy);
   }
   if (parsed.data.cooldownCeilingMs !== undefined) {
-    setCooldownCeilingMs(parsed.data.cooldownCeilingMs);
+    await setCooldownCeilingMs(parsed.data.cooldownCeilingMs);
   }
-  setDecisionRoutingSettings({ model: parsed.data.decisionModel, minProbability: parsed.data.decisionMinProbability });
+  await setDecisionRoutingSettings({ model: parsed.data.decisionModel, minProbability: parsed.data.decisionMinProbability });
   try {
-    setPeakHoursConfig({
+    await setPeakHoursConfig({
       enabled: parsed.data.peakHoursAdjust,
       startHour: parsed.data.peakStartHour,
       endHour: parsed.data.peakEndHour,
@@ -137,13 +137,13 @@ fallbackRouter.put('/routing', (req: Request, res: Response) => {
   // will actually use right now, which differs from the preset while the
   // peak-hours adjustment is firing. Returning both keeps the echo honest
   // without breaking clients that read `presets` (#760).
-  const active = getActiveRoutingWeights();
-  const peak = getPeakHoursConfig();
+  const active = await getActiveRoutingWeights();
+  const peak = await getPeakHoursConfig();
   res.json({
-    strategy: getRoutingStrategy(),
-    exploreEnabled: getExploreEnabled(),
-    keySelectionStrategy: getKeySelectionStrategy(),
-    decision: getDecisionRoutingStatus(),
+    strategy: await getRoutingStrategy(),
+    exploreEnabled: await getExploreEnabled(),
+    keySelectionStrategy: await getKeySelectionStrategy(),
+    decision: await getDecisionRoutingStatus(),
     presets: BANDIT_PRESETS,
     weights: active.weights,
     peakAdjusted: active.adjusted,
@@ -151,7 +151,7 @@ fallbackRouter.put('/routing', (req: Request, res: Response) => {
     peakStartHour: peak.startHour,
     peakEndHour: peak.endHour,
     peakTimezone: peak.timezone,
-    cooldownCeilingMs: getCooldownCeilingMs(),
+    cooldownCeilingMs: await getCooldownCeilingMs(),
   });
 });
 
@@ -226,19 +226,19 @@ function orderProfileRows(rows: any[]): any[] {
 }
 
 // Get fallback chain (with dynamic penalties)
-fallbackRouter.get('/', (req: Request, res: Response) => {
+fallbackRouter.get('/', async (req: Request, res: Response) => {
   const db = getDb();
   // #1047: an explicit ?profile= pins the read to that chain, so a client
   // caching per-chain can never have "the active chain, whichever that is right
   // now" written into a specific chain's cache entry. During an activation the
   // active id changes between the client's two fetches; that race is how chain
   // B's rows ended up rendered (and nearly saved) under chain A's name.
-  let activeProfileId = getActiveProfileId(db);
+  let activeProfileId = await getActiveProfileId(db);
   const requestedRaw = req.query.profile;
   if (requestedRaw !== undefined) {
     const requested = Number.parseInt(String(requestedRaw), 10);
     if (!Number.isInteger(requested) || requested <= 0
-      || !db.get('SELECT 1 FROM profiles WHERE id = ?', [requested])) {
+      || !await db.get('SELECT 1 FROM profiles WHERE id = ?', [requested])) {
       res.status(404).json({ error: { message: `no such profile: ${String(requestedRaw)}` } });
       return;
     }
@@ -249,13 +249,13 @@ fallbackRouter.get('/', (req: Request, res: Response) => {
   // through to the global table there is what made two different empty chains
   // show (and save) the same configuration (#1021).
   const rows = activeProfileId != null
-    ? orderProfileRows(db.all(PROFILE_CHAIN_SQL[activeProfileId]) as any[])
-    : db.all(GLOBAL_CHAIN_SQL) as any[];
+    ? orderProfileRows(await db.all(PROFILE_CHAIN_SQL[activeProfileId]) as any[])
+    : await db.all(GLOBAL_CHAIN_SQL) as any[];
 
   // Count usable keys per platform — enabled AND healthy/unknown status. Unified
   // with /token-usage and the routing scorer (#456) so budget pooling is computed
   // from the same key set everywhere (a disabled or invalid key adds no capacity).
-  const keyCounts = db.all(`
+  const keyCounts = await db.all(`
     SELECT platform, COUNT(*) as count
     FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown')
     GROUP BY platform
@@ -270,7 +270,7 @@ fallbackRouter.get('/', (req: Request, res: Response) => {
   // model served by several providers into one expandable group. Always sent
   // (cheap); the client renders grouped only when its unify toggle is on.
   const groupByDbId = new Map<number, { groupKey: string; canonicalId: string; groupLabel: string }>();
-  for (const g of getModelGroups()) {
+  for (const g of await getModelGroups()) {
     for (const m of g.members) {
       groupByDbId.set(m.model_db_id, { groupKey: g.groupKey, canonicalId: g.canonicalId, groupLabel: g.groupLabel });
     }
@@ -350,12 +350,12 @@ const updateSchema = z.array(z.object({
  * turn an INSERT into a foreign-key failure (the old UPDATE simply matched
  * nothing).
  */
-function knownModelIds(db: ReturnType<typeof getDb>): Set<number> {
-  return new Set((db.all('SELECT id FROM models') as { id: number }[]).map(m => m.id));
+async function knownModelIds(db: ReturnType<typeof getDb>): Promise<Set<number>> {
+  return new Set((await db.all('SELECT id FROM models') as { id: number }[]).map(m => m.id));
 }
 
 // Update fallback chain (full replace)
-fallbackRouter.put('/', (req: Request, res: Response) => {
+fallbackRouter.put('/', async (req: Request, res: Response) => {
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -363,33 +363,30 @@ fallbackRouter.put('/', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const activeProfileId = getActiveProfileId(db);
+  const activeProfileId = await getActiveProfileId(db);
 
   // Writing to the active chain UPSERTS: the row may not be in the chain yet,
   // which is the normal state of every model in a hand-built one. The old
   // UPDATE-only write is why an empty chain could never gain its first model —
   // and why, having matched nothing, the edit was quietly redirected into the
   // single global table shared by every chain (#1021).
-  const writeAll = activeProfileId != null
-    ? (() => {
-        const known = knownModelIds(db);
-        return db.transaction(() => {
-          for (const entry of parsed.data) {
-            if (!known.has(entry.modelDbId)) continue;
-            db.run(`
+  if (activeProfileId != null) {
+    const known = await knownModelIds(db);
+    await db.transaction(async (tx) => {
+      for (const entry of parsed.data) {
+        if (!known.has(entry.modelDbId)) continue;
+        await tx.run(`
           INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
           VALUES (?, ?, ?, 0)
           ON CONFLICT(profile_id, model_db_id) DO UPDATE SET priority = excluded.priority
         `, [activeProfileId, entry.modelDbId, entry.priority, entry.enabled ? 1 : 0]);
-          }
-        });
-      })()
-    : (() => {
-        return db.transaction(() => {
-          for (const entry of parsed.data) db.run('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?', [entry.priority, entry.enabled ? 1 : 0, entry.modelDbId]);
-        });
-      })();
-  writeAll();
+      }
+    });
+  } else {
+    await db.transaction(async (tx) => {
+      for (const entry of parsed.data) await tx.run('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?', [entry.priority, entry.enabled ? 1 : 0, entry.modelDbId]);
+    });
+  }
 
   res.json({ success: true });
 });
@@ -409,14 +406,14 @@ const SORT_PRESETS: Record<string, string> = {
   speed: 'm.speed_rank ASC',
 };
 
-fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
+fallbackRouter.post('/sort/:preset', async (req: Request, res: Response) => {
   const preset = String(req.params.preset);
   const db = getDb();
   let models: { id: number }[] = [];
-  const activeProfileId = getActiveProfileId(db);
+  const activeProfileId = await getActiveProfileId(db);
 
   if (preset === 'budget') {
-    const allModels = db.all(`SELECT id, monthly_token_budget, tpd_limit FROM models`) as any[];
+    const allModels = await db.all(`SELECT id, monthly_token_budget, tpd_limit FROM models`) as any[];
     allModels.sort((a, b) => monthlyBudgetScore(b) - monthlyBudgetScore(a));
     models = allModels.map(m => ({ id: m.id }));
   } else {
@@ -425,7 +422,7 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
       res.status(400).json({ error: { message: `Unknown preset: ${preset}. Use: intelligence, speed, budget` } });
       return;
     }
-    models = db.all(`SELECT m.id FROM models m ORDER BY ${orderBy}`) as { id: number }[];
+    models = await db.all(`SELECT m.id FROM models m ORDER BY ${orderBy}`) as { id: number }[];
   }
 
   // Same upsert story as the PUT above: a preset sorts the list the dashboard
@@ -433,32 +430,29 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
   // chain has not named yet gets its row written here too — switched OFF, the
   // state it was displayed in. Sorting must never enable anything; a row
   // already in the chain keeps whatever flag it had.
-  const reorder = activeProfileId != null
-    ? (() => {
-        return db.transaction(() => {
-          for (let i = 0; i < models.length; i++) db.run(`
+  if (activeProfileId != null) {
+    await db.transaction(async (tx) => {
+      for (let i = 0; i < models.length; i++) await tx.run(`
           INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
           VALUES (?, ?, ?, 0)
           ON CONFLICT(profile_id, model_db_id) DO UPDATE SET priority = excluded.priority
         `, [activeProfileId, models[i].id, i + 1]);
-        });
-      })()
-    : (() => {
-        return db.transaction(() => {
-          for (let i = 0; i < models.length; i++) db.run('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?', [i + 1, models[i].id]);
-        });
-      })();
-  reorder();
+    });
+  } else {
+    await db.transaction(async (tx) => {
+      for (let i = 0; i < models.length; i++) await tx.run('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?', [i + 1, models[i].id]);
+    });
+  }
 
   res.json({ success: true, preset });
 });
 
 // Token usage per model for the stacked bar
-fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
+fallbackRouter.get('/token-usage', async (_req: Request, res: Response) => {
   const db = getDb();
 
   // Get platforms that have enabled keys
-  const platforms = db.all(`
+  const platforms = await db.all(`
     SELECT DISTINCT ak.platform
     FROM api_keys ak
     WHERE ak.enabled = 1
@@ -466,12 +460,12 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
   const platformSet = new Set(platforms.map(p => p.platform));
 
   // Check if there is an active profile
-  const settingRow = db.get(`SELECT value FROM settings WHERE key = 'active_profile_id'`) as { value: string } | undefined;
+  const settingRow = await db.get(`SELECT value FROM settings WHERE key = 'active_profile_id'`) as { value: string } | undefined;
   const activeProfileId = settingRow ? (parseInt(settingRow.value) || null) : null;
 
   // Verify active profile still exists
   const activeProfile = activeProfileId
-    ? db.get('SELECT id FROM profiles WHERE id = ?', [activeProfileId]) as any
+    ? await db.get('SELECT id FROM profiles WHERE id = ?', [activeProfileId]) as any
     : null;
 
   // Ordered by intelligence (rank 1 = smartest), not chain priority: the
@@ -482,7 +476,7 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
 
   if (activeProfile) {
     // Profile mode: use profile_models chain (all models in profile, checked against enabled)
-    rawModels = db.all(`
+    rawModels = await db.all(`
       SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.monthly_token_budget,
              pm.priority, pm.enabled, m.intelligence_rank,
              m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit
@@ -493,7 +487,7 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
     `, [activeProfileId]) as any[];
   } else {
     // Default mode: use fallback_config (only include enabled models)
-    rawModels = db.all(`
+    rawModels = await db.all(`
       SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.monthly_token_budget,
              fc.priority, fc.enabled, m.intelligence_rank,
              m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit
@@ -505,17 +499,17 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
   }
 
   // Build per-model breakdown (only platforms with keys), preserving enabled state
-  const usageRows = db.all(`
+  const usageRows = await db.all(`
     SELECT platform, model_id, COALESCE(SUM(input_tokens + output_tokens), 0) AS used
     FROM requests
-    WHERE created_at >= datetime('now', 'start of month')
+    WHERE created_at >= to_char(date_trunc('month', now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS')
       AND request_type = 'chat'
     GROUP BY platform, model_id
   `) as { platform: string; model_id: string; used: number }[];
   const usageByModel = new Map(usageRows.map(r => [`${r.platform}:${r.model_id}`, r.used]));
 
   const keyCountMap = new Map(
-    (db.all("SELECT platform, COUNT(*) as count FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; count: number }[])
+    (await db.all("SELECT platform, COUNT(*) as count FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; count: number }[])
       .map(k => [k.platform, k.count])
   );
 
@@ -594,11 +588,11 @@ function keyPressure(usage: KeyUsage, limits: { rpm: number | null; rpd: number 
   return worst;
 }
 
-fallbackRouter.get('/rate-limit-usage', (_req: Request, res: Response) => {
+fallbackRouter.get('/rate-limit-usage', async (_req: Request, res: Response) => {
   const db = getDb();
   const now = Date.now();
 
-  const models = db.all(`
+  const models = await db.all(`
     SELECT id AS model_db_id, platform, model_id, key_id, rpm_limit, rpd_limit, tpm_limit
       FROM models
      WHERE enabled = 1
@@ -615,7 +609,7 @@ fallbackRouter.get('/rate-limit-usage', (_req: Request, res: Response) => {
   // Every key row once: the routable pool needs enabled+healthy rows, while the
   // custom-endpoint pool is keyed on base_url and has to resolve a model's own
   // key_id even when that row is disabled.
-  const allKeys = db.all(`
+  const allKeys = await db.all(`
     SELECT id, platform, base_url, model_scope_json, enabled, status FROM api_keys
   `) as Array<{
     id: number;
@@ -639,7 +633,7 @@ fallbackRouter.get('/rate-limit-usage', (_req: Request, res: Response) => {
   // ratelimit service enforces: a sliding minute for RPM/TPM, a sliding day for
   // RPD. Rows older than a day are pruned on write, but the WHERE keeps this
   // correct even if a prune has not run yet.
-  const usageRows = db.all(`
+  const usageRows = await db.all(`
     SELECT platform, model_id, key_id,
            SUM(CASE WHEN kind = 'request' AND created_at_ms > ? THEN 1 ELSE 0 END) AS rpm_used,
            SUM(CASE WHEN kind = 'request' THEN 1 ELSE 0 END) AS rpd_used,

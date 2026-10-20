@@ -60,7 +60,7 @@ interface ModelRow {
   supports_tools: number;
 }
 
-function main() {
+async function main() {
   const dbPath = arg('db');
   const tier = (arg('tier') as 'live' | 'monthly' | undefined) ?? 'live';
   const version = arg('version') ?? dateVersion();
@@ -69,17 +69,17 @@ function main() {
   // logs (e.g. initDb's "Database initialized at ...") go to stderr instead.
   if (flag('stdout')) console.log = console.error;
 
-  initDb(dbPath);
+  await initDb(dbPath);
   const db = getDb();
 
-  const models = db.all(`SELECT platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
+  const models = await db.all(`SELECT platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
               rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
               enabled, supports_vision, supports_tools
          FROM models
         ORDER BY intelligence_rank ASC, platform ASC, model_id ASC`) as ModelRow[];
 
-  const quirksByModel = resolveQuirksByModel(db);
-  const quirkDefs = listQuirkDefinitions(db);
+  const quirksByModel = await resolveQuirksByModel(db);
+  const quirkDefs = await listQuirkDefinitions(db);
 
   // Only platforms that actually have a registered provider AND a model in the
   // catalog — skip 'custom' (user-supplied endpoint, nothing to publish).
@@ -142,4 +142,4 @@ function main() {
   );
 }
 
-main();
+await main();

@@ -388,12 +388,12 @@ function enforceRelayUrlPolicy(): void {
  * outbound request goes direct until the user re-saves the setting (#949).
  * Safe to call more than once; it is idempotent.
  */
-export function restoreProxySettings(): void {
-  applyProxyUrl(getSetting('proxy_url') ?? '');
-  applyProxyMode(getSetting('proxy_mode') ?? 'forward');
-  applyFetchRelayToken(decodeFetchRelayToken(getSetting('fetch_relay_token') ?? ''));
-  applyProxyEnabled(getSetting('proxy_enabled') !== '0'); // default: enabled
-  applyProxyBypass(getSetting('proxy_bypass') ?? '');
+export async function restoreProxySettings(): Promise<void> {
+  applyProxyUrl(await getSetting('proxy_url') ?? '');
+  applyProxyMode(await getSetting('proxy_mode') ?? 'forward');
+  applyFetchRelayToken(decodeFetchRelayToken(await getSetting('fetch_relay_token') ?? ''));
+  applyProxyEnabled(await getSetting('proxy_enabled') !== '0'); // default: enabled
+  applyProxyBypass(await getSetting('proxy_bypass') ?? '');
 }
 
 export function getProxyUrl(): string {
@@ -889,9 +889,9 @@ async function dispatchFetch(
       const resolved = await resolvePerKeyDispatcher(perKeyUrl);
       if (resolved) {
         if (resolved.isSocks) {
-          return socksFetch(url, init, resolved.dispatcher as http.Agent, platform, requestType, timeoutMs);
+          return await socksFetch(url, init, resolved.dispatcher as http.Agent, platform, requestType, timeoutMs);
         }
-        return fetch(url, { ...init, dispatcher: resolved.dispatcher } as unknown as RequestInit);
+        return await fetch(url, { ...init, dispatcher: resolved.dispatcher } as unknown as RequestInit);
       }
     }
     // Per-key proxy failed to build → fall through to the global/direct path.
@@ -901,27 +901,27 @@ async function dispatchFetch(
   // host is listed in NO_PROXY, or it is a local/LAN destination no proxy can
   // reach (#951).
   if (shouldBypassProxy(url, platform)) {
-    return fetch(url, init);
+    return await fetch(url, init);
   }
 
   if (_proxyMode === 'fetch-relay' && _proxyUrl) {
-    return fetchRelayFetch(_proxyUrl, url, init, _fetchRelayToken);
+    return await fetchRelayFetch(_proxyUrl, url, init, _fetchRelayToken);
   }
 
   const resolved = await resolveDispatcher();
 
   // No dispatcher (no proxy URL configured, or it failed to build) → direct
   if (!resolved) {
-    return fetch(url, init);
+    return await fetch(url, init);
   }
 
   // SOCKS proxy → http/https fallback
   if (resolved.isSocks) {
-    return socksFetch(url, init, resolved.dispatcher as http.Agent, platform, requestType, timeoutMs);
+    return await socksFetch(url, init, resolved.dispatcher as http.Agent, platform, requestType, timeoutMs);
   }
 
   // HTTP/HTTPS proxy → undici (dispatcher is an undici extension not in TS types)
-  return fetch(url, { ...init, dispatcher: resolved.dispatcher } as unknown as RequestInit);
+  return await fetch(url, { ...init, dispatcher: resolved.dispatcher } as unknown as RequestInit);
 }
 
 /** Send an application-layer HTTP request through a user-controlled fetch
@@ -949,7 +949,7 @@ async function fetchRelayFetch(
   if (relayToken) headers.set(FETCH_RELAY_AUTH_HEADER, `Bearer ${relayToken}`);
   else headers.delete(FETCH_RELAY_AUTH_HEADER);
 
-  return fetch(relayUrl, {
+  return await fetch(relayUrl, {
     ...init,
     headers,
     redirect: 'manual',

@@ -187,28 +187,28 @@ export function desktopSignInAllowed(req: Request): boolean {
 // Has the dashboard been set up yet, and is this caller authenticated?
 // `desktop` tells the dashboard it can fetch a session instead of showing the
 // sign-in form.
-authRouter.get('/status', (req: Request, res: Response) => {
-  const session = validateSession(bearer(req));
+authRouter.get('/status', async (req: Request, res: Response) => {
+  const session = await validateSession(bearer(req));
   res.json({
-    needsSetup: userCount() === 0,
+    needsSetup: await userCount() === 0,
     authenticated: !!session,
     email: session?.email ?? null,
     desktop: desktopSignInAllowed(req),
   });
 });
 
-authRouter.post('/desktop-session', (req: Request, res: Response) => {
+authRouter.post('/desktop-session', async (req: Request, res: Response) => {
   if (!desktopSignInAllowed(req)) {
     res.status(403).json({ error: { message: 'Desktop sign-in is only available on this computer.', type: 'desktop_signin_forbidden' } });
     return;
   }
-  res.json({ token: desktopSessionToken() });
+  res.json({ token: await desktopSessionToken() });
 });
 
 // First-run account creation. Only allowed while there are zero users, so it
 // can't be used to add accounts once the dashboard is claimed.
-authRouter.post('/setup', (req: Request, res: Response) => {
-  if (userCount() > 0) {
+authRouter.post('/setup', async (req: Request, res: Response) => {
+  if (await userCount() > 0) {
     clearSetupCode();
     res.status(409).json({ error: { message: 'Setup already completed. Use login instead.', type: 'setup_complete' } });
     return;
@@ -234,13 +234,13 @@ authRouter.post('/setup', (req: Request, res: Response) => {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
-  const user = createUser(parsed.data.email, parsed.data.password);
+  const user = await createUser(parsed.data.email, parsed.data.password);
   clearSetupCode(); // one-time: the dashboard is now claimed
-  const token = createSession(user.userId);
+  const token = await createSession(user.userId);
   res.status(201).json({ token, email: user.email });
 });
 
-authRouter.post('/login', (req: Request, res: Response) => {
+authRouter.post('/login', async (req: Request, res: Response) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -257,7 +257,7 @@ authRouter.post('/login', (req: Request, res: Response) => {
     return;
   }
 
-  const user = verifyCredentials(email, password);
+  const user = await verifyCredentials(email, password);
   if (!user) {
     recordFailure(email);
     // Same message whether the email exists or not — don't leak which.
@@ -266,17 +266,17 @@ authRouter.post('/login', (req: Request, res: Response) => {
   }
 
   clearFailures(email);
-  const token = createSession(user.userId);
+  const token = await createSession(user.userId);
   res.json({ token, email: user.email });
 });
 
-authRouter.post('/logout', (req: Request, res: Response) => {
-  deleteSession(bearer(req));
+authRouter.post('/logout', async (req: Request, res: Response) => {
+  await deleteSession(bearer(req));
   res.json({ success: true });
 });
 
-authRouter.get('/me', (req: Request, res: Response) => {
-  const session = validateSession(bearer(req));
+authRouter.get('/me', async (req: Request, res: Response) => {
+  const session = await validateSession(bearer(req));
   if (!session) {
     res.status(401).json({ error: { message: 'Authentication required', type: 'authentication_error' } });
     return;
@@ -290,8 +290,8 @@ const changeEmailSchema = z.object({
   newEmail: z.string().email('A valid email is required'),
 });
 
-authRouter.post('/change-email', (req: Request, res: Response) => {
-  const session = validateSession(bearer(req));
+authRouter.post('/change-email', async (req: Request, res: Response) => {
+  const session = await validateSession(bearer(req));
   if (!session) {
     res.status(401).json({ error: { message: 'Authentication required', type: 'authentication_error' } });
     return;
@@ -302,11 +302,11 @@ authRouter.post('/change-email', (req: Request, res: Response) => {
     return;
   }
   try {
-    const ok = updateEmail(session.userId, parsed.data.currentPassword, parsed.data.newEmail);
+    const ok = await updateEmail(session.userId, parsed.data.currentPassword, parsed.data.newEmail);
     if (!ok) {
       const attempts = (failedPasswordAttempts.get(session.userId) || 0) + 1;
       if (attempts >= 3) {
-        deleteSession(bearer(req));
+        await deleteSession(bearer(req));
         failedPasswordAttempts.delete(session.userId);
         res.status(401).json({ error: { message: 'Too many incorrect attempts. You have been signed out.', type: 'authentication_error' } });
         return;
@@ -332,8 +332,8 @@ const changePasswordSchema = z.object({
   newPassword: z.string().min(8, 'Password must be at least 8 characters'),
 });
 
-authRouter.post('/change-password', (req: Request, res: Response) => {
-  const session = validateSession(bearer(req));
+authRouter.post('/change-password', async (req: Request, res: Response) => {
+  const session = await validateSession(bearer(req));
   if (!session) {
     res.status(401).json({ error: { message: 'Authentication required', type: 'authentication_error' } });
     return;
@@ -343,11 +343,11 @@ authRouter.post('/change-password', (req: Request, res: Response) => {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
-  const ok = updatePassword(session.userId, parsed.data.currentPassword, parsed.data.newPassword);
+  const ok = await updatePassword(session.userId, parsed.data.currentPassword, parsed.data.newPassword);
   if (!ok) {
     const attempts = (failedPasswordAttempts.get(session.userId) || 0) + 1;
     if (attempts >= 3) {
-      deleteSession(bearer(req));
+      await deleteSession(bearer(req));
       failedPasswordAttempts.delete(session.userId);
       res.status(401).json({ error: { message: 'Too many incorrect attempts. You have been signed out.', type: 'authentication_error' } });
       return;
@@ -363,9 +363,9 @@ authRouter.post('/change-password', (req: Request, res: Response) => {
 // Forgot password: mint a reset code and log it
 const RESET_CODE_MIN_INTERVAL_MS = 10_000;
 let lastResetCodeAt = 0;
-authRouter.post('/forgot-password', (_req: Request, res: Response) => {
+authRouter.post('/forgot-password', async (_req: Request, res: Response) => {
   // Always respond 200 regardless of account existence to avoid user enumeration.
-  if (userCount() === 0) {
+  if (await userCount() === 0) {
     res.json({ success: true });
     return;
   }
@@ -376,7 +376,7 @@ authRouter.post('/forgot-password', (_req: Request, res: Response) => {
     return;
   }
   lastResetCodeAt = now;
-  generateResetCode(accountEmail());
+  generateResetCode(await accountEmail());
   res.json({ success: true });
 });
 
@@ -386,7 +386,7 @@ const resetPasswordSchema = z.object({
   newPassword: z.string().min(8, 'Password must be at least 8 characters'),
 });
 
-authRouter.post('/reset-password', (req: Request, res: Response) => {
+authRouter.post('/reset-password', async (req: Request, res: Response) => {
   const parsed = resetPasswordSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -396,7 +396,7 @@ authRouter.post('/reset-password', (req: Request, res: Response) => {
     res.status(403).json({ error: { message: 'Invalid or expired reset code', type: 'authentication_error' } });
     return;
   }
-  const user = resetUserPassword(parsed.data.newPassword);
+  const user = await resetUserPassword(parsed.data.newPassword);
   if (!user) {
     res.status(404).json({ error: { message: 'No account found', type: 'not_found' } });
     return;
@@ -405,6 +405,6 @@ authRouter.post('/reset-password', (req: Request, res: Response) => {
   // Sign the operator straight in: the code already proved they control the
   // install, and sending them back to a login form that needs an email they
   // may not remember left them locked out after a successful reset (#1477).
-  const token = createSession(user.userId);
+  const token = await createSession(user.userId);
   res.json({ success: true, token, email: user.email });
 });

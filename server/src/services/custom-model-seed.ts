@@ -57,8 +57,8 @@ interface CatalogRankRow {
  * seed can't drift toward previously seeded custom models, and size labels the
  * router doesn't recognize are ignored when picking the median tier.
  */
-export function customModelSeed(db: Db): CustomModelSeed {
-  const rows = db.all(`
+export async function customModelSeed(db: Db): Promise<CustomModelSeed> {
+  const rows = await db.all(`
     SELECT size_label, intelligence_rank, speed_rank
       FROM models
      WHERE platform != 'custom'

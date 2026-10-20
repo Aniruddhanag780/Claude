@@ -12,18 +12,18 @@ function hourKey(createdAt: string): string {
   return createdAt.slice(0, 13) + ':00:00';
 }
 
-function incrementSetting(db: LogTx, key: string, delta: number): void {
+async function incrementSetting(db: LogTx, key: string, delta: number): Promise<void> {
   // Read-then-write inside the same transaction; safe because better-sqlite3
   // is synchronous and serialized at the connection level. ON CONFLICT keeps
   // the first ever insert without a prior SELECT.
-  db.run(`
+  await db.run(`
     INSERT INTO settings (key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ? AS TEXT)
   `, [key, String(delta), delta]);
 }
 
-function setSettingIfMissing(db: LogTx, key: string, value: string): void {
-  db.run(`
+async function setSettingIfMissing(db: LogTx, key: string, value: string): Promise<void> {
+  await db.run(`
     INSERT INTO settings (key, value) VALUES (?, ?)
     ON CONFLICT(key) DO NOTHING
   `, [key, value]);
@@ -35,21 +35,21 @@ function setSettingIfMissing(db: LogTx, key: string, value: string): void {
 // Returns NULL when the request is unattributable — a custom request whose
 // key never reached routing, or whose key no longer resolves to a matching
 // model row. An unattributable request must not land on the wrong relay.
-function resolveModelDbId(
+async function resolveModelDbId(
   db: LogTx,
   platform: string,
   modelId: string,
   keyId: number | null,
-): number | null {
+): Promise<number | null> {
   if (platform !== 'custom') {
-    const row = db.get('SELECT id FROM models WHERE platform = ? AND model_id = ? LIMIT 1', [platform, modelId]) as { id: number } | undefined;
+    const row = await db.get('SELECT id FROM models WHERE platform = ? AND model_id = ? LIMIT 1', [platform, modelId]) as { id: number } | undefined;
     return row?.id ?? null;
   }
   if (keyId == null) return null;
-  const key = db.get("SELECT base_url FROM api_keys WHERE id = ? AND platform = 'custom'", [keyId]) as { base_url: string | null } | undefined;
+  const key = await db.get("SELECT base_url FROM api_keys WHERE id = ? AND platform = 'custom'", [keyId]) as { base_url: string | null } | undefined;
   if (!key?.base_url) return null;
   const scope = key.base_url.trim().replace(/\/+$/, '');
-  const row = db.get('SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ? LIMIT 1', ['custom', modelId, scope]) as { id: number } | undefined;
+  const row = await db.get('SELECT id FROM models WHERE platform = ? AND model_id = ? AND endpoint_scope = ? LIMIT 1', ['custom', modelId, scope]) as { id: number } | undefined;
   return row?.id ?? null;
 }
 
@@ -70,7 +70,7 @@ function resolveModelDbId(
 //     plus first_request_at (set on the first ever logged request).
 // All upserts run in the same transaction so the aggregates never disagree
 // with the raw row count.
-export function logRequest(
+export async function logRequest(
   platform: string,
   modelId: string,
   // NULL for rejections that never reached routing (no key was involved),
@@ -113,23 +113,23 @@ export function logRequest(
     // Caller identity from the request-scoped context (set by the express
     // middleware); null when logging happens outside an HTTP request.
     const client = getClientContext();
-    const tx = db.transaction(() => {
-      const insert = db.run(`
+    await db.transaction(async (tx) => {
+      const insert = await tx.run(`
         INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms, requested_model, served_model, client_ip, client_user_agent, client_agent, caller, model_db_id, failure_attribution)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
-      `, [platform, modelId, keyId, status, inputTokens, outputTokens, latencyMs, error, ttfbMs, requestedModel, servedModel, client.ip, client.userAgent, client.agent, caller, resolveModelDbId(db, platform, modelId, keyId), failureAttribution]);
+      `, [platform, modelId, keyId, status, inputTokens, outputTokens, latencyMs, error, ttfbMs, requestedModel, servedModel, client.ip, client.userAgent, client.agent, caller, await resolveModelDbId(db, platform, modelId, keyId), failureAttribution]);
 
       // Report the row id back to the fallback loop's attempt trace (if one is
       // active): the LAST id noted during a loop run is the terminal row the
       // per-attempt batch is keyed to. No-op outside a fallback-loop run.
       if (insert.lastInsertRowid != null) noteRequestRowId(insert.lastInsertRowid);
 
-      const createdAt = db.get(`SELECT created_at FROM requests WHERE id = ?`, [insert.lastInsertRowid]) as { created_at: string } | undefined;
+      const createdAt = await tx.get(`SELECT created_at FROM requests WHERE id = ?`, [insert.lastInsertRowid]) as { created_at: string } | undefined;
       const hour = hourKey(createdAt?.created_at ?? new Date().toISOString().slice(0, 19).replace('T', ' '));
       const isSuccess = status === 'success' ? 1 : 0;
       const isError = status === 'error' ? 1 : 0;
 
-      db.run(`
+      await tx.run(`
         INSERT INTO request_hourly (hour, total_requests, success_count, error_count, input_tokens, output_tokens)
         VALUES (?, 1, ?, ?, ?, ?)
         ON CONFLICT(hour) DO UPDATE SET
@@ -140,16 +140,15 @@ export function logRequest(
           output_tokens  = output_tokens + ?
       `, [hour, isSuccess, isError, inputTokens, outputTokens, isSuccess, isError, inputTokens, outputTokens]);
 
-      incrementSetting(db, 'total_requests', 1);
-      incrementSetting(db, 'total_input_tokens', inputTokens);
-      incrementSetting(db, 'total_output_tokens', outputTokens);
+      await incrementSetting(db, 'total_requests', 1);
+      await incrementSetting(db, 'total_input_tokens', inputTokens);
+      await incrementSetting(db, 'total_output_tokens', outputTokens);
       if (createdAt?.created_at) {
-        setSettingIfMissing(db, 'first_request_at', createdAt.created_at);
+        await setSettingIfMissing(db, 'first_request_at', createdAt.created_at);
       }
     });
-    tx();
 
-    pruneRequestAnalytics({ db });
+    await pruneRequestAnalytics({ db });
   } catch (e) {
     console.error('Failed to log request:', e);
   }
@@ -164,19 +163,18 @@ export function logRequest(
 // fallback loop logs a 'canceled' row for pure client aborts (#752), that is
 // now only the loop-top stop paths, whose failed attempts each wrote their own
 // row already.
-export function persistRequestAttempts(trace: RequestTrace): void {
+export async function persistRequestAttempts(trace: RequestTrace): Promise<void> {
   if (trace.records.length === 0 || trace.lastRequestRowId == null) return;
   try {
     const db = getDb();
-    const tx = db.transaction(() => {
+    await db.transaction(async (tx) => {
       for (const r of trace.records) {
-        db.run(`
+        await tx.run(`
       INSERT INTO request_attempts (request_id, ordinal, platform, model_id, key_ordinal, key_label, outcome, start_offset_ms, duration_ms, error_summary)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [trace.lastRequestRowId, r.ordinal, r.platform, r.modelId, r.keyOrdinal, r.keyLabel, r.outcome, r.startOffsetMs, r.durationMs, r.errorSummary]);
       }
     });
-    tx();
   } catch (e) {
     console.error('Failed to persist request attempts:', e);
   }

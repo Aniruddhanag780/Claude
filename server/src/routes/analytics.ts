@@ -55,7 +55,7 @@ function getSinceTimestamp(range: string): string {
 // `requests` table is pruned by REQUEST_ANALYTICS_MAX_ROWS, so any analytics
 // count that depends on a >=7d window must read from the hourly table to stay
 // accurate. Hourly resolution is fine for any UI range the dashboard exposes.
-function readAggregateSince(since: string) {
+async function readAggregateSince(since: string) {
   const db = getDb();
   // Hour keys are created_at truncated to the hour, so they share SQLite's
   // canonical 'YYYY-MM-DD HH:00:00' text (space separator). The range cutoff is
@@ -63,7 +63,7 @@ function readAggregateSince(since: string) {
   // directly. No separator conversion: the writer (logRequest) and the timeline
   // reader both compare on the space form, so this must too.
   const aggregateSince = since.slice(0, 13) + ':00:00';
-  const rows = db.get(`
+  const rows = await db.get(`
     SELECT
       COALESCE(SUM(total_requests), 0) as total_requests,
       COALESCE(SUM(success_count), 0) as success_count,
@@ -84,9 +84,9 @@ function readAggregateSince(since: string) {
   return rows;
 }
 
-function readLifetimeSettings() {
+async function readLifetimeSettings() {
   const db = getDb();
-  const row = db.get(`
+  const row = await db.get(`
     SELECT value FROM settings WHERE key = 'first_request_at'
   `) as { value: string } | undefined;
   return row?.value ?? null;
@@ -97,13 +97,13 @@ function readLifetimeSettings() {
 // show up in the chat totals above; the dashboard's search cards read this.
 const SEARCH_RANGES: readonly SearchAnalyticsRange[] = ['24h', '7d', '30d', '90d', 'all'];
 
-analyticsRouter.get('/search', (req: Request, res: Response) => {
+analyticsRouter.get('/search', async (req: Request, res: Response) => {
   const raw = typeof req.query.range === 'string' ? req.query.range : '7d';
   const range = (SEARCH_RANGES as readonly string[]).includes(raw) ? raw as SearchAnalyticsRange : '7d';
-  res.json(searchAnalytics(range));
+  res.json(await searchAnalytics(range));
 });
 
-analyticsRouter.get('/summary', (req: Request, res: Response) => {
+analyticsRouter.get('/summary', async (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
   const since = getSinceTimestamp(range);
   const db = getDb();
@@ -115,7 +115,7 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
   // (platform, model_id); for those we fall back to the raw rows but they're
   // only reported for ranges where recent activity still exists. The aggregate
   // is the source of truth for headline numbers.
-  const aggregate = readAggregateSince(since);
+  const aggregate = await readAggregateSince(since);
   const totalRequests = aggregate.total_requests ?? 0;
   // Success rate over success+error only: a 'canceled' request (#752 — client
   // hung up) still counts in the totals but is neither a success nor a
@@ -125,14 +125,14 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
 
   // Avg latency is only meaningful at the raw row level; the hourly bucket
   // doesn't preserve it. Fall back to a 0/null when no recent raw rows exist.
-  const latencyRow = db.get(`
+  const latencyRow = await db.get(`
     SELECT AVG(latency_ms) as avg_latency_ms FROM requests WHERE created_at >= ?
   `, [since]) as { avg_latency_ms: number | null } | undefined;
 
   // Estimated savings is a per-request priced value, so it lives on the raw
   // rows. For ranges where the raw table is empty we report 0 (no recent
   // activity to price).
-  const savings = db.get(`
+  const savings = await db.get(`
     SELECT COALESCE(SUM(
       CASE WHEN r.status = 'success' THEN
         r.input_tokens  * COALESCE(m.paid_input_per_m,  ?) / 1000000.0 +
@@ -146,7 +146,7 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
 
   // Pin-honor stats are also raw-row scoped. We still report them when present
   // (typically 24h/7d) and gracefully drop them when the raw window is empty.
-  const pinRow = db.get(`
+  const pinRow = await db.get(`
     SELECT
       SUM(CASE WHEN requested_model IS NOT NULL THEN 1 ELSE 0 END) as pinned_count,
       SUM(CASE WHEN requested_model = model_id THEN 1 ELSE 0 END) as pin_honored_count
@@ -163,11 +163,11 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
   // ordered selection so they range over the same set: a NULL sorts first under
   // ORDER BY latency_ms ASC, so if it were counted but not filtered the offset
   // math would shift and a NULL could be selected (rendered as 0).
-  const rawCount = (db.get(`SELECT COUNT(*) as c FROM requests WHERE created_at >= ? AND latency_ms IS NOT NULL`, [since]) as { c: number }).c;
-  const percentileAt = (fraction: number): number | null => {
+  const rawCount = (await db.get(`SELECT COUNT(*) as c FROM requests WHERE created_at >= ? AND latency_ms IS NOT NULL`, [since]) as { c: number }).c;
+  const percentileAt = async (fraction: number): Promise<number | null> => {
     if (rawCount === 0) return null;
     const offset = Math.floor((rawCount - 1) * fraction);
-    const row = db.get(`
+    const row = await db.get(`
       SELECT latency_ms FROM requests
       WHERE created_at >= ? AND latency_ms IS NOT NULL
       ORDER BY latency_ms ASC
@@ -175,16 +175,16 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
     `, [since, offset]) as { latency_ms: number } | undefined;
     return row ? Math.round(row.latency_ms) : null;
   };
-  const p50LatencyMs = percentileAt(0.5);
-  const p95LatencyMs = percentileAt(0.95);
+  const p50LatencyMs = await percentileAt(0.5);
+  const p95LatencyMs = await percentileAt(0.95);
 
-  const ttfbRow = db.get(`
+  const ttfbRow = await db.get(`
     SELECT AVG(ttfb_ms) as avg_ttfb_ms FROM requests
     WHERE created_at >= ? AND ttfb_ms IS NOT NULL
   `, [since]) as { avg_ttfb_ms: number | null } | undefined;
   const avgTtfbMs = ttfbRow?.avg_ttfb_ms != null ? Math.round(ttfbRow.avg_ttfb_ms) : null;
 
-  const typeRows = db.all(`
+  const typeRows = await db.all(`
     SELECT request_type, COUNT(*) as count FROM requests
     WHERE created_at >= ?
     GROUP BY request_type
@@ -195,7 +195,7 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
     else if (row.request_type === 'chat') requestTypeCounts.chat = row.count;
   }
 
-  const lifetimeFirst = readLifetimeSettings();
+  const lifetimeFirst = await readLifetimeSettings();
 
   res.json({
     totalRequests,
@@ -224,7 +224,7 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
     // Lifetime total since install — useful when the user wants to see "all
     // time" alongside the selected range window. Sourced from settings so it
     // survives the raw-row prune entirely.
-    lifetimeTotalRequests: Number((db.get(`SELECT value FROM settings WHERE key='total_requests'`) as { value?: string } | undefined)?.value ?? 0) || 0,
+    lifetimeTotalRequests: Number((await db.get(`SELECT value FROM settings WHERE key='total_requests'`) as { value?: string } | undefined)?.value ?? 0) || 0,
   });
 });
 
@@ -242,12 +242,12 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
 // model and multiplies every request row by that count. Adding endpoint_scope
 // to the ON clause picks the row belonging to the endpoint that actually served
 // the request — the only one whose display name and pricing apply.
-analyticsRouter.get('/by-model', (req: Request, res: Response) => {
+analyticsRouter.get('/by-model', async (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
   const since = getSinceTimestamp(range);
   const db = getDb();
 
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT
       r.platform,
       ${ENDPOINT_ID_SQL} as base_url,
@@ -304,12 +304,12 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
 // router treats every key sharing a base_url as one endpoint). Non-custom keys
 // carry no base_url, so COALESCE(base_url,'') keeps each of them in a single
 // per-platform group exactly as before.
-analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
+analyticsRouter.get('/by-platform', async (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
   const since = getSinceTimestamp(range);
   const db = getDb();
 
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT
       r.platform,
       ${ENDPOINT_ID_SQL} as base_url,
@@ -338,14 +338,14 @@ analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
   // endpoint's base_url — or a custom endpoint's p95 would bleed in latency
   // from every other custom endpoint.
 
-  res.json(rows.map(r => {
+  res.json(rows.map(async r => {
     // Offset math and the ordered selection both range over the non-null
     // latency rows (latency_count), so a NULL can neither be counted into the
     // denominator nor selected as the p95 value.
     const latencyCount = r.latency_count ?? 0;
     const baseUrl: string | null = r.base_url || null;
     const p95Row = latencyCount > 0
-      ? (db.get(`
+      ? (await db.get(`
     SELECT r.latency_ms FROM requests r
     LEFT JOIN api_keys k ON k.id = r.key_id
     WHERE r.created_at >= ? AND r.platform = ? AND ${ENDPOINT_ID_SQL} = ? AND r.latency_ms IS NOT NULL
@@ -378,10 +378,10 @@ analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
   }));
 });
 
-analyticsRouter.get('/by-client', (req: Request, res: Response) => {
+analyticsRouter.get('/by-client', async (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
   const since = getSinceTimestamp(range);
-  const rows = getDb().all(`
+  const rows = await getDb().all(`
     SELECT
       COALESCE(client_agent, 'unknown') AS client_agent,
       COUNT(*) AS requests,
@@ -389,7 +389,7 @@ analyticsRouter.get('/by-client', (req: Request, res: Response) => {
       AVG(latency_ms) AS avg_latency_ms,
       SUM(input_tokens) AS total_input_tokens,
       SUM(output_tokens) AS total_output_tokens,
-      MAX(strftime('%Y-%m-%dT%H:%M:%SZ', created_at)) AS last_seen_at
+      MAX(to_char(created_at::timestamp, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) AS last_seen_at
     FROM requests
     WHERE created_at >= ?
     GROUP BY client_agent
@@ -410,12 +410,12 @@ analyticsRouter.get('/by-client', (req: Request, res: Response) => {
 // Stats grouped by API key. Raw-row scoped (the hourly aggregate has no key
 // dimension), LEFT JOINed to api_keys so a request whose key was later deleted
 // still shows up with a null label — the keyId is always returned.
-analyticsRouter.get('/by-key', (req: Request, res: Response) => {
+analyticsRouter.get('/by-key', async (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
   const since = getSinceTimestamp(range);
   const db = getDb();
 
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT
       r.key_id as key_id,
       k.label as label,
@@ -448,14 +448,15 @@ analyticsRouter.get('/by-key', (req: Request, res: Response) => {
 });
 
 // Timeline data
-analyticsRouter.get('/timeline', (req: Request, res: Response) => {
+analyticsRouter.get('/timeline', async (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
   const interval = (req.query.interval as string) ?? (range === '24h' ? 'hour' : 'day');
   const since = getSinceTimestamp(range);
   const db = getDb();
 
   // dateFormat is a hardcoded whitelist — never user-controlled.
-  const dateFormat = interval === 'hour' ? '%Y-%m-%dT%H:00:00' : '%Y-%m-%d';
+  // PostgreSQL's to_char patterns, not SQLite's strftime ones.
+  const dateFormat = interval === 'hour' ? 'YYYY-MM-DD"T"HH24:00:00' : 'YYYY-MM-DD';
 
   // tzOffset: viewer's local offset from UTC in minutes (480 = UTC+8), sent by
   // the browser so hour/day bucket boundaries follow the viewer's wall clock
@@ -465,14 +466,13 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
   const tzOffset = Number.isInteger(rawOffset) && rawOffset >= -720 && rawOffset <= 840 ? rawOffset : 0;
   // The single current offset applies to the whole range (SQLite has no tz
   // database), so buckets on the far side of a DST transition sit 1h off.
-  const tzModifier = `${tzOffset >= 0 ? '+' : '-'}${Math.abs(tzOffset)} minutes`;
 
   // Read from request_hourly (hour-bucketed) for both 'hour' and 'day'
   // intervals. Day buckets are rolled up via strftime on the hour column,
   // which keeps the timeline accurate past the raw-row prune window.
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT
-      strftime(?, hour, ?) as timestamp,
+      to_char((hour::timestamp + (? || ' minutes')::interval), ?) as timestamp,
       SUM(total_requests) as requests,
       SUM(success_count) as success_count,
       SUM(error_count) as failure_count,
@@ -482,7 +482,7 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
     WHERE hour >= ?
     GROUP BY timestamp
     ORDER BY timestamp ASC
-  `, [dateFormat, tzModifier, since]) as any[];
+  `, [tzOffset, dateFormat, since]) as any[];
 
   res.json(rows.map(r => ({
     timestamp: r.timestamp,
@@ -495,7 +495,7 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
 });
 
 // Error distribution (grouped by error type and platform)
-analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
+analyticsRouter.get('/error-distribution', async (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
   const since = getSinceTimestamp(range);
   const db = getDb();
@@ -506,7 +506,7 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
   // "Too Many Requests", "Timeout"), which all landed in 'Other' before. The
   // old '%invalid.*key%' pattern was regex syntax pasted into LIKE, where '.'
   // and '*' are literal characters, so it matched nothing real.
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT
       platform,
       model_id,
@@ -528,7 +528,7 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
   `, [since]) as any[];
 
   // Also get totals by category
-  const byCategory = db.all(`
+  const byCategory = await db.all(`
     SELECT
       CASE
         WHEN lower(error) LIKE '%429%' OR lower(error) LIKE '%rate limit%' OR lower(error) LIKE '%too many%' OR lower(error) LIKE '%quota%' THEN 'Rate Limited (429)'
@@ -551,7 +551,7 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
   // relay, not one bar pooling every relay's failures under "custom" (#889) —
   // a bar the operator cannot act on, because it never says which endpoint is
   // the one failing.
-  const byPlatformRows = db.all(`
+  const byPlatformRows = await db.all(`
     SELECT r.platform, ${ENDPOINT_ID_SQL} as base_url, COUNT(*) as count
     FROM requests r
     LEFT JOIN api_keys k ON k.id = r.key_id
@@ -579,7 +579,7 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
 });
 
 // Recent errors
-analyticsRouter.get('/errors', (req: Request, res: Response) => {
+analyticsRouter.get('/errors', async (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
   const since = getSinceTimestamp(range);
   const db = getDb();
@@ -587,7 +587,7 @@ analyticsRouter.get('/errors', (req: Request, res: Response) => {
   // Joined to the serving key so each error names the endpoint it came from.
   // Without it every custom relay's failures read as a bare "custom" in the
   // panel (#889) and the operator has to guess which one broke.
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT r.id, r.platform, ${ENDPOINT_ID_SQL} as base_url, r.model_id, r.error,
            r.latency_ms, r.created_at
     FROM requests r
@@ -616,7 +616,7 @@ analyticsRouter.get('/errors', (req: Request, res: Response) => {
 // IP and User-Agent (all local clients share the unified key, so client_ip is
 // the only per-caller discriminator; UA disambiguates tunneled loopback calls).
 // Reads the raw `requests` table, so history is bounded by the retention prune.
-analyticsRouter.get('/requests', (req: Request, res: Response) => {
+analyticsRouter.get('/requests', async (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
   const since = getSinceTimestamp(range);
   const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 100, 1), 500);
@@ -688,15 +688,15 @@ analyticsRouter.get('/requests', (req: Request, res: Response) => {
     ...providerFilterParams,
   ];
 
-  const total = (db.get( `SELECT COUNT(*) as c FROM requests r
+  const total = (await db.get( `SELECT COUNT(*) as c FROM requests r
        LEFT JOIN api_keys k ON k.id = r.key_id
       WHERE r.created_at >= ?${filterSql}`, [since, ...filterParams]) as { c: number }).c;
 
-  const rows = db.all( `
+  const rows = await db.all( `
     SELECT r.id, r.platform, r.model_id, r.requested_model, r.request_type, r.status,
            r.input_tokens, r.output_tokens, r.latency_ms, r.error,
            r.client_ip, r.client_user_agent, r.client_agent,
-           strftime('%Y-%m-%dT%H:%M:%SZ', r.created_at) as created_at_iso,
+           to_char(r.created_at::timestamp, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at_iso,
            (SELECT COUNT(*) FROM request_attempts a WHERE a.request_id = r.id) as attempt_count,
            k.label as key_label
     FROM requests r
@@ -742,7 +742,7 @@ analyticsRouter.get('/requests', (req: Request, res: Response) => {
 // key ids are never exposed. Attempts are keyed to the ladder's terminal row
 // (the success row, or the last failure row when it exhausted), so mid-ladder
 // error rows legitimately return an empty attempts array.
-analyticsRouter.get('/requests/:id', (req: Request, res: Response) => {
+analyticsRouter.get('/requests/:id', async (req: Request, res: Response) => {
   const id = Number.parseInt(req.params.id as string, 10);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: 'invalid request id' });
@@ -750,11 +750,11 @@ analyticsRouter.get('/requests/:id', (req: Request, res: Response) => {
   }
   const db = getDb();
 
-  const r = db.get(`
+  const r = await db.get(`
     SELECT id, platform, model_id, requested_model, served_model, request_type, status,
            input_tokens, output_tokens, latency_ms, ttfb_ms, error,
            client_ip, client_user_agent, client_agent,
-           strftime('%Y-%m-%dT%H:%M:%SZ', created_at) as created_at_iso
+           to_char(created_at::timestamp, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at_iso
     FROM requests
     WHERE id = ?
   `, [id]) as any;
@@ -763,7 +763,7 @@ analyticsRouter.get('/requests/:id', (req: Request, res: Response) => {
     return;
   }
 
-  const attempts = db.all(`
+  const attempts = await db.all(`
     SELECT ordinal, platform, model_id, key_ordinal, key_label, outcome, start_offset_ms, duration_ms, error_summary
     FROM request_attempts
     WHERE request_id = ?

@@ -41,7 +41,7 @@ export class GizmoProvider extends OpenAICompatProvider {
     if (!response.ok && ![401, 403].includes(response.status)) {
       throw providerHttpError(response, 'Gizmo key validation is temporarily inconclusive');
     }
-    return super.validationResult(response);
+    return await super.validationResult(response);
   }
 
   private textOptions(options?: CompletionOptions): CompletionOptions {
@@ -54,7 +54,7 @@ export class GizmoProvider extends OpenAICompatProvider {
 
   override async chatCompletion(apiKey: string, messages: ChatMessage[], modelId: string,
     options?: CompletionOptions, quotaContext?: QuotaObservationContext): Promise<ChatCompletionResponse> {
-    return super.chatCompletion(apiKey, textMessages(messages, options), modelId, this.textOptions(options), quotaContext);
+    return await super.chatCompletion(apiKey, textMessages(messages, options), modelId, this.textOptions(options), quotaContext);
   }
 
   override async *streamChatCompletion(apiKey: string, messages: ChatMessage[], modelId: string,

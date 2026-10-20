@@ -53,13 +53,13 @@ interface ProfileRow {
  * disabled profile is rejected exactly like an unknown key so a revoked
  * client can't distinguish "disabled" from "deleted".
  */
-export function resolveAuth(token: string | undefined): ResolvedAuth | null {
+export async function resolveAuth(token: string | undefined): Promise<ResolvedAuth | null> {
   if (!token) return null;
-  if (timingSafeStringEqual(token, getUnifiedApiKey())) {
+  if (timingSafeStringEqual(token, await getUnifiedApiKey())) {
     return { kind: 'unified', systemPrompt: null };
   }
   if (!token.startsWith(CLIENT_PROFILE_KEY_PREFIX)) return null;
-  const row = getDb().get('SELECT id, name, system_prompt, enabled FROM client_profiles WHERE token_hash = ?', [hashClientProfileKey(token)]) as ProfileRow | undefined;
+  const row = await getDb().get('SELECT id, name, system_prompt, enabled FROM client_profiles WHERE token_hash = ?', [hashClientProfileKey(token)]) as ProfileRow | undefined;
   if (!row || !row.enabled) return null;
   const prompt = row.system_prompt != null && row.system_prompt.trim().length > 0
     ? row.system_prompt

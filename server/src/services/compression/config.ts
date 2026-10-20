@@ -53,9 +53,9 @@ export const compressionUpdateSchema = z.object({
   prefixFreeze: z.boolean().optional(),
 }).strict();
 
-function safeSetting(): string | undefined {
+async function safeSetting(): Promise<string | undefined> {
   try {
-    return getSetting(COMPRESSION_SETTING);
+    return await getSetting(COMPRESSION_SETTING);
   } catch {
     return undefined;
   }
@@ -86,8 +86,8 @@ function mergeDefaults(value: Partial<CompressionConfig>): CompressionConfig {
   };
 }
 
-export function getCompressionConfig(): CompressionConfig {
-  const raw = safeSetting();
+export async function getCompressionConfig(): Promise<CompressionConfig> {
+  const raw = await safeSetting();
   if (!raw) return mergeDefaults({ mode: envMode() });
   try {
     const parsed = storedConfigSchema.parse(JSON.parse(raw));
@@ -97,9 +97,9 @@ export function getCompressionConfig(): CompressionConfig {
   }
 }
 
-export function setCompressionConfig(update: z.infer<typeof compressionUpdateSchema>): CompressionConfig {
+export async function setCompressionConfig(update: z.infer<typeof compressionUpdateSchema>): Promise<CompressionConfig> {
   const parsed = compressionUpdateSchema.parse(update);
-  const current = getCompressionConfig();
+  const current = await getCompressionConfig();
   const engines = { ...current.engines };
   for (const [id, patch] of Object.entries(parsed.engines ?? {})) {
     engines[id] = {
@@ -121,8 +121,8 @@ export function setCompressionConfig(update: z.infer<typeof compressionUpdateSch
   else if (parsed.autoTriggerEstTokens !== undefined) next.autoTriggerEstTokens = parsed.autoTriggerEstTokens;
   if (parsed.targetTokens === null) delete next.targetTokens;
   else if (parsed.targetTokens !== undefined) next.targetTokens = parsed.targetTokens;
-  setSetting(COMPRESSION_SETTING, JSON.stringify(next));
-  return getCompressionConfig();
+  await setSetting(COMPRESSION_SETTING, JSON.stringify(next));
+  return await getCompressionConfig();
 }
 
 export type CompressionDirective = 'default' | 'off' | 'on' | Exclude<CompressionMode, 'off'>;

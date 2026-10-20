@@ -75,8 +75,8 @@ interface CachedResult {
  */
 export const UPDATE_CHECK_SETTING = 'update_check_enabled';
 
-export function isAutoUpdateCheckEnabled(): boolean {
-  return getSetting(UPDATE_CHECK_SETTING) === '1';
+export async function isAutoUpdateCheckEnabled(): Promise<boolean> {
+  return await getSetting(UPDATE_CHECK_SETTING) === '1';
 }
 
 /** The GitHub latest release, reduced to what the dashboard reminder renders. */
@@ -346,9 +346,9 @@ function parseAtomFallback(
 export function createUpdateRouter(options: UpdateRouterOptions = {}): Router {
   const router = Router();
   const env = options.env ?? process.env;
-  const fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const execFile: ExecFile = options.execFile ?? ((file, args, execOptions) => (
-    execFileAsync(file, args, execOptions)
+  const fetchImpl = options.fetch ?? (async (input, init) => await globalThis.fetch(input, init));
+  const execFile: ExecFile = options.execFile ?? (async (file, args, execOptions) => (
+    await execFileAsync(file, args, execOptions)
   ));
   const now = options.now ?? Date.now;
   const logger = options.logger ?? console;
@@ -486,15 +486,15 @@ export function createUpdateRouter(options: UpdateRouterOptions = {}): Router {
     };
   }
 
-  function check(currentIdentity: Identity): Promise<CheckResult> {
+  async function check(currentIdentity: Identity): Promise<CheckResult> {
     const currentTime = now();
     if (cache && currentTime - cache.cachedAt < CACHE_TTL_MS) {
-      return Promise.resolve(cache.result);
+      return await Promise.resolve(cache.result);
     }
     if (failedAt !== null && currentTime - failedAt < FAILURE_TTL_MS) {
-      return Promise.reject(new Error('GitHub update check failed recently'));
+      return await Promise.reject(new Error('GitHub update check failed recently'));
     }
-    if (inFlight) return inFlight;
+    if (inFlight) return await inFlight;
 
     const request = performCheck(currentIdentity)
       .then((result) => {
@@ -544,15 +544,15 @@ export function createUpdateRouter(options: UpdateRouterOptions = {}): Router {
     };
   }
 
-  function latestRelease(): Promise<LatestRelease> {
+  async function latestRelease(): Promise<LatestRelease> {
     const currentTime = now();
     if (releaseCache && currentTime - releaseCache.cachedAt < RELEASE_CACHE_TTL_MS) {
-      return Promise.resolve(releaseCache.result);
+      return await Promise.resolve(releaseCache.result);
     }
     if (releaseFailedAt !== null && currentTime - releaseFailedAt < FAILURE_TTL_MS) {
-      return Promise.reject(new Error('GitHub release check failed recently'));
+      return await Promise.reject(new Error('GitHub release check failed recently'));
     }
-    if (releaseInFlight) return releaseInFlight;
+    if (releaseInFlight) return await releaseInFlight;
 
     const request = performReleaseCheck()
       .then((result) => {

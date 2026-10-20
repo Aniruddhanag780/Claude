@@ -78,9 +78,9 @@ let lastSnapshot: HealthSnapshot | null = null;
 
 /** Compute the current healthy-provider ratio from the key table. Exported for
  *  tests to inject a fake DB; callers normally use updateDegradationState. */
-export function computeHealthSnapshot(): HealthSnapshot {
+export async function computeHealthSnapshot(): Promise<HealthSnapshot> {
   const db = getDb();
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT platform, status
     FROM api_keys
     WHERE enabled = 1
@@ -103,8 +103,8 @@ export function computeHealthSnapshot(): HealthSnapshot {
 
 /** Re-evaluate the degraded state from the current key table. Call this after
  *  every health pass; also callable on demand (dashboard, router entry). */
-export function updateDegradationState(now = Date.now()): DegradationStatus {
-  const snapshot = computeHealthSnapshot();
+export async function updateDegradationState(now = Date.now()): Promise<DegradationStatus> {
+  const snapshot = await computeHealthSnapshot();
 
   // Degradation is only meaningful with enough providers to judge.
   if (snapshot.totalProviders < DEGRADED_MIN_PROVIDERS) {
@@ -112,7 +112,7 @@ export function updateDegradationState(now = Date.now()): DegradationStatus {
     state.degradedAt = null;
     state.belowSince = null;
     state.recoveredSince = null;
-    return getDegradationStatus();
+    return await getDegradationStatus();
   }
 
   const belowThreshold = snapshot.ratio < DEGRADED_HEALTHY_RATIO;
@@ -147,15 +147,15 @@ export function updateDegradationState(now = Date.now()): DegradationStatus {
     }
   }
 
-  return getDegradationStatus();
+  return await getDegradationStatus();
 }
 
 export function isDegraded(): boolean {
   return state.state === 'degraded';
 }
 
-export function getDegradationStatus(): DegradationStatus {
-  const snapshot = lastSnapshot ?? computeHealthSnapshot();
+export async function getDegradationStatus(): Promise<DegradationStatus> {
+  const snapshot = lastSnapshot ?? await computeHealthSnapshot();
   return {
     ...snapshot,
     state: state.state,

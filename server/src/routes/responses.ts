@@ -666,7 +666,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
 
   // Same auth as the proxy (accepts Bearer or x-api-key): unified key, or a
   // client-profile key carrying a server-enforced system prompt (#411).
-  const auth = resolveAuth(extractApiToken(req));
+  const auth = await resolveAuth(extractApiToken(req));
   if (!auth) {
     res.status(401).json({ error: { message: 'Invalid API key', type: 'authentication_error' } });
     return;
@@ -746,7 +746,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
     return Array.isArray(content)
       && content.some(block => block && typeof block === 'object' && 'cache_control' in block);
   });
-  const compressionResult = compressRequest(messages, {
+  const compressionResult = await compressRequest(messages, {
     header: req.headers['x-freellm-compress'],
     tools,
     cacheControlPrefixLength: hasCacheControl ? messages.length : 0,
@@ -773,7 +773,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
   // a vision-capable peer (#118, #125). A rough per-image token cost keeps
   // budget routing from being skewed by content the text heuristic can't see.
   const hasImage = messageHasImage(messages);
-  if (hasImage && !hasEnabledVisionModel()) {
+  if (hasImage && !await hasEnabledVisionModel()) {
     res.status(422).json({
       error: {
         message: 'This request includes an image, but no vision-capable model is enabled. Enable a vision model (e.g. Gemini 2.5 Flash, Llama 4 Scout) in the Fallback Chain.',
@@ -796,7 +796,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
   // Guardrail: per-request token budget (request_max_tokens_budget, default
   // off). A request with no max_output_tokens gets its output capped to the
   // budget remainder instead of a rejection.
-  const budgetCheck = applyTokenBudget(estimatedInputTokens + imageCount * IMAGE_TOKEN_ESTIMATE, completionOpts.max_tokens);
+  const budgetCheck = await applyTokenBudget(estimatedInputTokens + imageCount * IMAGE_TOKEN_ESTIMATE, completionOpts.max_tokens);
   if (budgetCheck.rejection) {
     res.status(413).json({
       error: { message: tokenBudgetMessage(budgetCheck.rejection), type: 'invalid_request_error', code: 'request_token_budget' },
@@ -825,7 +825,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
 
   if (isAutoModel(requestedModelLabel)) {
     try {
-      resolvedChain = resolveRoutingChain(requestedModelLabel);
+      resolvedChain = await resolveRoutingChain(requestedModelLabel);
     } catch (err: any) {
       if (err?.status === 400) {
         res.status(400).json({
@@ -836,7 +836,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
       throw err;
     }
     stickyStrategyKey = resolvedChain.strategyKey === 'auto' ? undefined : resolvedChain.strategyKey;
-    preferredModel = resolveStickyPreference(
+    preferredModel = await resolveStickyPreference(
       getStickyModel(messages, sessionIdHeader, stickyStrategyKey),
       resolvedChain.chain,
     );
@@ -845,13 +845,13 @@ export async function handleResponses(req: Request, res: Response): Promise<void
     // judge each resolve through the normal router inside runFusion below.
   } else {
     const db = getDb();
-    const resolved = isUnifyEnabled() ? resolveRequestedIdForDispatch(requestedModelLabel, getModelGroups()) : null;
+    const resolved = isUnifyEnabled() ? resolveRequestedIdForDispatch(requestedModelLabel, await getModelGroups()) : null;
     const members = resolved?.memberDbIds ?? null;
     if (members && members.length > 0) {
-      groupChain = resolveModelGroupCandidates(members, resolved!.demotedDbIds);
+      groupChain = await resolveModelGroupCandidates(members, resolved!.demotedDbIds);
       if (groupChain.length === 0) {
         const placeholders = members.map(() => '?').join(',');
-        const anyEnabled = db.get( `SELECT 1 FROM models WHERE id IN (${placeholders}) AND enabled = 1 LIMIT 1`, [...members]);
+        const anyEnabled = await db.get( `SELECT 1 FROM models WHERE id IN (${placeholders}) AND enabled = 1 LIMIT 1`, [...members]);
         const reason = anyEnabled ? 'has no providers with an enabled key' : 'is disabled';
         res.status(400).json({
           error: {
@@ -865,11 +865,11 @@ export async function handleResponses(req: Request, res: Response): Promise<void
       const sticky = getStickyModel(messages, sessionIdHeader, requestedModelLabel);
       preferredModel = (sticky != null && groupChain.some(r => r.model_db_id === sticky)) ? sticky : undefined;
     } else {
-      const enabled = db.get('SELECT id FROM models WHERE model_id = ? AND enabled = 1', [requestedModelLabel]) as { id: number } | undefined;
+      const enabled = await db.get('SELECT id FROM models WHERE model_id = ? AND enabled = 1', [requestedModelLabel]) as { id: number } | undefined;
       if (enabled) {
         preferredModel = enabled.id;
       } else {
-        const disabled = db.get('SELECT id FROM models WHERE model_id = ?', [requestedModelLabel]) as { id: number } | undefined;
+        const disabled = await db.get('SELECT id FROM models WHERE model_id = ?', [requestedModelLabel]) as { id: number } | undefined;
         const reason = disabled ? 'is disabled' : 'is not in the catalog';
         res.status(400).json({
           error: {
@@ -889,7 +889,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
   // function tools we can forward to chat providers, because Codex may include
   // built-in tool descriptors alongside or instead of function descriptors.
   const wantsTools = requestDeclaresToolUse(reqData);
-  if (wantsTools && !hasEnabledToolsModel()) {
+  if (wantsTools && !await hasEnabledToolsModel()) {
     res.status(422).json({
       error: {
         message: 'This request includes tools, but no tool-capable model is enabled. Enable a tool-calling model (e.g. GPT-OSS 120B, Gemini 3.5 Flash, GLM-4.7) in the Fallback Chain.',
@@ -1176,14 +1176,14 @@ export async function handleResponses(req: Request, res: Response): Promise<void
     logIdentity: { surface: 'responses', requestId: requestGroupId, requestedModel: requestedModelLabel },
     clientGone: () => clientGone,
     abortInFlight: () => hedgeAbort.abort(newHedgeAbortError()),
-    route: () => {
+    route: async () => {
       // Task-type routing (#1127): same header/derivation as /chat/completions.
       const taskType = resolveTaskType(req, tools, messages);
       // #507: inflate the routing estimate from any provider-reported REQUESTED
       // size latched onto state so the existing size gates in router.ts skip
       // low-TPM / small-context models on retry.
       const routingTotal = fallbackRoutingTokens(state, estimatedTotal, outputReserve);
-      return routeRequest(routingTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? resolvedChain?.chain, completionOpts.response_format !== undefined, state.skipPlatforms.size > 0 ? state.skipPlatforms : undefined, outputReserve, taskType);
+      return await routeRequest(routingTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? resolvedChain?.chain, completionOpts.response_format !== undefined, state.skipPlatforms.size > 0 ? state.skipPlatforms : undefined, outputReserve, taskType);
     },
     dispatch: async (route, attempt, ctx) => {
       const contextBudget = routeOutputBudget(route, estimatedInputTokens);
@@ -1234,14 +1234,14 @@ export async function handleResponses(req: Request, res: Response): Promise<void
         // the first raw chunk, even a role-only one). Until then a connect-time
         // error, an empty completion, or an unparseable dialect turn fails over
         // on the same connection with no bytes on the wire. Idempotent.
-        const commit = () => {
+        const commit = async () => {
           if (streamStarted) return;
           if (ttfbMs === null) ttfbMs = Date.now() - start;
           res.setHeader('Content-Type', 'text/event-stream');
           res.setHeader('Cache-Control', 'no-cache');
           res.setHeader('Connection', 'keep-alive');
           res.setHeader('X-Routed-Via', routedViaValue(route.platform, route.modelId));
-          setFallbackHeaders(res, attempt, attemptLog);
+          await setFallbackHeaders(res, attempt, attemptLog);
           const skeleton = {
             id: responseId, object: 'response', created_at: nowUnix(),
             status: 'in_progress', model: route.modelId, output: [], output_text: '',
@@ -1259,8 +1259,8 @@ export async function handleResponses(req: Request, res: Response): Promise<void
         // when the model emits tool_calls first, the function_call items own
         // the low indices). Every later text delta/done must reference this
         // same index or the SDK snapshot lookup misroutes the deltas.
-        const openTextItem = (text: string) => {
-          commit();
+        const openTextItem = async (text: string) => {
+          await commit();
           msgItemId = newId('msg');
           textOutputIndex = outputIndex++;
           sse('response.output_item.added', {
@@ -1317,7 +1317,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
               totalOutputTokens += Math.ceil((text.length + reasoning.length) / 4);
               if (reasoning.length > 0) totalReasoningTokens += Math.ceil(reasoning.length / 4);
               if (dialectMode === 'passthrough') {
-                if (msgItemId === null) openTextItem('');
+                if (msgItemId === null) await openTextItem('');
                 sse('response.output_text.delta', {
                   item_id: msgItemId, output_index: textOutputIndex, content_index: 0, delta: text,
                 });
@@ -1330,7 +1330,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
                     dialectMode = 'dialect';
                   } else if (!couldBecomeDialectMarker(probe) || heldText.length > 256) {
                     dialectMode = 'passthrough';
-                    openTextItem(heldText);
+                    await openTextItem(heldText);
                     heldText = '';
                   }
                 }
@@ -1347,7 +1347,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
               let acc = toolAcc.get(idx);
               if (!acc) {
                 // First time we see this tool call: open a new output item.
-                commit();
+                await commit();
                 if (msgItemId !== null && msgText.length > 0) {
                   // close the text item (at its own output index) before starting a function_call item
                   sse('response.output_text.done', { item_id: msgItemId, output_index: textOutputIndex, content_index: 0, text: msgText });
@@ -1387,11 +1387,11 @@ export async function handleResponses(req: Request, res: Response): Promise<void
               // Rescued calls become function_call items, exactly as if the
               // provider had streamed them structurally.
               console.log(`[Responses] Rescued ${rescue.calls.length} inline tool call(s) from ${route.displayName}`);
-              if (rescue.cleanText.length > 0 && msgItemId === null) openTextItem(rescue.cleanText);
+              if (rescue.cleanText.length > 0 && msgItemId === null) await openTextItem(rescue.cleanText);
               let rescuedIdx = 0;
               for (const c of rescue.calls) {
                 const idx = 1000 + rescuedIdx++; // synthetic accumulator keys, past any provider index
-                commit();
+                await commit();
                 const acc = {
                   outputIndex: outputIndex++,
                   itemId: newId('fc'), callId: newId('call'), name: c.name, args: c.arguments,
@@ -1404,7 +1404,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
               }
             } else if (msgItemId === null) {
               // Plain short answer that never left the hold window (e.g. "Hi").
-              openTextItem(heldText);
+              await openTextItem(heldText);
             }
             heldText = '';
           }
@@ -1472,7 +1472,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
           sse('response.completed', { response: finalResponse });
           res.end();
 
-          recordUpstreamSuccess(route, estimatedInputTokens + totalOutputTokens, state);
+          await recordUpstreamSuccess(route, estimatedInputTokens + totalOutputTokens, state);
           setStickyModel(messages, route.modelDbId, sessionIdHeader, stickyStrategyKey);
           traceRouteEvent('Responses', {
             event: 'ok',
@@ -1484,7 +1484,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
             inputTokens: estimatedInputTokens,
             outputTokens: totalOutputTokens,
           });
-          logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens, totalOutputTokens, Date.now() - start, null, ttfbMs, null, null, 'http');
+          await logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens, totalOutputTokens, Date.now() - start, null, ttfbMs, null, null, 'http');
           return 'done';
         } catch (streamErr: any) {
           // Client abort mid-stream: the pump's own `if (clientGone) break`
@@ -1507,7 +1507,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
               latencyMs: Date.now() - start,
               error: safe,
             });
-            logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, safe, ttfbMs, null, null, 'http', failureAttributionFor(streamErr));
+            await logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, safe, ttfbMs, null, null, 'http', await failureAttributionFor(streamErr));
             sse('response.failed', { response: { id: responseId, object: 'response', status: 'failed', error: { message: `Provider error (${route.displayName}): stream interrupted`, type: 'stream_error' } } });
             res.end();
             return 'committed';
@@ -1550,7 +1550,7 @@ export async function handleResponses(req: Request, res: Response): Promise<void
 
       // Opt-in schema verdict on what the repair could not fix. Thrown before
       // anything is written, so the failover hop is invisible to the client.
-      if (isToolArgumentValidationEnabled() && toolCalls.length > 0) {
+      if (await isToolArgumentValidationEnabled() && toolCalls.length > 0) {
         const invalid = invalidToolCallReasons(toolCalls, toolSchemas);
         if (invalid.length > 0) throw invalidToolArgumentsError(route.displayName, invalid);
       }
@@ -1597,11 +1597,11 @@ export async function handleResponses(req: Request, res: Response): Promise<void
       // Usage fallback: a missing provider `usage` block used to record 0
       // tokens against the rate-limit ledger; promptTokens/completionTokens
       // above already carry the chars/4 estimate.
-      recordUpstreamSuccess(route, result.usage?.total_tokens ?? (promptTokens + completionTokens), state);
+      await recordUpstreamSuccess(route, result.usage?.total_tokens ?? (promptTokens + completionTokens), state);
       setStickyModel(messages, route.modelDbId, sessionIdHeader, stickyStrategyKey);
 
       res.setHeader('X-Routed-Via', routedViaValue(route.platform, route.modelId));
-      setFallbackHeaders(res, attempt, attemptLog);
+      await setFallbackHeaders(res, attempt, attemptLog);
       res.json(buildResponseObject({
         id: responseId, model: route.modelId, text, toolCalls,
         promptTokens, completionTokens, reasoningTokens,
@@ -1617,10 +1617,10 @@ export async function handleResponses(req: Request, res: Response): Promise<void
         inputTokens: promptTokens,
         outputTokens: completionTokens,
       });
-      logRequest(route.platform, route.modelId, route.keyId, 'success', promptTokens, completionTokens, Date.now() - start, null, null, null, null, 'http');
+      await logRequest(route.platform, route.modelId, route.keyId, 'success', promptTokens, completionTokens, Date.now() - start, null, null, null, null, 'http');
       return 'done';
     },
-    logFailure: (route, err, attempt) => {
+    logFailure: async (route, err, attempt) => {
       const latency = Date.now() - start;
       const safeError = sanitizeProviderErrorMessage(err.message);
       traceRouteEvent('Responses', {
@@ -1632,32 +1632,32 @@ export async function handleResponses(req: Request, res: Response): Promise<void
         latencyMs: latency,
         error: safeError,
       });
-      logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, latency, safeError, null, null, null, 'http', failureAttributionFor(err));
+      await logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, latency, safeError, null, null, null, 'http', await failureAttributionFor(err));
     },
-    onFatal: (route, err, attempt) => {
-      setFallbackHeaders(res, attempt, attemptLog);
+    onFatal: async (route, err, attempt) => {
+      await setFallbackHeaders(res, attempt, attemptLog);
       res.status(502).json({ error: { message: `Provider error (${route.displayName}): ${sanitizeProviderErrorMessage(err.message)}`, type: 'provider_error' } });
     },
-    onRoutingExhausted: (lastError, routeErr, exhaustion, info) => {
+    onRoutingExhausted: async (lastError, routeErr, exhaustion, info) => {
       if (streamStarted) {
         // Headers are already on the wire — the honest status/Retry-After can
         // only travel in the failed-event payload.
         sse('response.failed', { response: { id: responseId, object: 'response', status: 'failed', error: exhaustionErrorPayload(exhaustion) } });
         res.end();
       } else {
-        setFallbackHeaders(res, info.attempts.length, info.attempts);
+        await setFallbackHeaders(res, info.attempts.length, info.attempts);
         setExhaustionHeaders(res, exhaustion);
         res.status(exhaustion.status).json({ error: exhaustionErrorPayload(exhaustion) });
       }
     },
-    onExhausted: (exhaustion, info) => {
+    onExhausted: async (exhaustion, info) => {
       // The streaming skeleton may already be on the wire — close the SSE stream
       // with a failed event instead of writing JSON onto a committed response.
       if (streamStarted) {
         sse('response.failed', { response: { id: responseId, object: 'response', status: 'failed', error: exhaustionErrorPayload(exhaustion) } });
         res.end();
       } else {
-        setFallbackHeaders(res, info.attempts.length, info.attempts);
+        await setFallbackHeaders(res, info.attempts.length, info.attempts);
         setExhaustionHeaders(res, exhaustion);
         res.status(exhaustion.status).json({ error: exhaustionErrorPayload(exhaustion) });
       }

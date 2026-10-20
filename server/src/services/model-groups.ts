@@ -95,12 +95,12 @@ export function isUnifyEnabled(): boolean {
   return true;
 }
 
-export function setUnifyEnabled(on: boolean): void {
-  setSetting(UNIFY_ENABLED_KEY, on ? '1' : '0');
+export async function setUnifyEnabled(on: boolean): Promise<void> {
+  await setSetting(UNIFY_ENABLED_KEY, on ? '1' : '0');
 }
 
-export function getUnifyOverrides(): UnifyOverrides {
-  const raw = getSetting(UNIFY_OVERRIDES_KEY);
+export async function getUnifyOverrides(): Promise<UnifyOverrides> {
+  const raw = await getSetting(UNIFY_OVERRIDES_KEY);
   if (!raw) return EMPTY_OVERRIDES;
   try {
     const parsed = unifyOverridesSchema.safeParse(JSON.parse(raw));
@@ -109,9 +109,9 @@ export function getUnifyOverrides(): UnifyOverrides {
   return EMPTY_OVERRIDES;
 }
 
-export function setUnifyOverrides(input: unknown): UnifyOverrides {
+export async function setUnifyOverrides(input: unknown): Promise<UnifyOverrides> {
   const norm = unifyOverridesSchema.parse(input);
-  setSetting(UNIFY_OVERRIDES_KEY, JSON.stringify(norm));
+  await setSetting(UNIFY_OVERRIDES_KEY, JSON.stringify(norm));
   return norm;
 }
 
@@ -381,9 +381,9 @@ let groupsCache: { fingerprint: string; groups: ModelGroup[] } | null = null;
  * Group the whole catalog (enabled + disabled rows so availability can be shown
  * and resolution is complete), applying the persisted overrides.
  */
-export function getModelGroups(): ModelGroup[] {
+export async function getModelGroups(): Promise<ModelGroup[]> {
   const db = getDb();
-  const rows = db.all(`
+  const rows = await db.all(`
     SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.endpoint_scope,
            (SELECT k.group_label FROM api_keys k
@@ -394,7 +394,7 @@ export function getModelGroups(): ModelGroup[] {
     FROM models m
     ORDER BY m.id
   `) as GroupableRow[];
-  const overrides = getUnifyOverrides();
+  const overrides = await getUnifyOverrides();
   let fingerprint = JSON.stringify(overrides);
   for (const r of rows) {
     fingerprint += ` ${r.model_db_id}${r.platform}${r.model_id}${r.display_name}${r.intelligence_rank}${r.endpoint_scope ?? ''}${r.endpoint_group ?? ''}`;

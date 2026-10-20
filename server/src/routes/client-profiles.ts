@@ -62,8 +62,8 @@ function toJson(row: ProfileRow) {
   };
 }
 
-function getProfile(id: number): ProfileRow | undefined {
-  return getDb().get('SELECT * FROM client_profiles WHERE id = ?', [id]) as ProfileRow | undefined;
+async function getProfile(id: number): Promise<ProfileRow | undefined> {
+  return await getDb().get('SELECT * FROM client_profiles WHERE id = ?', [id]) as ProfileRow | undefined;
 }
 
 function parseId(req: Request, res: Response): number | null {
@@ -79,12 +79,12 @@ function notFound(res: Response): void {
   res.status(404).json({ error: { message: 'Client profile not found' } });
 }
 
-clientProfilesRouter.get('/', (_req: Request, res: Response) => {
-  const rows = getDb().all('SELECT * FROM client_profiles ORDER BY id') as ProfileRow[];
+clientProfilesRouter.get('/', async (_req: Request, res: Response) => {
+  const rows = await getDb().all('SELECT * FROM client_profiles ORDER BY id') as ProfileRow[];
   res.json(rows.map(toJson));
 });
 
-clientProfilesRouter.post('/', (req: Request, res: Response) => {
+clientProfilesRouter.post('/', async (req: Request, res: Response) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: 'A profile name is required' } });
@@ -93,16 +93,16 @@ clientProfilesRouter.post('/', (req: Request, res: Response) => {
   const key = mintClientProfileKey();
   const { encrypted, iv, authTag } = encrypt(key);
   const prompt = parsed.data.systemPrompt?.trim() || null;
-  const info = getDb().run(`
+  const info = await getDb().run(`
     INSERT INTO client_profiles (name, token_hash, encrypted_key, iv, auth_tag, system_prompt)
     VALUES (?, ?, ?, ?, ?, ?) RETURNING id
   `, [parsed.data.name, hashClientProfileKey(key), encrypted, iv, authTag, prompt]);
-  const row = getProfile(Number(info.lastInsertRowid))!;
+  const row = (await getProfile(Number(info.lastInsertRowid)))!;
   // The only time the full key leaves the server (besides rotate).
   res.status(201).json({ ...toJson(row), key });
 });
 
-clientProfilesRouter.patch('/:id', (req: Request, res: Response) => {
+clientProfilesRouter.patch('/:id', async (req: Request, res: Response) => {
   const id = parseId(req, res);
   if (id === null) return;
   const parsed = updateSchema.safeParse(req.body);
@@ -110,41 +110,41 @@ clientProfilesRouter.patch('/:id', (req: Request, res: Response) => {
     res.status(400).json({ error: { message: 'Invalid profile update' } });
     return;
   }
-  const row = getProfile(id);
+  const row = await getProfile(id);
   if (!row) return notFound(res);
 
   const { name, systemPrompt, enabled } = parsed.data;
   const nextPrompt = systemPrompt === undefined
     ? row.system_prompt
     : (systemPrompt?.trim() || null);
-  getDb().run(`
+  await getDb().run(`
     UPDATE client_profiles
-    SET name = ?, system_prompt = ?, enabled = ?, updated_at = datetime('now')
+    SET name = ?, system_prompt = ?, enabled = ?, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')
     WHERE id = ?
   `, [name ?? row.name, nextPrompt, enabled === undefined ? row.enabled : (enabled ? 1 : 0), id]);
-  res.json(toJson(getProfile(id)!));
+  res.json(toJson((await getProfile(id))!));
 });
 
-clientProfilesRouter.post('/:id/rotate', (req: Request, res: Response) => {
+clientProfilesRouter.post('/:id/rotate', async (req: Request, res: Response) => {
   const id = parseId(req, res);
   if (id === null) return;
-  const row = getProfile(id);
+  const row = await getProfile(id);
   if (!row) return notFound(res);
 
   const key = mintClientProfileKey();
   const { encrypted, iv, authTag } = encrypt(key);
-  getDb().run(`
+  await getDb().run(`
     UPDATE client_profiles
-    SET token_hash = ?, encrypted_key = ?, iv = ?, auth_tag = ?, updated_at = datetime('now')
+    SET token_hash = ?, encrypted_key = ?, iv = ?, auth_tag = ?, updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')
     WHERE id = ?
   `, [hashClientProfileKey(key), encrypted, iv, authTag, id]);
-  res.json({ ...toJson(getProfile(id)!), key });
+  res.json({ ...toJson((await getProfile(id))!), key });
 });
 
-clientProfilesRouter.delete('/:id', (req: Request, res: Response) => {
+clientProfilesRouter.delete('/:id', async (req: Request, res: Response) => {
   const id = parseId(req, res);
   if (id === null) return;
-  const info = getDb().run('DELETE FROM client_profiles WHERE id = ?', [id]);
+  const info = await getDb().run('DELETE FROM client_profiles WHERE id = ?', [id]);
   if (info.changes === 0) return notFound(res);
   res.json({ success: true });
 });

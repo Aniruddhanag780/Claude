@@ -22,7 +22,7 @@ export class SerpSearchProvider extends SearchOnlyProvider {
     const res = await this.fetchWithTimeout(`${SERPSEARCH_BASE_URL}/search`, {
       method: 'GET', redirect: 'error', headers: { Authorization: `Bearer ${apiKey}` },
     }, 10_000, { timeoutBounds: 'request' });
-    if ([401, 403].includes(res.status)) return this.validationResult(res);
+    if ([401, 403].includes(res.status)) return await this.validationResult(res);
     const quota = res.headers.get('x-quota-limit');
     if (res.status === 400 && quota !== null && /^\d+$/.test(quota)) {
       const text = await res.text();

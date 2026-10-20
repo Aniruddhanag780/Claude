@@ -65,12 +65,12 @@ const PLATFORM_ORDER = ['openai', 'openrouter', 'nvidia'] as const;
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-export function listModerationModels(): ModerationModelRow[] {
+export async function listModerationModels(): Promise<ModerationModelRow[]> {
   const db = getDb();
   const rows: ModerationModelRow[] = [];
   for (const platform of PLATFORM_ORDER) {
     const ep = MODERATION_MODELS[platform];
-    const key = db.get(`
+    const key = await db.get(`
       SELECT id, encrypted_key, iv, auth_tag
         FROM api_keys
        WHERE platform = ?
@@ -94,18 +94,18 @@ export function listModerationModels(): ModerationModelRow[] {
   return rows;
 }
 
-function getDefaultModel(): string | null {
-  const models = listModerationModels();
+async function getDefaultModel(): Promise<string | null> {
+  const models = await listModerationModels();
   return models.length > 0 ? models[0].modelId : null;
 }
 
-export function resolveModel(requestedModel: string | undefined): string | null {
+export async function resolveModel(requestedModel: string | undefined): Promise<string | null> {
   if (!requestedModel || requestedModel === 'text-moderation-stable' || requestedModel === 'text-moderation-latest') {
-    return getDefaultModel();
+    return await getDefaultModel();
   }
-  const models = listModerationModels();
+  const models = await listModerationModels();
   const match = models.find(m => m.modelId === requestedModel);
-  return match ? match.modelId : getDefaultModel();
+  return match ? match.modelId : await getDefaultModel();
 }
 
 /* ------------------------------------------------------------------ */
@@ -144,15 +144,15 @@ async function callProvider(
 /*  Logging                                                            */
 /* ------------------------------------------------------------------ */
 
-function logModerationRequest(
+async function logModerationRequest(
   row: ModerationModelRow,
   status: 'success' | 'error',
   latencyMs: number,
   error: string | null,
-): void {
+): Promise<void> {
   try {
     const client = getClientContext();
-    getDb().run(`
+    await getDb().run(`
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
       VALUES (?, ?, ?, ?, 0, 0, ?, ?, 'moderation', ?, ?, ?)
     `, [row.platform, row.modelId, row.keyId, status, latencyMs, error, client.ip, client.userAgent, client.agent]);
@@ -169,7 +169,7 @@ export async function runModerations(
   model: string | undefined,
   inputs: string[],
 ): Promise<ModerationResult> {
-  const resolved = resolveModel(model);
+  const resolved = await resolveModel(model);
   if (!resolved) {
     throw new ModerationError(
       'No moderation providers available. Add an OpenAI, OpenRouter, or NVIDIA API key.',
@@ -177,7 +177,7 @@ export async function runModerations(
     );
   }
 
-  const models = listModerationModels();
+  const models = await listModerationModels();
   // A default/legacy request walks EVERY available platform in order — each
   // provider calls its own catalog model, which is what makes the cross-
   // platform failover below real (OpenRouter's omni-moderation id carries an
@@ -204,7 +204,7 @@ export async function runModerations(
     const started = Date.now();
     try {
       const json = await callProvider(row, apiKey, inputs);
-      logModerationRequest(row, 'success', Date.now() - started, null);
+      await logModerationRequest(row, 'success', Date.now() - started, null);
       return {
         provider: row.platform,
         model: (json.model as string) ?? row.modelId,
@@ -212,7 +212,7 @@ export async function runModerations(
       };
     } catch (err: any) {
       const e = err instanceof ModerationError ? err : new ModerationError(String(err?.message ?? err), 502);
-      logModerationRequest(row, 'error', Date.now() - started, e.message.slice(0, 300));
+      await logModerationRequest(row, 'error', Date.now() - started, e.message.slice(0, 300));
       lastError = e;
     }
   }

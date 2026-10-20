@@ -26,9 +26,9 @@ export const providersRouter = Router();
 // Cheap "is the SQLite connection answering" probe. getDb() throws before initDb
 // has run, and prepare/get throws if the handle is closed — either way the
 // server is not serviceable, which is exactly the /livez and /readyz 503 signal.
-function isDbReachable(): boolean {
+async function isDbReachable(): Promise<boolean> {
   try {
-    getDb().get('SELECT 1');
+    await getDb().get('SELECT 1');
     return true;
   } catch {
     return false;
@@ -38,8 +38,8 @@ function isDbReachable(): boolean {
 // GET /livez — liveness. 200 when the process can serve at all: the DB answers
 // and the encryption key is loaded (without it, stored provider keys can't be
 // decrypted, so no request can be routed). 503 otherwise.
-statusRouter.get('/livez', (_req: Request, res: Response) => {
-  const db = isDbReachable();
+statusRouter.get('/livez', async (_req: Request, res: Response) => {
+  const db = await isDbReachable();
   const encryptionKey = isEncryptionKeyInitialized();
   const uptime_s = Math.floor(process.uptime());
   const version = openapiSpec.info.version;
@@ -61,14 +61,14 @@ statusRouter.get('/livez', (_req: Request, res: Response) => {
 // now (an enabled key whose status is healthy or not-yet-probed). 503 with a
 // machine-readable reason otherwise, so a meta-gateway can skip this instance
 // instead of eating a failover on every call.
-statusRouter.get('/readyz', (_req: Request, res: Response) => {
-  if (!isDbReachable()) {
+statusRouter.get('/readyz', async (_req: Request, res: Response) => {
+  if (!await isDbReachable()) {
     res.status(503).json({ status: 'unavailable', reason: 'db_unreachable' });
     return;
   }
 
   const db = getDb();
-  const agg = db.get(`
+  const agg = await db.get(`
     SELECT
       COUNT(*) AS enabled_keys,
       COUNT(DISTINCT CASE WHEN status IN ('healthy', 'unknown') THEN platform END) AS ready_upstreams
@@ -87,7 +87,7 @@ statusRouter.get('/readyz', (_req: Request, res: Response) => {
   let reason: string;
   if ((agg.enabled_keys ?? 0) === 0) {
     reason = 'no_upstreams_configured';
-  } else if (getSoonestCooldownExpiry() != null) {
+  } else if (await getSoonestCooldownExpiry() != null) {
     reason = 'all_upstreams_rate_limited';
   } else {
     reason = 'all_upstreams_unhealthy';
@@ -109,9 +109,9 @@ interface PlatformKeyRow {
 // decide "route here or skip", with no key material and no PII. Behind the
 // unified API key (like the rest of /v1); mounted before the proxy rate limiter
 // so status polling doesn't draw down a caller's request budget.
-providersRouter.get('/providers', (req: Request, res: Response) => {
+providersRouter.get('/providers', async (req: Request, res: Response) => {
   const token = extractApiToken(req);
-  const unifiedKey = getUnifiedApiKey();
+  const unifiedKey = await getUnifiedApiKey();
   if (!token || !timingSafeStringEqual(token, unifiedKey)) {
     res.status(401).json({ error: { message: 'Invalid API key', type: 'authentication_error' } });
     return;
@@ -120,7 +120,7 @@ providersRouter.get('/providers', (req: Request, res: Response) => {
   const db = getDb();
 
   // Per-platform key-status rollup (only enabled keys count toward serviceability).
-  const platformRows = db.all(`
+  const platformRows = await db.all(`
     SELECT
       platform,
       SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS enabled_keys,
@@ -136,7 +136,7 @@ providersRouter.get('/providers', (req: Request, res: Response) => {
   // resume time. rate_limit_cooldowns is per (platform, model, key); the MIN is
   // the earliest moment any of that platform's routes frees up.
   const now = Date.now();
-  const cooldownRows = db.all(`
+  const cooldownRows = await db.all(`
     SELECT platform, MIN(expires_at_ms) AS resume_ms
     FROM rate_limit_cooldowns
     WHERE expires_at_ms > ?
@@ -145,7 +145,7 @@ providersRouter.get('/providers', (req: Request, res: Response) => {
   const resumeByPlatform = new Map(cooldownRows.map(r => [r.platform, r.resume_ms]));
 
   // Most recent probe error per platform (enabled keys, newest first).
-  const errorRows = db.all(`
+  const errorRows = await db.all(`
     SELECT platform, last_health_error
     FROM api_keys
     WHERE enabled = 1 AND last_health_error IS NOT NULL
@@ -161,7 +161,7 @@ providersRouter.get('/providers', (req: Request, res: Response) => {
   // Best-effort request-quota headroom from observed quota state. Only surfaced
   // when a provider actually reported a `requests` limit; absent otherwise.
   const requestsRemainingByPlatform = new Map<string, number>();
-  for (const q of getQuotaStateForKeys()) {
+  for (const q of await getQuotaStateForKeys()) {
     if (q.metric !== 'requests' || typeof q.limit !== 'number' || q.limit <= 0) continue;
     if (typeof q.remaining !== 'number') continue;
     const pct = Math.max(0, Math.min(100, Math.round((q.remaining / q.limit) * 100)));
@@ -218,15 +218,15 @@ providersRouter.get('/providers', (req: Request, res: Response) => {
 // material, no PII. A meta-gateway can gate its own routing on `low_balance`
 // BEFORE spending a request that would 429, and know `seconds_until_reset` for
 // "the window resets soon, hold off" scheduling.
-providersRouter.get('/quota-forecast', (req: Request, res: Response) => {
+providersRouter.get('/quota-forecast', async (req: Request, res: Response) => {
   const token = extractApiToken(req);
-  const unifiedKey = getUnifiedApiKey();
+  const unifiedKey = await getUnifiedApiKey();
   if (!token || !timingSafeStringEqual(token, unifiedKey)) {
     res.status(401).json({ error: { message: 'Invalid API key', type: 'authentication_error' } });
     return;
   }
 
-  const forecast = getQuotaForecast();
+  const forecast = await getQuotaForecast();
   res.json({
     generated_at: new Date().toISOString(),
     low_balance_threshold: {

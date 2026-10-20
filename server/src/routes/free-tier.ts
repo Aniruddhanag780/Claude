@@ -67,7 +67,7 @@ const METRIC_PREFERENCE: QuotaMetric[] = ['tokens', 'credits', 'neurons', 'reque
  * separate allowances: remaining/limit are SUMMED across keys, never
  * latest-wins (which reported one account's headroom as if it were the total).
  */
-function summarizeQuota(rows: ReturnType<typeof getQuotaStateForKeys>): PoolQuota | null {
+function summarizeQuota(rows: Awaited<ReturnType<typeof getQuotaStateForKeys>>): PoolQuota | null {
   if (rows.length === 0) return null;
   const byMetric = new Map<QuotaMetric, typeof rows>();
   for (const row of rows) {
@@ -103,34 +103,34 @@ function summarizeQuota(rows: ReturnType<typeof getQuotaStateForKeys>): PoolQuot
   return { limit, remaining, resetAt, metric, keyCount: seenKeys.size };
 }
 
-freeTierRouter.get('/', (_req: Request, res: Response) => {
+freeTierRouter.get('/', async (_req: Request, res: Response) => {
   const db = getDb();
 
   // Only platforms with an enabled key have a free tier to speak of — same
   // filter the stacked bar uses for its per-model breakdown.
   const platformSet = new Set(
-    (db.all('SELECT DISTINCT platform FROM api_keys WHERE enabled = 1') as { platform: string }[])
+    (await db.all('SELECT DISTINCT platform FROM api_keys WHERE enabled = 1') as { platform: string }[])
       .map(p => p.platform),
   );
   // Usable keys per platform: a documented budget is per account, so two usable
   // accounts really are twice the pool (fallback.ts uses the same filter).
   const keyCountMap = new Map(
-    (db.all("SELECT platform, COUNT(*) as count FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; count: number }[])
+    (await db.all("SELECT platform, COUNT(*) as count FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform") as { platform: string; count: number }[])
       .map(k => [k.platform, k.count]),
   );
 
   // Chain membership mirrors /token-usage: the active profile's chain when one
   // is active, the default fallback chain otherwise. `chain_enabled` is only a
   // marker — a switched-off row still consumes the same provider allowance.
-  const activeProfileId = getActiveProfileId(db);
+  const activeProfileId = await getActiveProfileId(db);
   const rows = (activeProfileId
-    ? db.all(`
+    ? await db.all(`
         SELECT m.platform, m.model_id, m.monthly_token_budget, pm.enabled AS chain_enabled
         FROM profile_models pm
         JOIN models m ON m.id = pm.model_db_id
         WHERE pm.profile_id = ? AND m.enabled = 1
       `, [activeProfileId])
-    : db.all(`
+    : await db.all(`
         SELECT m.platform, m.model_id, m.monthly_token_budget, COALESCE(fc.enabled, 1) AS chain_enabled
         FROM models m
         LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
@@ -173,11 +173,11 @@ freeTierRouter.get('/', (_req: Request, res: Response) => {
   }
 
   // Quota observations grouped per pool, then reduced per pool (see above).
-  const quotaRows = new Map<string, ReturnType<typeof getQuotaStateForKeys>>();
-  for (const q of getQuotaStateForKeys()) {
+  const quotaRows = new Map<string, Awaited<ReturnType<typeof getQuotaStateForKeys>>>();
+  for (const q of await getQuotaStateForKeys()) {
     const key = q.quotaPoolKey || `${q.platform}::account`;
     const list = quotaRows.get(key);
-    if (list) list.push(q);
+    if (list) (await list).push(q);
     else quotaRows.set(key, [q]);
   }
 

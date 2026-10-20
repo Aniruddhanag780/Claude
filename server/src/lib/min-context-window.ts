@@ -28,10 +28,10 @@ export const MIN_CONTEXT_WINDOW_PRESETS: Record<string, number> = {
  *  A null context_window on a model means "unknown" and is NEVER filtered —
  *  the same convention fitsContextWindow uses, so models the catalog has no
  *  window for can't be silently mass-excluded by a typo'd floor. */
-export function minContextWindowFloor(): number | null {
+export async function minContextWindowFloor(): Promise<number | null> {
   let raw: string | undefined;
   try {
-    raw = getSetting(MIN_CONTEXT_WINDOW_SETTING);
+    raw = await getSetting(MIN_CONTEXT_WINDOW_SETTING);
   } catch {
     return null; // DB not ready — never throw on the proxy hot path
   }
@@ -46,8 +46,8 @@ export function minContextWindowFloor(): number | null {
 
 /** True when a model with this advertised window may serve at all under the
  *  configured floor. Unknown windows (null/undefined) always pass. */
-export function passesContextWindowFloor(contextWindow: number | null | undefined): boolean {
-  const floor = minContextWindowFloor();
+export async function passesContextWindowFloor(contextWindow: number | null | undefined): Promise<boolean> {
+  const floor = await minContextWindowFloor();
   if (floor == null) return true;
   if (contextWindow == null) return true;
   return contextWindow >= floor;

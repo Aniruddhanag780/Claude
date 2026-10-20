@@ -7,9 +7,9 @@ import { runModerations, ModerationError } from '../services/moderation.js';
 
 export const moderationRouter = Router();
 
-function requireInferenceAuth(req: Request, res: Response): boolean {
+async function requireInferenceAuth(req: Request, res: Response): Promise<boolean> {
   const token = extractApiToken(req);
-  const auth = resolveAuth(token);
+  const auth = await resolveAuth(token);
   if (!auth) {
     res.status(401).json({ error: { message: 'Invalid API key', type: 'authentication_error' } });
     return false;
@@ -23,7 +23,7 @@ const moderationBody = z.object({
 });
 
 moderationRouter.post('/moderations', async (req: Request, res: Response) => {
-  if (!requireInferenceAuth(req, res)) return;
+  if (!await requireInferenceAuth(req, res)) return;
 
   const parsed = moderationBody.safeParse(req.body);
   if (!parsed.success) {

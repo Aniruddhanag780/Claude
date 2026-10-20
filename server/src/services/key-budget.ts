@@ -50,16 +50,16 @@ function activeReservations(): Set<Reservation> {
   return active;
 }
 
-export function getMonthlyBudgetCaps(keyId: number): MonthlyBudgetCaps {
-  const row = getDb().get('SELECT monthly_request_cap, monthly_token_cap FROM api_keys WHERE id = ?', [keyId]) as { monthly_request_cap: number; monthly_token_cap: number } | undefined;
+export async function getMonthlyBudgetCaps(keyId: number): Promise<MonthlyBudgetCaps> {
+  const row = await getDb().get('SELECT monthly_request_cap, monthly_token_cap FROM api_keys WHERE id = ?', [keyId]) as { monthly_request_cap: number; monthly_token_cap: number } | undefined;
   if (!row) return { requestCap: 0, tokenCap: 0 };
   return { requestCap: row.monthly_request_cap, tokenCap: row.monthly_token_cap };
 }
 
-export function setMonthlyBudgetCaps(
+export async function setMonthlyBudgetCaps(
   keyId: number,
   patch: Partial<MonthlyBudgetCaps>,
-): boolean {
+): Promise<boolean> {
   const sets: string[] = [];
   const values: number[] = [];
   if (patch.requestCap !== undefined) {
@@ -71,12 +71,12 @@ export function setMonthlyBudgetCaps(
     values.push(patch.tokenCap);
   }
   if (sets.length === 0) return false;
-  const result = getDb().run( `UPDATE api_keys SET ${sets.join(', ')} WHERE id = ?`, [...values, keyId]);
+  const result = await getDb().run( `UPDATE api_keys SET ${sets.join(', ')} WHERE id = ?`, [...values, keyId]);
   return result.changes > 0;
 }
 
-export function getMonthlyUsage(keyId: number, now = Date.now()): MonthlyUsage {
-  const row = getDb().get(`
+export async function getMonthlyUsage(keyId: number, now = Date.now()): Promise<MonthlyUsage> {
+  const row = await getDb().get(`
     SELECT requests, tokens FROM key_monthly_usage WHERE key_id = ? AND month = ?
   `, [keyId, new Date(now).toISOString().slice(0, 7)]) as MonthlyUsage | undefined;
   return { requests: Number(row?.requests ?? 0), tokens: Number(row?.tokens ?? 0) };
@@ -87,15 +87,15 @@ export function getMonthlyUsage(keyId: number, now = Date.now()): MonthlyUsage {
  * usage plus the tokens THIS request would add. Returns allowed when both caps
  * are 0 (unlimited) or neither would be exceeded.
  */
-export function checkMonthlyBudget(
+export async function checkMonthlyBudget(
   keyId: number,
   estimatedTokens: number,
   now = Date.now(),
-): BudgetVerdict {
-  const caps = getMonthlyBudgetCaps(keyId);
+): Promise<BudgetVerdict> {
+  const caps = await getMonthlyBudgetCaps(keyId);
   if (caps.requestCap <= 0 && caps.tokenCap <= 0) return { allowed: true };
 
-  const usage = getMonthlyUsage(keyId, now);
+  const usage = await getMonthlyUsage(keyId, now);
   for (const reservation of activeReservations()) {
     if (reservation.keyId !== keyId) continue;
     usage.requests++;
@@ -111,11 +111,11 @@ export function checkMonthlyBudget(
 }
 
 /** Check and reserve synchronously before dispatch; release on every terminal path. */
-export function reserveMonthlyBudget(
+export async function reserveMonthlyBudget(
   keyId: number,
   estimatedTokens: number,
-): { allowed: true; release: () => void } | Extract<BudgetVerdict, { allowed: false }> {
-  const verdict = checkMonthlyBudget(keyId, estimatedTokens);
+): Promise<{ allowed: true; release: () => void } | Extract<BudgetVerdict, { allowed: false }>> {
+  const verdict = await checkMonthlyBudget(keyId, estimatedTokens);
   if (!verdict.allowed) return verdict;
   const active = activeReservations();
   const reservation = { keyId, tokens: Math.max(0, estimatedTokens) };

@@ -120,7 +120,7 @@ export function clearTransportFailureState(): void {
 /** Increment and apply the park rule. A 429 never reaches here — the caller
  *  treats it as proof the provider is reachable. Returns true when this call
  *  parked the key (status written to 'error'). */
-function recordTransportFailure(keyId: number, platform: string | undefined): boolean {
+async function recordTransportFailure(keyId: number, platform: string | undefined): Promise<boolean> {
   const parkAfter = getTransportParkAfter();
   if (parkAfter === 0) return false;
   const count = (transportFailures.get(keyId) ?? 0) + 1;
@@ -132,9 +132,9 @@ function recordTransportFailure(keyId: number, platform: string | undefined): bo
   // a confirmed-bad credential verdict outranks network evidence in both
   // directions, and only a successful validateKey clears it.
   const db = getDb();
-  const res = db.run("UPDATE api_keys SET status = 'error' WHERE id = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [keyId]);
+  const res = await db.run("UPDATE api_keys SET status = 'error' WHERE id = ? AND enabled = 1 AND status IN ('healthy', 'unknown')", [keyId]);
   if (res.changes > 0) {
-    providerLog(
+    await providerLog(
       'warn',
       `[Health] Key ${keyId} (${platform}) parked as 'error' after ${count} consecutive transport failures`,
       { provider: platform, event: 'key_transport_park' },
@@ -173,18 +173,18 @@ export function clearValidationRateLimitState(): void {
   validationRateLimitedAt.clear();
 }
 
-function recordInvalidFailure(keyId: number, platform?: string): void {
+async function recordInvalidFailure(keyId: number, platform?: string): Promise<void> {
   const count = (failureCount.get(keyId) ?? 0) + 1;
   failureCount.set(keyId, count);
 
   if (count >= CONSECUTIVE_FAILURES_TO_DISABLE) {
-    getDb().run('UPDATE api_keys SET enabled = 0 WHERE id = ?', [keyId]);
+    await getDb().run('UPDATE api_keys SET enabled = 0 WHERE id = ?', [keyId]);
     // providerLog, not console.log: losing a key is the event an operator is
     // most likely to be looking for after the fact, so it goes to the dashboard
     // log viewer (where warn/error survive a restart) as well as to stdout —
     // which providerLog still writes, so nothing here is only visible behind a
     // login. Raised to warn for the same reason.
-    providerLog(
+    await providerLog(
       'warn',
       `[Health] Auto-disabled key ${keyId} after ${count} consecutive failures`,
       { provider: platform, event: 'key_auto_disabled' },
@@ -204,8 +204,8 @@ function recordInvalidFailure(keyId: number, platform?: string): void {
  */
 export const QUOTA_POLL_INTERVAL_MS = 15 * 60 * 1000;
 
-function quotaPollDue(keyId: number, now = Date.now()): boolean {
-  const row = getDb().get(`
+async function quotaPollDue(keyId: number, now = Date.now()): Promise<boolean> {
+  const row = await getDb().get(`
     SELECT created_at AS seenAt FROM provider_quota_observations
      WHERE key_id = ? AND source = 'quota_api'
      ORDER BY created_at DESC LIMIT 1
@@ -225,7 +225,7 @@ export async function pollKeyQuota(
 ): Promise<boolean> {
   try {
     const apiKey = decrypt(row.encrypted_key, row.iv, row.auth_tag);
-    return await withKeyProxy(decryptProxyUrl(row), () => provider.fetchQuota(apiKey, {
+    return await withKeyProxy(decryptProxyUrl(row), async () => await provider.fetchQuota(apiKey, {
       platform: row.platform as Platform,
       keyId,
       quotaPoolKey: inferQuotaPoolKey(row.platform as Platform, null),
@@ -251,11 +251,11 @@ export function supportsQuotaPolling(provider: BaseProvider): boolean {
 export async function maybePollKeyQuota(keyId: number): Promise<boolean> {
   try {
     const db = getDb();
-    const row = db.get('SELECT * FROM api_keys WHERE id = ? AND enabled = 1', [keyId]) as any;
+    const row = await db.get('SELECT * FROM api_keys WHERE id = ? AND enabled = 1', [keyId]) as any;
     if (!row) return false;
     const provider = resolveProvider(row.platform as Platform, row.base_url);
     if (!provider || !supportsQuotaPolling(provider)) return false;
-    if (!quotaPollDue(keyId)) return false;
+    if (!await quotaPollDue(keyId)) return false;
     return await pollKeyQuota(keyId, row, provider);
   } catch {
     return false;
@@ -264,7 +264,7 @@ export async function maybePollKeyQuota(keyId: number): Promise<boolean> {
 
 export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
   const db = getDb();
-  const row = db.get('SELECT * FROM api_keys WHERE id = ?', [keyId]) as any;
+  const row = await db.get('SELECT * FROM api_keys WHERE id = ?', [keyId]) as any;
   if (!row) return 'error';
 
   const provider = resolveProvider(row.platform as Platform, row.base_url);
@@ -275,7 +275,7 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
   // an older probe stored is cleared so the dashboard stops showing it.
   if (provider.supportsKeyValidation === false) {
     if (row.last_health_error != null) {
-      db.run('UPDATE api_keys SET last_health_error = NULL WHERE id = ?', [keyId]);
+      await db.run('UPDATE api_keys SET last_health_error = NULL WHERE id = ?', [keyId]);
     }
     return row.status as KeyStatus;
   }
@@ -286,7 +286,7 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     // only reachable through its own proxy (the reason to set one) would
     // otherwise be validated direct, fail, and be auto-disabled after three
     // checks while real requests through the proxy were working fine.
-    const validation = await withKeyProxy(decryptProxyUrl(row), () => provider.validateKey(apiKey, {
+    const validation = await withKeyProxy(decryptProxyUrl(row), async () => await provider.validateKey(apiKey, {
       platform: row.platform as Platform,
       keyId,
       quotaPoolKey: inferQuotaPoolKey(row.platform as Platform, null),
@@ -307,9 +307,13 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     // #1493: stamp last_healthy_at only on a VALID verdict. A transport error
     // (the catch below) refreshes last_checked_at but records no success, so
     // "checked recently" and "worked recently" stay distinguishable.
-    db.run(isValid
-      ? "UPDATE api_keys SET status = ?, last_health_error = ?, last_checked_at = datetime('now'), last_healthy_at = datetime('now') WHERE id = ?"
-      : "UPDATE api_keys SET status = ?, last_health_error = ?, last_checked_at = datetime('now') WHERE id = ?"[status, lastError, keyId]);
+    const nowUtc = "to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')";
+    await db.run(
+      isValid
+        ? `UPDATE api_keys SET status = ?, last_health_error = ?, last_checked_at = ${nowUtc}, last_healthy_at = ${nowUtc} WHERE id = ?`
+        : `UPDATE api_keys SET status = ?, last_health_error = ?, last_checked_at = ${nowUtc} WHERE id = ?`,
+      [status, lastError, keyId],
+    );
 
     if (isValid) {
       failureCount.delete(keyId);
@@ -322,20 +326,20 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
       // #1348: a healthy key on a built-in platform the catalog does not carry
       // serves nothing until its models are discovered. Fire-and-forget; the
       // trigger is a no-op for every other platform, and throttled.
-      triggerBuiltinModelDiscovery(db, row.platform, 'healthy');
+      await triggerBuiltinModelDiscovery(db, row.platform, 'healthy');
       // #1403: piggyback provider-reported quota polling on the healthy
       // verdict — but only for providers with a quota endpoint, and at most
       // once per QUOTA_POLL_INTERVAL_MS per key. Fire-and-forget, silent.
-      if (supportsQuotaPolling(provider) && quotaPollDue(keyId)) {
-        void pollKeyQuota(keyId, row, provider).catch(() => {});
+      if (supportsQuotaPolling(provider) && await quotaPollDue(keyId)) {
+        void await pollKeyQuota(keyId, row, provider).catch(() => {});
       }
     } else {
-      providerLog(
+      await providerLog(
         'warn',
         `[Health] Key ${keyId} (${row.platform}, base=${row.base_url ?? 'default'}) invalid: ${lastError}`,
         { provider: row.platform, event: 'key_invalid' },
       );
-      recordInvalidFailure(keyId, row.platform);
+      await recordInvalidFailure(keyId, row.platform);
     }
 
     return status;
@@ -375,8 +379,8 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     // not an increment.
     let parked = false;
     if (err?.status === 429) transportFailures.delete(keyId);
-    else parked = recordTransportFailure(keyId, row.platform);
-    db.run("UPDATE api_keys SET last_health_error = ?, last_checked_at = datetime('now') WHERE id = ?", [lastError, keyId]);
+    else parked = await recordTransportFailure(keyId, row.platform);
+    await db.run("UPDATE api_keys SET last_health_error = ?, last_checked_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [lastError, keyId]);
     return (parked ? 'error' : row.status) as KeyStatus;
   }
 }
@@ -395,7 +399,7 @@ export type KeyProbeOutcome = 'valid' | 'invalid' | 'error';
 export async function probeKeyValidity(keyId: number): Promise<KeyProbeOutcome> {
   try {
     const db = getDb();
-    const row = db.get('SELECT * FROM api_keys WHERE id = ? AND enabled = 1', [keyId]) as any;
+    const row = await db.get('SELECT * FROM api_keys WHERE id = ? AND enabled = 1', [keyId]) as any;
     if (!row) return 'error';
 
     const provider = resolveProvider(row.platform as Platform, row.base_url);
@@ -409,7 +413,7 @@ export async function probeKeyValidity(keyId: number): Promise<KeyProbeOutcome> 
 
     const apiKey = decrypt(row.encrypted_key, row.iv, row.auth_tag);
     // Same reasoning as checkKeyHealth: probe through the key's own proxy (#590).
-    const validation = await withKeyProxy(decryptProxyUrl(row), () => provider.validateKey(apiKey, {
+    const validation = await withKeyProxy(decryptProxyUrl(row), async () => await provider.validateKey(apiKey, {
       platform: row.platform as Platform,
       keyId,
       quotaPoolKey: inferQuotaPoolKey(row.platform as Platform, null),
@@ -451,7 +455,7 @@ export function clearLastHealthyStampState(): void {
  * means a provider confirmed the credential is bad, and only a real validateKey
  * pass clears that.
  */
-export function markKeyHealthyFromRequest(keyId: number): void {
+export async function markKeyHealthyFromRequest(keyId: number): Promise<void> {
   try {
     // #1493: a served request is the strongest "this key works" evidence there
     // is — stamp last_healthy_at regardless of current status. This is the only
@@ -461,9 +465,9 @@ export function markKeyHealthyFromRequest(keyId: number): void {
     const lastStamp = lastHealthyStampedAt.get(keyId);
     if (lastStamp === undefined || now - lastStamp >= LAST_HEALTHY_STAMP_INTERVAL_MS) {
       lastHealthyStampedAt.set(keyId, now);
-      getDb().run("UPDATE api_keys SET last_healthy_at = datetime('now') WHERE id = ?", [keyId]);
+      await getDb().run("UPDATE api_keys SET last_healthy_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [keyId]);
     }
-    getDb().run("UPDATE api_keys SET status = 'healthy', last_health_error = NULL WHERE id = ? AND status IN ('error', 'unknown')", [keyId]);
+    await getDb().run("UPDATE api_keys SET status = 'healthy', last_health_error = NULL WHERE id = ? AND status IN ('error', 'unknown')", [keyId]);
     failureCount.delete(keyId);
     // #1510: a served request is the strongest reachability evidence there is —
     // it also ends any transport-error streak, parked or not.
@@ -546,19 +550,19 @@ export function interleaveByProvider<T>(rows: T[], bucketOf: (row: T) => string)
 
 const realSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
-export function checkAllKeys(opts: HealthPassOptions = {}): Promise<HealthPassResult> {
+export async function checkAllKeys(opts: HealthPassOptions = {}): Promise<HealthPassResult> {
   // A caller that arrives mid-pass joins it (including a forced one — the
   // in-flight pass is already probing, and stacking a second set of validates
   // on the same providers is the exact behaviour this guard exists to prevent).
-  if (checkAllInFlight) return checkAllInFlight;
+  if (checkAllInFlight) return await checkAllInFlight;
   checkAllInFlight = runHealthPass(opts).finally(() => {
     checkAllInFlight = null;
   });
   // Keep the degraded-mode state machine in step with the latest verdicts
   // (#904): a fleet-wide outage should flip the gateway into degraded mode
   // shortly after the pass that observed it, not after the next request.
-  void checkAllInFlight.then(() => updateDegradationState());
-  return checkAllInFlight;
+  void checkAllInFlight.then(async () => { await updateDegradationState(); });
+  return await checkAllInFlight;
 }
 
 async function runHealthPass(opts: HealthPassOptions): Promise<HealthPassResult> {
@@ -568,10 +572,10 @@ async function runHealthPass(opts: HealthPassOptions): Promise<HealthPassResult>
   const db = getDb();
 
   // age_ms comes from the DB clock (last_checked_at is written as
-  // datetime('now')); the injected `now` above only drives pacing.
-  const rows = db.all(`
+  // to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')); the injected `now` above only drives pacing.
+  const rows = await db.all(`
     SELECT id, platform, base_url, status,
-           CAST((julianday('now') - julianday(last_checked_at)) * 86400000 AS INTEGER) AS age_ms
+           CAST((EXTRACT(EPOCH FROM ((now() at time zone 'utc') - last_checked_at::timestamp)) * 1000) AS BIGINT) AS age_ms
     FROM api_keys WHERE enabled = 1
   `) as HealthKeyRow[];
 

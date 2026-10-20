@@ -76,9 +76,9 @@ function toolError(message: string) {
 
 // ── Tool implementations ─────────────────────────────────────────────────
 
-function listModels(args: Record<string, unknown>): unknown {
+async function listModels(args: Record<string, unknown>): Promise<unknown> {
   const availableOnly = args.available_only !== false; // default true: agents want what they can use
-  const { models, autoContextWindow } = buildModelListing();
+  const { models, autoContextWindow } = await buildModelListing();
   const rows = (availableOnly ? models.filter(m => m.available === 1) : models).map(m => ({
     id: m.id,
     name: m.name,
@@ -95,20 +95,20 @@ function listModels(args: Record<string, unknown>): unknown {
   };
 }
 
-function providerHealth(): unknown {
+async function providerHealth(): Promise<unknown> {
   const db = getDb();
   const now = Date.now();
-  const keys = db.all(`
+  const keys = await db.all(`
     SELECT platform, status, COUNT(*) AS n
     FROM api_keys WHERE enabled = 1
     GROUP BY platform, status
   `) as Array<{ platform: string; status: string; n: number }>;
-  const cooldowns = db.all(`
+  const cooldowns = await db.all(`
     SELECT platform, COUNT(*) AS n
     FROM rate_limit_cooldowns WHERE expires_at_ms > ?
     GROUP BY platform
   `, [now]) as Array<{ platform: string; n: number }>;
-  const availableModels = db.all(`
+  const availableModels = await db.all(`
     SELECT m.platform, COUNT(*) AS n
     FROM models m
     WHERE m.enabled = 1 AND EXISTS (
@@ -131,9 +131,9 @@ function providerHealth(): unknown {
   return Object.fromEntries([...byPlatform.entries()].sort(([a], [b]) => a.localeCompare(b)));
 }
 
-function providerList(): unknown {
+async function providerList(): Promise<unknown> {
   const db = getDb();
-  const keys = db.all(`
+  const keys = await db.all(`
     SELECT platform, COUNT(*) AS n,
       SUM(CASE WHEN status = 'healthy' THEN 1 ELSE 0 END) AS healthy,
       SUM(CASE WHEN status = 'rate_limited' THEN 1 ELSE 0 END) AS rate_limited,
@@ -153,32 +153,32 @@ function providerList(): unknown {
   }));
 }
 
-function clearCacheTool(): unknown {
-  const n = clearCache();
+async function clearCacheTool(): Promise<unknown> {
+  const n = await clearCache();
   return { cleared_entries: n };
 }
 
 // Forecasting which free pools are about to run dry is the single most useful
 // thing an agent can ask before committing to a long task on the free tier.
-function quotaOutlook(): unknown {
-  return getQuotaOutlook();
+async function quotaOutlook(): Promise<unknown> {
+  return await getQuotaOutlook();
 }
 
 const USAGE_RANGES: Record<string, number> = { '24h': 24, '7d': 24 * 7, '30d': 24 * 30 };
 
-function usageSummary(args: Record<string, unknown>): unknown {
+async function usageSummary(args: Record<string, unknown>): Promise<unknown> {
   // Object.hasOwn: a prototype key ('constructor', 'toString') is truthy via
   // the prototype chain but multiplies to NaN below — fall back to 24h.
   const range = typeof args.range === 'string' && Object.hasOwn(USAGE_RANGES, args.range) ? args.range : '24h';
   const db = getDb();
-  // SQLite datetime('now') format (space separator, no ms/Z) — an ISO 'T'
+  // SQLite to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS') format (space separator, no ms/Z) — an ISO 'T'
   // string compares GREATER than every same-day stored row (space < 'T'
   // lexicographically), which silently dropped the window's boundary day:
   // "24h" effectively meant "since UTC midnight". Same conversion as
   // routes/analytics.ts.
   const since = new Date(Date.now() - USAGE_RANGES[range] * 3600_000)
     .toISOString().slice(0, 19).replace('T', ' ');
-  const totals = db.get(`
+  const totals = await db.get(`
     SELECT COALESCE(SUM(total_requests), 0) AS requests,
            COALESCE(SUM(success_count), 0) AS successes,
            COALESCE(SUM(error_count), 0) AS errors,
@@ -186,7 +186,7 @@ function usageSummary(args: Record<string, unknown>): unknown {
            COALESCE(SUM(output_tokens), 0) AS output_tokens
     FROM request_hourly WHERE hour >= ?
   `, [since.slice(0, 13) + ':00:00']) as { requests: number; successes: number; errors: number; input_tokens: number; output_tokens: number };
-  const topModels = db.all(`
+  const topModels = await db.all(`
     SELECT platform, model_id, COUNT(*) AS requests,
            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successes
     FROM requests WHERE created_at >= ?
@@ -203,8 +203,8 @@ function usageSummary(args: Record<string, unknown>): unknown {
   };
 }
 
-function routingInfo(): unknown {
-  const scores = getRoutingScores();
+async function routingInfo(): Promise<unknown> {
+  const scores = await getRoutingScores();
   return {
     strategy: scores.strategy,
     // Which key of a platform requests are steered to (#919) — a separate knob
@@ -219,13 +219,13 @@ function routingInfo(): unknown {
 
 const ROUTING_STRATEGIES = ['priority', 'balanced', 'smartest', 'fastest', 'reliable', 'custom', 'decision'] as const;
 
-function setStrategy(args: Record<string, unknown>): unknown {
+async function setStrategy(args: Record<string, unknown>): Promise<unknown> {
   const strategy = args.strategy;
   if (typeof strategy !== 'string' || !(ROUTING_STRATEGIES as readonly string[]).includes(strategy)) {
     throw new Error(`strategy must be one of: ${ROUTING_STRATEGIES.join(', ')}`);
   }
-  setRoutingStrategy(strategy as RoutingStrategy);
-  return { strategy: getRoutingStrategy() };
+  await setRoutingStrategy(strategy as RoutingStrategy);
+  return { strategy: await getRoutingStrategy() };
 }
 
 const DEFAULT_MCP_INFERENCE_TIMEOUT_MS = 120_000;
@@ -309,7 +309,7 @@ async function askFreeLlmApi(args: Record<string, unknown>, req: Request, res: R
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
-        Authorization: `Bearer ${getUnifiedApiKey()}`,
+        Authorization: `Bearer ${await getUnifiedApiKey()}`,
       },
       body: JSON.stringify({
         model,
@@ -367,10 +367,10 @@ async function askFreeLlmApi(args: Record<string, unknown>, req: Request, res: R
   }
 }
 
-function healthcheck(): unknown {
-  const { models } = buildModelListing();
+async function healthcheck(): Promise<unknown> {
+  const { models } = await buildModelListing();
   const availableModels = models.filter(model => model.available === 1).length;
-  const providers = providerHealth() as Record<string, {
+  const providers = await providerHealth() as Record<string, {
     keys: Record<string, number>;
     active_cooldowns: number;
     available_models: number;
@@ -381,7 +381,7 @@ function healthcheck(): unknown {
   ).length;
   return {
     status: availableModels > 0 ? 'ready' : 'needs_configuration',
-    mcp_enabled: isMcpServerEnabled(),
+    mcp_enabled: await isMcpServerEnabled(),
     default_model: mcpDefaultModel(),
     available_models: availableModels,
     configured_providers: providerRows.length,
@@ -459,14 +459,14 @@ const TOOLS: Record<string, McpTool> = {
       required: ['answer', 'requested_model', 'model', 'finish_reason', 'usage', 'routed_via', 'fallback_trail', 'cache', 'compression', 'execution_id'],
     },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
-    run: (args, req, res) => askFreeLlmApi(args, req, res),
+    run: async (args, req, res) => await askFreeLlmApi(args, req, res),
   },
   healthcheck: {
     title: 'Check FreeLLMAPI readiness',
     description: 'Check whether FreeLLMAPI is ready for ChatGPT calls, including MCP state, configured/healthy providers, available models, and the default MCP inference model. This does not spend provider quota.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     annotations: READ_ONLY_LOCAL,
-    run: () => healthcheck(),
+    run: async () => await healthcheck(),
   },
   list_models: {
     title: 'List FreeLLMAPI models',
@@ -485,7 +485,7 @@ const TOOLS: Record<string, McpTool> = {
     description: 'Per-provider key statuses (healthy/rate_limited/invalid/error/unknown), active cooldowns, and how many models each provider can serve right now.',
     inputSchema: { type: 'object', properties: {} },
     annotations: READ_ONLY_LOCAL,
-    run: () => providerHealth(),
+    run: async () => await providerHealth(),
   },
   usage_summary: {
     title: 'Summarize FreeLLMAPI usage',
@@ -504,7 +504,7 @@ const TOOLS: Record<string, McpTool> = {
     description: 'The active routing strategy and the current top-scored models in the fallback chain.',
     inputSchema: { type: 'object', properties: {} },
     annotations: READ_ONLY_LOCAL,
-    run: () => routingInfo(),
+    run: async () => await routingInfo(),
   },
   set_routing_strategy: {
     title: 'Set model routing strategy',
@@ -554,21 +554,21 @@ const TOOLS: Record<string, McpTool> = {
     description: 'All platforms with enabled API keys, showing total keys and per-status breakdown (healthy/rate_limited/invalid/error).',
     inputSchema: { type: 'object', properties: {} },
     annotations: READ_ONLY_LOCAL,
-    run: () => providerList(),
+    run: async () => await providerList(),
   },
   clear_cache: {
     title: 'Clear response cache',
     description: 'Flush all cached responses. Returns the number of entries removed.',
     inputSchema: { type: 'object', properties: {} },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
-    run: () => clearCacheTool(),
+    run: async () => await clearCacheTool(),
   },
   quota_outlook: {
     title: 'Forecast free-tier quota',
     description: 'Per-pool free-tier quota: remaining requests, observed burn rate, estimated exhaustion time, and warnings (exhausting_soon/low_balance). Use before long or token-heavy tasks to see which providers may run dry.',
     inputSchema: { type: 'object', properties: {} },
     annotations: READ_ONLY_LOCAL,
-    run: () => quotaOutlook(),
+    run: async () => await quotaOutlook(),
   },
 };
 
@@ -632,9 +632,9 @@ async function dispatchRpc(msg: JsonRpcRequest, id: number | string | null, req:
   }
 }
 
-function authenticate(req: Request, res: Response): boolean {
+async function authenticate(req: Request, res: Response): Promise<boolean> {
   const token = extractApiToken(req);
-  const unifiedKey = getUnifiedApiKey();
+  const unifiedKey = await getUnifiedApiKey();
   if (!token || !timingSafeStringEqual(token, unifiedKey)) {
     // Echo the request id when the body carries one, so strict JSON-RPC
     // clients can correlate the auth error with their pending call.
@@ -655,16 +655,16 @@ function authenticate(req: Request, res: Response): boolean {
 // installs start with it off.
 export const MCP_ENABLED_SETTING = 'enable_mcp';
 
-export function isMcpServerEnabled(): boolean {
-  return getSetting(MCP_ENABLED_SETTING) === '1';
+export async function isMcpServerEnabled(): Promise<boolean> {
+  return await getSetting(MCP_ENABLED_SETTING) === '1';
 }
 
 // Gate every verb, not just POST: a disabled server must not answer "405, POST
 // instead" on GET/DELETE either. Runs before auth so a disabled server says so
 // plainly, without hinting whether the presented key would have been valid, and
 // reads the setting per request so the toggle applies without a restart.
-mcpRouter.use((req: Request, res: Response, next: NextFunction) => {
-  if (isMcpServerEnabled()) {
+mcpRouter.use(async (req: Request, res: Response, next: NextFunction) => {
+  if (await isMcpServerEnabled()) {
     next();
     return;
   }
@@ -674,7 +674,7 @@ mcpRouter.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 mcpRouter.post('/', async (req: Request, res: Response) => {
-  if (!authenticate(req, res)) return;
+  if (!await authenticate(req, res)) return;
 
   const body = req.body;
   // The 2025-06-18 revision removed JSON-RPC batching; a single message per
