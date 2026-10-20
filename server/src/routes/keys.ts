@@ -774,7 +774,7 @@ keysRouter.post('/', (req: Request, res: Response) => {
   const proxy = encryptProxyUrl(proxyUrl);
   const result = db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, proxy_encrypted, proxy_iv, proxy_auth_tag)
-    VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?, ?, ?) RETURNING id
   `, [platform, label ?? '', encrypted, iv, authTag, proxy.encrypted, proxy.iv, proxy.authTag]);
 
   // #1348: fetch the provider's models in the background when the catalog

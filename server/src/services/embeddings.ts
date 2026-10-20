@@ -257,7 +257,7 @@ export function registerCustomEmbeddingModel(db: Db, reg: CustomEmbeddingRegistr
   const model = db.run(`
     INSERT INTO embedding_models
       (family, platform, model_id, display_name, dimensions, max_input_tokens, priority, enabled, quota_label, key_id)
-    VALUES (?, 'custom', ?, ?, ?, ?, ?, 1, ?, ?)
+    VALUES (?, 'custom', ?, ?, ?, ?, ?, 1, ?, ?) RETURNING id
   `, [reg.family, reg.modelId, reg.displayName ?? reg.modelId, reg.dimensions, reg.maxInputTokens, priority, reg.quotaLabel, bindKeyId]);
   return { modelDbId: Number(model.lastInsertRowid), created: true };
 }

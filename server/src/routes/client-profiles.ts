@@ -95,7 +95,7 @@ clientProfilesRouter.post('/', (req: Request, res: Response) => {
   const prompt = parsed.data.systemPrompt?.trim() || null;
   const info = getDb().run(`
     INSERT INTO client_profiles (name, token_hash, encrypted_key, iv, auth_tag, system_prompt)
-    VALUES (?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?) RETURNING id
   `, [parsed.data.name, hashClientProfileKey(key), encrypted, iv, authTag, prompt]);
   const row = getProfile(Number(info.lastInsertRowid))!;
   // The only time the full key leaves the server (besides rotate).

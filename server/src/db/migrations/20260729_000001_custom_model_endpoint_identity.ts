@@ -36,19 +36,19 @@ const MODELS_COLUMNS = `
       platform TEXT NOT NULL,
       model_id TEXT NOT NULL,
       display_name TEXT NOT NULL,
-      intelligence_rank INTEGER NOT NULL,
-      speed_rank INTEGER NOT NULL,
+      intelligence_rank BIGINT NOT NULL,
+      speed_rank BIGINT NOT NULL,
       size_label TEXT NOT NULL DEFAULT '',
-      rpm_limit INTEGER,
-      rpd_limit INTEGER,
-      tpm_limit INTEGER,
-      tpd_limit INTEGER,
+      rpm_limit BIGINT,
+      rpd_limit BIGINT,
+      tpm_limit BIGINT,
+      tpd_limit BIGINT,
       monthly_token_budget TEXT NOT NULL DEFAULT '',
-      context_window INTEGER,
-      enabled INTEGER NOT NULL DEFAULT 1,
-      supports_vision INTEGER NOT NULL DEFAULT 0,
-      key_id INTEGER,
-      supports_tools INTEGER NOT NULL DEFAULT 0,
+      context_window BIGINT,
+      enabled BIGINT NOT NULL DEFAULT 1,
+      supports_vision BIGINT NOT NULL DEFAULT 0,
+      key_id BIGINT,
+      supports_tools BIGINT NOT NULL DEFAULT 0,
       paid_input_per_m REAL,
       paid_output_per_m REAL,
       source TEXT NOT NULL DEFAULT 'catalog'`;
@@ -60,37 +60,91 @@ const CARRIED_COLUMNS = [
   'supports_tools', 'paid_input_per_m', 'paid_output_per_m', 'source',
 ].join(', ');
 
-// Tables whose rows must survive the DROP. Discovered from the schema rather
+// Tables whose rows must survive the DROP, together with the foreign-key
+// constraints they declare against `models`. Discovered from the schema rather
 // than hard-coded, so a table added later that references models is carried too.
-async function childTablesOfModels(db: Db): Promise<string[]> {
-  // Public tables holding an FK to `models` (self excluded) — the PG equivalent
-  // of listing sqlite_master tables then filtering PRAGMA foreign_key_list.
-  const rows = await db.all(`
-    SELECT DISTINCT c.relname AS name
-      FROM pg_constraint con
-      JOIN pg_class c ON c.oid = con.conrelid
-      JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE con.contype = 'f'
-       AND con.confrelid = 'models'::regclass
-       AND c.oid <> con.confrelid
-       AND n.nspname = 'public'
-     ORDER BY c.relname
-  `) as { name: string }[];
-  return rows.map(r => r.name);
+interface ChildTable {
+  name: string;
+  fks: Array<{ name: string; column: string; onDelete: string }>;
 }
+
+async function childTablesOfModels(db: Db): Promise<ChildTable[]> {
+  // Public tables holding an FK to `models` (self excluded), with the column
+  // and the ON DELETE action of each constraint.
+  const rows = await db.all<{
+    table_name: string;
+    constraint_name: string;
+    column_name: string;
+    confdeltype: string;
+  }>(`
+    SELECT child.relname AS table_name,
+           con.conname AS constraint_name,
+           att.attname AS column_name,
+           con.confdeltype::text AS confdeltype
+      FROM pg_constraint con
+      JOIN pg_class child ON child.oid = con.conrelid
+      JOIN pg_class parent ON parent.oid = con.confrelid
+      JOIN pg_namespace n ON n.oid = child.relnamespace
+      JOIN unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+      JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.attnum
+     WHERE con.contype = 'f'
+       AND parent.relname = 'models'
+       AND child.oid <> con.confrelid
+       AND n.nspname = 'public'
+     ORDER BY child.relname, con.conname, k.ord
+  `);
+  const byTable = new Map<string, ChildTable>();
+  for (const row of rows) {
+    let entry = byTable.get(row.table_name);
+    if (!entry) {
+      entry = { name: row.table_name, fks: [] };
+      byTable.set(row.table_name, entry);
+    }
+    entry.fks.push({ name: row.constraint_name, column: row.column_name, onDelete: row.confdeltype });
+  }
+  return [...byTable.values()];
+}
+
+const ON_DELETE_SQL: Record<string, string> = {
+  a: '',
+  r: ' ON DELETE RESTRICT',
+  c: ' ON DELETE CASCADE',
+  n: ' ON DELETE SET NULL',
+  d: ' ON DELETE SET DEFAULT',
+};
 
 async function rebuildModels(db: Db, extraColumns: string, copiedColumns: string, unique: string): Promise<void> {
   const children = await childTablesOfModels(db);
-  // AUTOINCREMENT's high-water mark. DROP TABLE takes the sqlite_sequence row
-  // with it, and copying rows back only pushes the counter to the highest id
+
+  // AUTOINCREMENT's high-water mark. PostgreSQL keeps it in the identity
+  // sequence, not a sqlite_sequence table: DROP TABLE takes the sequence with
+  // it, and copying rows back only pushes the counter to the highest id
   // PRESENT — so a table whose top rows were deleted (catalog sync prunes
   // models routinely) would start handing out ids it has already used. Stale
   // fallback_config / profile_models rows pointing at a deleted model would
   // then silently adopt an unrelated new one.
-  const seqRow = await db.get("SELECT seq FROM sqlite_sequence WHERE name = 'models'") as { seq: number } | undefined;
+  let seqHigh = 0;
+  // `pg_sequence_last_value` is strict, so a NULL sequence name yields NULL
+  // rather than an error. That matters: a failed statement inside the
+  // migration's transaction aborts the whole transaction, so this query must
+  // not be able to fail.
+  const seqRow = await db.get<{ last_value: number }>(
+    "SELECT COALESCE(pg_sequence_last_value(pg_get_serial_sequence('models', 'id')), 0) AS last_value",
+  );
+  if (seqRow) seqHigh = Number(seqRow.last_value) || 0;
+
+  // PostgreSQL refuses to drop a table another table's foreign key depends on,
+  // even when the referencing tables are empty. Drop the constraints, rebuild,
+  // then put them back exactly as they were.
   for (const child of children) {
-    await db.exec(`CREATE TEMP TABLE "_endpoint_identity_${child}" AS SELECT * FROM "${child}"`);
-    await db.exec(`DELETE FROM "${child}"`);
+    for (const fk of child.fks) {
+      await db.exec(`ALTER TABLE "${child.name}" DROP CONSTRAINT "${fk.name}"`);
+    }
+  }
+
+  for (const child of children) {
+    await db.exec(`CREATE TEMP TABLE "_endpoint_identity_${child.name}" AS SELECT * FROM "${child.name}"`);
+    await db.exec(`DELETE FROM "${child.name}"`);
   }
 
   await db.exec(`
@@ -103,19 +157,23 @@ async function rebuildModels(db: Db, extraColumns: string, copiedColumns: string
     ALTER TABLE models_endpoint_identity RENAME TO models;
   `);
 
-  if (seqRow) {
-    // sqlite_sequence has no unique index, so no upsert: update the row the
-    // rename carried over, or re-create it if the table was empty.
-    const restored = await db.run("UPDATE sqlite_sequence SET seq = ? WHERE name = 'models' AND seq < ?", [seqRow.seq, seqRow.seq]);
-    if (restored.changes === 0
-      && !await db.get("SELECT 1 FROM sqlite_sequence WHERE name = 'models'")) {
-      await db.run("INSERT INTO sqlite_sequence (name, seq) VALUES ('models', ?)", [seqRow.seq]);
-    }
+  // Push the identity sequence back to the high-water mark the old table had.
+  if (seqHigh > 0) {
+    await db.run(
+      "SELECT setval(pg_get_serial_sequence('models', 'id'), GREATEST(?, 1))",
+      [seqHigh],
+    );
   }
 
   for (const child of children) {
-    await db.exec(`INSERT INTO "${child}" SELECT * FROM "_endpoint_identity_${child}"`);
-    await db.exec(`DROP TABLE "_endpoint_identity_${child}"`);
+    await db.exec(`INSERT INTO "${child.name}" SELECT * FROM "_endpoint_identity_${child.name}"`);
+    await db.exec(`DROP TABLE "_endpoint_identity_${child.name}"`);
+    for (const fk of child.fks) {
+      await db.exec(
+        `ALTER TABLE "${child.name}" ADD CONSTRAINT "${fk.name}" ` +
+        `FOREIGN KEY ("${fk.column}") REFERENCES models(id)${ON_DELETE_SQL[fk.onDelete] ?? ''}`,
+      );
+    }
   }
 }
 

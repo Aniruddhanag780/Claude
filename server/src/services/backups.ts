@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
-import { getDb, getDefaultDbPath, getSetting, setSetting } from '../db/index.js';
+import { getDb, getDataDir, getSetting, setSetting } from '../db/index.js';
 import type { Db } from '../db/types.js';
 import { encryptionKeyFingerprint } from '../lib/crypto.js';
 import { restrictDirToOwner, restrictToOwner } from '../lib/file-permissions.js';
@@ -94,7 +94,7 @@ function dataDir(db: Db): string {
   if (name && name !== ':memory:' && db.memory !== true) {
     return path.resolve(path.dirname(path.resolve(name)));
   }
-  return path.resolve(path.dirname(path.resolve(getDefaultDbPath())));
+  return getDataDir();
 }
 
 function isInside(root: string, target: string): boolean {
@@ -300,7 +300,7 @@ export function createBackup(
   restrictToOwner(filepath);
 
   const filesize = fs.statSync(filepath).size;
-  const result = db.run('INSERT INTO backups (filename, filepath, filesize, is_full, source, created_at, tables_json) VALUES (?, ?, ?, ?, ?, ?, ?)', [filename, filepath, filesize, isFull ? 1 : 0, source, createdAt, JSON.stringify(tables)]);
+  const result = db.run('INSERT INTO backups (filename, filepath, filesize, is_full, source, created_at, tables_json) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id', [filename, filepath, filesize, isFull ? 1 : 0, source, createdAt, JSON.stringify(tables)]);
 
   return { id: Number(result.lastInsertRowid), filename, filesize, isFull, source, createdAt, tables };
 }

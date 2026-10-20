@@ -32,7 +32,7 @@ import type { Db } from '../types.js';
 export async function up(db: Db): Promise<void> {
   await db.exec(`
     CREATE TABLE IF NOT EXISTS server_logs (
-      id INTEGER PRIMARY KEY,
+      id BIGINT PRIMARY KEY,
       level TEXT CHECK(level IN ('warn','error')),
       source TEXT,
       provider TEXT,
@@ -40,7 +40,7 @@ export async function up(db: Db): Promise<void> {
       event TEXT,
       request_id TEXT,
       message TEXT NOT NULL,
-      created_at_ms INTEGER NOT NULL
+      created_at_ms BIGINT NOT NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_server_logs_created

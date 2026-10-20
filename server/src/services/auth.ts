@@ -40,7 +40,7 @@ export function createUser(email: string, password: string): SessionUser {
     err.code = 'email_taken';
     throw err;
   }
-  const result = db.run('INSERT INTO users (email, password_hash) VALUES (?, ?)', [normalized, hashPassword(password)]);
+  const result = db.run('INSERT INTO users (email, password_hash) VALUES (?, ?) RETURNING id', [normalized, hashPassword(password)]);
   return { userId: Number(result.lastInsertRowid), email: normalized };
 }
 

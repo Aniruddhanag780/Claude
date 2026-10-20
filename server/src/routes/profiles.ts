@@ -165,7 +165,7 @@ profilesRouter.post('/', (req: Request, res: Response) => {
     }
   }
 
-  const result = db.run('INSERT INTO profiles (name, emoji, color, type, sort_order, layout_config, auto_sort, auto_include_new_models) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [name, emoji, color, 'custom', maxOrder + 1, layoutConfig, autoSort, empty ? 0 : 1]);
+  const result = db.run('INSERT INTO profiles (name, emoji, color, type, sort_order, layout_config, auto_sort, auto_include_new_models) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id', [name, emoji, color, 'custom', maxOrder + 1, layoutConfig, autoSort, empty ? 0 : 1]);
 
   const profileId = result.lastInsertRowid as number;
 
@@ -462,7 +462,7 @@ export function seedProfiles(db: any): void {
 
   const seed = db.transaction(() => {
     for (const builtin of builtins) {
-      const result = db.run('INSERT INTO profiles (name, emoji, color, type, sort_order) VALUES (?, ?, ?, ?, ?)', [builtin.name, builtin.emoji, builtin.color, builtin.profileType, -1]);
+      const result = db.run('INSERT INTO profiles (name, emoji, color, type, sort_order) VALUES (?, ?, ?, ?, ?) RETURNING id', [builtin.name, builtin.emoji, builtin.color, builtin.profileType, -1]);
       const profileId = result.lastInsertRowid as number;
 
       const models = db.all('SELECT id, LOWER(display_name) as name FROM models ORDER BY id ASC') as { id: number; name: string }[];

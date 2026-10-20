@@ -21,7 +21,7 @@
 import type { Db } from '../types.js';
 
 async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
-  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', [table]) as { name: string }[];
   return columns.some(c => c.name === column);
 }
 
@@ -29,7 +29,7 @@ export async function up(db: Db): Promise<void> {
   if (await hasColumn(db, 'requests', 'model_db_id')) return;
 
   // Add the column (nullable — unattributed requests keep NULL).
-  await db.run('ALTER TABLE requests ADD COLUMN model_db_id INTEGER');
+  await db.run('ALTER TABLE requests ADD COLUMN model_db_id BIGINT');
 
   // Non-unique index for backfill scans and future analytics queries.
   await db.run('CREATE INDEX IF NOT EXISTS idx_requests_model_db_id ON requests(model_db_id)');

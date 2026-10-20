@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 import { runMigrations } from './migrate/runner.js';
 import { initEncryptionKey, isEncryptionKeyInitialized } from '../lib/crypto.js';
@@ -84,6 +86,20 @@ export async function initDb(connectionString?: string): Promise<Db> {
   if (!isEncryptionKeyInitialized()) await initEncryptionKey(conn);
 
   return conn;
+}
+
+/**
+ * Local directory for files this app owns (SQL dumps, export artifacts).
+ *
+ * Postgres has no database file to sit next to, so the data directory is a
+ * plain local path. It is NOT durable storage - it lives on the host's
+ * ephemeral disk and is wiped on every deploy - which is exactly why the
+ * application records themselves live in Postgres.
+ */
+export function getDataDir(): string {
+  const configured = process.env.FREEAPI_DATA_DIR?.trim();
+  if (configured) return path.resolve(configured);
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'data');
 }
 
 /** Close the shared pool. Safe to call when nothing is connected. */

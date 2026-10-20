@@ -33,13 +33,13 @@ export async function up(db: Db): Promise<void> {
       body_json TEXT NOT NULL,
       platform TEXT NOT NULL,
       model_id TEXT NOT NULL,
-      key_id INTEGER,
-      prompt_tokens INTEGER NOT NULL,
-      completion_tokens INTEGER NOT NULL,
-      hit_count INTEGER NOT NULL DEFAULT 0,
-      created_at_ms INTEGER NOT NULL,
-      last_hit_at_ms INTEGER,
-      expires_at_ms INTEGER NOT NULL
+      key_id BIGINT,
+      prompt_tokens BIGINT NOT NULL,
+      completion_tokens BIGINT NOT NULL,
+      hit_count BIGINT NOT NULL DEFAULT 0,
+      created_at_ms BIGINT NOT NULL,
+      last_hit_at_ms BIGINT,
+      expires_at_ms BIGINT NOT NULL
     );
 
     -- Startup purge and expiry sweeps scan by TTL.

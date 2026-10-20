@@ -2,7 +2,7 @@ import type { Db } from '../types.js';
 
 /** Guard so the migration can be re-run safely (roundtrip/catalog-sync tests re-run await up()). */
 async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
-  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', [table]) as { name: string }[];
   return columns.some(col => col.name === column);
 }
 
@@ -17,10 +17,10 @@ async function hasColumn(db: Db, table: string, column: string): Promise<boolean
  */
 export async function up(db: Db): Promise<void> {
   if (!await hasColumn(db, 'api_keys', 'monthly_request_cap')) {
-    await db.run('ALTER TABLE api_keys ADD COLUMN monthly_request_cap INTEGER NOT NULL DEFAULT 0');
+    await db.run('ALTER TABLE api_keys ADD COLUMN monthly_request_cap BIGINT NOT NULL DEFAULT 0');
   }
   if (!await hasColumn(db, 'api_keys', 'monthly_token_cap')) {
-    await db.run('ALTER TABLE api_keys ADD COLUMN monthly_token_cap INTEGER NOT NULL DEFAULT 0');
+    await db.run('ALTER TABLE api_keys ADD COLUMN monthly_token_cap BIGINT NOT NULL DEFAULT 0');
   }
 }
 

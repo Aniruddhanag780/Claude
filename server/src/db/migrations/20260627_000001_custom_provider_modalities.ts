@@ -1,13 +1,13 @@
 import type { Db } from '../types.js';
 
 async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
-  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', [table]) as { name: string }[];
   return columns.some(col => col.name === column);
 }
 
 async function addKeyIdColumn(db: Db, table: string): Promise<void> {
   if (!await hasColumn(db, table, 'key_id')) {
-    await db.run(`ALTER TABLE ${table} ADD COLUMN key_id INTEGER`);
+    await db.run(`ALTER TABLE ${table} ADD COLUMN key_id BIGINT`);
   }
 }
 

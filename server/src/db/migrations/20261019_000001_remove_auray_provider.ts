@@ -21,7 +21,7 @@ const TABLES = ['api_keys', 'models', 'embedding_models', 'media_models', 'model
 type Table = (typeof TABLES)[number];
 
 async function tableExists(db: Db, table: string): Promise<boolean> {
-  return await db.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", [table]) !== undefined;
+  return await db.get("SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?", [table]) !== undefined;
 }
 
 async function selectRows(db: Db, table: Table): Promise<Row[]> {
@@ -83,7 +83,7 @@ export async function down(db: Db): Promise<void> {
     for (const raw of removed[table] ?? []) {
       const r = decode(raw);
       const cols = Object.keys(r);
-      await db.run(`INSERT OR IGNORE INTO ${table} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`, cols.map(c => r[c]));
+      await db.run(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')}) ON CONFLICT DO NOTHING`, cols.map(c => r[c]));
     }
   }
   await db.run('DELETE FROM settings WHERE key = ?', [SETTING_KEY]);

@@ -1018,7 +1018,7 @@ function applyCatalogInner(db: Db, catalog: Catalog): NonNullable<SyncResult['co
     const now = Date.now();
     for (const q of catalog.quirks) {
       const info = db.run(`INSERT INTO quirks (slug, title, body, severity, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)`, [q.slug, q.title, q.body, q.severity, now, now]);
-      for (const t of q.targets) db.run(`INSERT INTO quirk_targets (quirk_id, platform, model_glob) VALUES (?, ?, ?)`, [info.lastInsertRowid, t.platform ?? null, t.modelGlob ?? null]);
+      for (const t of q.targets) db.run(`INSERT INTO quirk_targets (quirk_id, platform, model_glob) VALUES (?, ?, ?) RETURNING id`, [info.lastInsertRowid, t.platform ?? null, t.modelGlob ?? null]);
       counts.quirks++;
     }
   });

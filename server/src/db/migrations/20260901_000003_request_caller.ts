@@ -14,7 +14,7 @@
 import type { Db } from '../types.js';
 
 async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
-  const row = await db.all(`PRAGMA table_info(${table})`) as Array<{ name: string }>;
+  const row = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', [table]) as Array<{ name: string }>;
   return row.some(c => c.name === column);
 }
 

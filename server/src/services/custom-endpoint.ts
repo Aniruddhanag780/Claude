@@ -73,7 +73,7 @@ function insertKey(db: Db, baseUrl: string, secret: string, label: string | unde
   // endpoint, not the row, so a new key must not land back in the "Custom" pile.
   const r = db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url, group_label)
-    VALUES ('custom', ?, ?, ?, ?, 'unknown', 1, ?, ?)
+    VALUES ('custom', ?, ?, ?, ?, 'unknown', 1, ?, ?) RETURNING id
   `, [label ?? defaultCustomEndpointLabel(baseUrl), encrypted, iv, authTag, baseUrl, customEndpointGroup(db, baseUrl)]);
   return { keyId: Number(r.lastInsertRowid), storedKey: secret, created: true };
 }

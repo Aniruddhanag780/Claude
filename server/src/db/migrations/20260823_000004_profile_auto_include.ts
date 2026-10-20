@@ -1,7 +1,7 @@
 import type { Db } from '../types.js';
 
 async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
-  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', [table]) as { name: string }[];
   return columns.some((candidate) => candidate.name === column);
 }
 
@@ -17,7 +17,7 @@ async function hasColumn(db: Db, table: string, column: string): Promise<boolean
  *  the user put in it. */
 export async function up(db: Db): Promise<void> {
   if (!await hasColumn(db, 'profiles', 'auto_include_new_models')) {
-    await db.run('ALTER TABLE profiles ADD COLUMN auto_include_new_models INTEGER NOT NULL DEFAULT 1');
+    await db.run('ALTER TABLE profiles ADD COLUMN auto_include_new_models BIGINT NOT NULL DEFAULT 1');
   }
 }
 

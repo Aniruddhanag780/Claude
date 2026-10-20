@@ -24,7 +24,7 @@ export async function up(db: Db): Promise<void> {
       iv TEXT NOT NULL,
       auth_tag TEXT NOT NULL,
       system_prompt TEXT,
-      enabled INTEGER NOT NULL DEFAULT 1,
+      enabled BIGINT NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')),
       updated_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS'))
     );

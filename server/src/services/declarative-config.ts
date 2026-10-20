@@ -207,7 +207,7 @@ function upsertApiKey(db: Db, input: z.infer<typeof keySchema>): number {
     }
     const inserted = db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
-      VALUES ('custom', ?, ?, ?, ?, 'unknown', ?, ?)
+      VALUES ('custom', ?, ?, ?, ?, 'unknown', ?, ?) RETURNING id
     `, [label, key.encrypted, key.iv, key.authTag, enabled, baseUrl]);
     return Number(inserted.lastInsertRowid);
   }
@@ -223,7 +223,7 @@ function upsertApiKey(db: Db, input: z.infer<typeof keySchema>): number {
   }
   const inserted = db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, ?, ?, ?, ?, 'unknown', ?)
+    VALUES (?, ?, ?, ?, ?, 'unknown', ?) RETURNING id
   `, [platform, label, key.encrypted, key.iv, key.authTag, enabled]);
   return Number(inserted.lastInsertRowid);
 }

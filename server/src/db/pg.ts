@@ -4,6 +4,23 @@ import type { Db, QueryResult, RunResult } from './types.js';
 
 const { Pool } = pg;
 
+/**
+ * SQLite's `INTEGER` is a 64-bit integer that JavaScript reads as a number.
+ * PostgreSQL's `bigint` (int8) comes back from node-postgres as a *string* by
+ * default, so every migrated read would see `"3"` where the SQLite code saw
+ * `3` — which silently turns arithmetic into string concatenation
+ * (`"3" + 1 + 1` is `"311"`, not `5`) and breaks COUNT(*) comparisons.
+ *
+ * Parse int8 and numeric back to numbers, matching the SQLite behaviour the
+ * upstream code was written against. This mirrors what SQLite itself did: a
+ * 64-bit integer beyond 2^53 already lost precision in the JavaScript number
+ * it was stored in, so nothing is given up here.
+ */
+pg.types.setTypeParser(pg.types.builtins.INT8, (v) => (v === null ? null : Number(v)));
+pg.types.setTypeParser(pg.types.builtins.NUMERIC, (v) => (v === null ? null : Number(v)));
+pg.types.setTypeParser(pg.types.builtins.INT8_ARRAY, (v) => (v === null ? null : v.map(Number)));
+pg.types.setTypeParser(pg.types.builtins.NUMERIC_ARRAY, (v) => (v === null ? null : v.map(Number)));
+
 export interface SslResolution {
   /** Value for pg.PoolConfig.ssl. `undefined` means "let the driver decide" (used
    *  when the connection string already carries an explicit sslmode, which

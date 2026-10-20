@@ -35,11 +35,11 @@ export async function up(db: Db): Promise<void> {
     await db.run(`
       CREATE TABLE request_hourly (
         hour TEXT PRIMARY KEY,
-        total_requests INTEGER NOT NULL DEFAULT 0,
-        success_count INTEGER NOT NULL DEFAULT 0,
-        error_count INTEGER NOT NULL DEFAULT 0,
-        input_tokens INTEGER NOT NULL DEFAULT 0,
-        output_tokens INTEGER NOT NULL DEFAULT 0
+        total_requests BIGINT NOT NULL DEFAULT 0,
+        success_count BIGINT NOT NULL DEFAULT 0,
+        error_count BIGINT NOT NULL DEFAULT 0,
+        input_tokens BIGINT NOT NULL DEFAULT 0,
+        output_tokens BIGINT NOT NULL DEFAULT 0
       )
     `);
     await db.run(`CREATE INDEX idx_request_hourly_hour ON request_hourly(hour)`);

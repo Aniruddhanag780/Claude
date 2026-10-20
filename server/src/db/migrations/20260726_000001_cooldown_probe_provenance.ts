@@ -14,7 +14,7 @@
 import type { Db } from '../types.js';
 
 async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
-  const columns = await db.all(`PRAGMA table_info(${table})`) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', [table]) as { name: string }[];
   return columns.some((candidate) => candidate.name === column);
 }
 
@@ -28,7 +28,7 @@ export async function up(db: Db): Promise<void> {
   if (!await hasColumn(db, 'rate_limit_cooldowns', 'set_at_ms')) {
     // Nullable: rows written before this migration have an unknown start time,
     // which the prober treats as "old enough to probe".
-    await db.run('ALTER TABLE rate_limit_cooldowns ADD COLUMN set_at_ms INTEGER');
+    await db.run('ALTER TABLE rate_limit_cooldowns ADD COLUMN set_at_ms BIGINT');
   }
 }
 

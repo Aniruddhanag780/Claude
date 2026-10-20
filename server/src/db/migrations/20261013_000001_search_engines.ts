@@ -23,10 +23,10 @@ export async function up(db: Db): Promise<void> {
       created_at TEXT NOT NULL DEFAULT (to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')),
       engine_id TEXT NOT NULL,
       platform TEXT NOT NULL,
-      key_id INTEGER,
+      key_id BIGINT,
       status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
-      latency_ms INTEGER NOT NULL DEFAULT 0,
-      result_count INTEGER NOT NULL DEFAULT 0,
+      latency_ms BIGINT NOT NULL DEFAULT 0,
+      result_count BIGINT NOT NULL DEFAULT 0,
       client_agent TEXT,
       error TEXT
     );

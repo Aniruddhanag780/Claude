@@ -32,8 +32,8 @@ export async function up(db: Db): Promise<void> {
       messages_json TEXT NOT NULL DEFAULT '[]',
       model TEXT,
       system_prompt TEXT,
-      created_at_ms INTEGER NOT NULL,
-      updated_at_ms INTEGER NOT NULL
+      created_at_ms BIGINT NOT NULL,
+      updated_at_ms BIGINT NOT NULL
     );
 
     -- The sidebar's only query: most recently touched first.

@@ -212,7 +212,7 @@ conversationsRouter.post('/', (req: Request, res: Response) => {
   const info = getDb().run(`
     INSERT INTO playground_conversations
       (title, messages_json, model, system_prompt, created_at_ms, updated_at_ms)
-    VALUES (?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?) RETURNING id
   `, [parsed.data.title ?? '', messagesJson, parsed.data.model ?? null, parsed.data.systemPrompt ?? null, now, now]);
   res.status(201).json(toJson(getConversation(Number(info.lastInsertRowid))!));
 });

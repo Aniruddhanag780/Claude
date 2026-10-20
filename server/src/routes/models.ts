@@ -157,7 +157,7 @@ modelsRouter.post('/', (req: Request, res: Response) => {
         $1, $2, $3, $4, $5, $6,
         $7, $8, $9, $10, '', $11,
         1, $12, $13, $14, 'user', $15
-      )
+      ) RETURNING id
     `, [data.platform, data.modelId, data.displayName || data.modelId, seed.intelligenceRank, seed.speedRank, seed.sizeLabel, data.rpmLimit ?? null, data.rpdLimit ?? null, data.tpmLimit ?? null, data.tpdLimit ?? null, data.contextWindow ?? null, data.supportsVision ? 1 : 0, data.supportsTools !== undefined ? (data.supportsTools ? 1 : 0) : 1, boundKeyId, endpointScope]);
 
     const modelDbId = Number(info.lastInsertRowid);

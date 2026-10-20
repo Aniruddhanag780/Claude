@@ -43,7 +43,7 @@ export function mintUrlToken(label: string): UrlTokenRow & { token: string } {
   const prefix = `${token.slice(0, 12)}…`;
   const result = getDb().run(`
     INSERT INTO url_tokens (token_hash, label, token_prefix)
-    VALUES (?, ?, ?)
+    VALUES (?, ?, ?) RETURNING id
   `, [hashToken(token), label.trim(), prefix]);
   const row = listUrlTokens().find(entry => entry.id === Number(result.lastInsertRowid))!;
   return { ...row, token };
