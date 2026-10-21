@@ -29,7 +29,7 @@ import { logRequest } from '../lib/request-log.js';
 import { observeServedModel } from '../lib/served-model.js';
 import { parseCacheDirective, cacheActive, isCacheableTemperature, computeCacheKey, getCachedResponse, storeCachedResponse, getCachedStreamResponse, storeCachedStreamResponse, STREAM_CACHE_MAX_BYTES } from '../services/cache.js';
 import { normalizeIdempotencyKey, hashIdempotencyKey, computeIdempotencyFingerprint, lookupIdempotencyReplay, storeIdempotencyResult } from '../services/idempotency.js';
-import { runFallbackLoop, newFallbackState, fallbackRoutingTokens, recordUpstreamSuccess, exhaustedRetryError, setFallbackHeaders, exhaustionErrorPayload, setExhaustionHeaders, type AttemptRecord } from '../lib/fallback-loop.js';
+import { runFallbackLoop, newFallbackState, fallbackRoutingTokens, recordUpstreamSuccess, exhaustedRetryError, setFallbackHeaders, exhaustionErrorPayload, setExhaustionHeaders, type AttemptRecord, REASONING_HOLD_MAX_MS } from '../lib/fallback-loop.js';
 import { routedViaValue, safeHeaderValue } from '../lib/header-value.js';
 import { applyTokenBudget, tokenBudgetMessage } from '../lib/guardrails.js';
 import { samplingParamSchemaFields, pickSamplingParams, supportedParametersForPlatforms } from '../lib/sampling-params.js';
@@ -2530,6 +2530,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         let totalOutputTokens = 0;
         let headerSent = false;
         let ttfbMs: number | null = null;
+        const attemptStart = Date.now();
 
         // Hold-window state: 'undecided' until the first text either matches
         // a dialect marker (→ 'dialect': buffer everything, rescue at end),
@@ -2705,6 +2706,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
               // reasoning keys; forwarding them raw would duplicate the call).
               // #764: thinking-only chunks still consumed tokens — count them.
               if (reasoning.length > 0) totalOutputTokens += Math.ceil(reasoning.length / 4);
+              // #1642: long reasoning with nothing sent yet: commit, then stream it live.
+              if (reasoning.length > 0 && !headerSent && Date.now() - attemptStart >= REASONING_HOLD_MAX_MS) flushHeaders();
               if (choice.delta && Object.keys(choice.delta).some(k => k !== 'content' && k !== 'tool_calls' && choice.delta[k] != null)) {
                 // `usage: undefined` (dropped by JSON.stringify): it was held
                 // above and is re-emitted once, after our finish chunk.
@@ -2810,11 +2813,12 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             return 'committed';
           }
 
-          const hasText = headerSent || heldText.trim().length > 0;
+          const hasText = mode === 'passthrough' || heldText.trim().length > 0;
           if (!hasText && completedCalls.length === 0) {
             // Nothing usable came out — same failover semantics as the
-            // non-stream empty-completion path. Headers can't have been sent
-            // (header flush requires payload), so the client never notices.
+            // non-stream empty-completion path. Headers are only sent here after a
+            // #1642 long-reasoning commit, where the catch emits stream_error;
+            // otherwise the client never notices.
             // finish_reason 'length' = the model spent the whole output budget
             // on hidden reasoning before any visible text: fail over, but skip
             // the cooldown/penalty (not a provider-health signal).
