@@ -45,6 +45,22 @@ export function isMoonshotEndpoint(baseUrl: string): boolean {
 }
 
 /**
+ * Whether a base URL points at opencode.ai. OpenCode Go (the paid tier,
+ * usually added as a custom provider) rejects chat completions that do not
+ * carry an `x-opencode-session` header, while its model list answers without
+ * one — so the header is gated on the endpoint host, never on the platform
+ * or model id. Returns false for anything that does not parse as a URL.
+ * (#1639)
+ */
+export function isOpencodeAiHost(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname === 'opencode.ai';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Some free-tier upstreams (notably Pollinations) answer HTTP 200 but put an
  * out-of-credits / top-up notice in the assistant message instead of returning
  * a 402. That reads as a successful completion, so the fallback loop never
@@ -116,6 +132,9 @@ export class OpenAICompatProvider extends BaseProvider {
   /** True only for a custom endpoint whose host is Moonshot's own API; see
    * isMoonshotEndpoint(). Gates the assistant `partial` prefill flag (#1038). */
   private readonly forwardsPartial: boolean;
+  /** Session UUID sent as `x-opencode-session` when the endpoint host is
+   * opencode.ai; see isOpencodeAiHost(). Generated once per instance. */
+  private readonly opencodeSessionId?: string;
   /** Optional provider-reported quota endpoint (#1403). */
   private readonly quotaProbe?: QuotaProbeSpec;
 
@@ -141,6 +160,7 @@ export class OpenAICompatProvider extends BaseProvider {
     this.keyless = opts.keyless ?? false;
     this.forceSingleToolCall = opts.forceSingleToolCall ?? false;
     this.forwardsPartial = opts.platform === 'custom' && isMoonshotEndpoint(opts.baseUrl);
+    this.opencodeSessionId = isOpencodeAiHost(opts.baseUrl) ? crypto.randomUUID() : undefined;
     this.quotaProbe = opts.quotaProbe;
   }
 
@@ -221,6 +241,19 @@ export class OpenAICompatProvider extends BaseProvider {
    * Kilo, OVH and AI Horde all accept both modes per their docs. */
   private authHeader(apiKey: string): Record<string, string> {
     return bearerAuthHeader(apiKey);
+  }
+
+  /** Build the per-request headers for chat completions, folding in the
+   * opencode.ai session UUID when this provider targets that host. Other
+   * hosts: byte-for-byte unchanged. */
+  private requestHeaders(apiKey: string): Record<string, string> {
+    const headers: Record<string, string> = {
+      ...this.authHeader(apiKey),
+      'Content-Type': 'application/json',
+      ...this.extraHeaders,
+    };
+    if (this.opencodeSessionId) headers['x-opencode-session'] = this.opencodeSessionId;
+    return headers;
   }
 
   /** Requesty's Leanstral route rejects greedy sampling when temperature=0.
@@ -329,11 +362,7 @@ export class OpenAICompatProvider extends BaseProvider {
     const sampling = this.samplingForModel(modelId, options);
     const res = await this.fetchWithTimeout(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        ...this.authHeader(apiKey),
-        'Content-Type': 'application/json',
-        ...this.extraHeaders,
-      },
+      headers: this.requestHeaders(apiKey),
       body: JSON.stringify({
         model: modelId,
         messages: this.messagesForPlatform(messages, modelId),
@@ -460,11 +489,7 @@ export class OpenAICompatProvider extends BaseProvider {
     const sampling = this.samplingForModel(modelId, options);
     const res = await this.fetchWithTimeout(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        ...this.authHeader(apiKey),
-        'Content-Type': 'application/json',
-        ...this.extraHeaders,
-      },
+      headers: this.requestHeaders(apiKey),
       body: JSON.stringify({
         model: modelId,
         messages: this.messagesForPlatform(messages, modelId),
