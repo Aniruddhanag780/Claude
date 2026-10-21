@@ -199,6 +199,15 @@ macOS 要求 12 Monterey 或更高版本；Apple Silicon 请选择 **arm64**，I
 npx freellmapi setup-claude --url http://localhost:3001 --api-key <统一密钥>
 ```
 
+**AtomCode** 用户可先将环境变量 `FREELLMAPI_API_KEY` 设置为统一密钥，然后运行：
+
+```bash
+npx freellmapi setup-atomcode --url http://localhost:3001 --dry-run
+npx freellmapi setup-atomcode --url http://localhost:3001
+```
+
+`--dry-run` 只预览、不写入文件；添加 `--model <模型ID>` 可指定模型。配置会合并到 `~/.atomcode/config.toml`，保留无关设置。完成后重启 AtomCode，使新配置生效。
+
 每个生成器都支持 `--dry-run`，改动已有文件前会先创建带时间戳的备份，并且是合并进用户配置而不是覆盖。启动器则把凭据完全挡在配置文件之外：Claude Code 用 `npx freellmapi launch`，Codex 用 `npx freellmapi launch-codex`。
 
 | 智能体 | 自动配置命令 | Base URL |
@@ -209,6 +218,7 @@ npx freellmapi setup-claude --url http://localhost:3001 --api-key <统一密钥>
 | Continue | `setup-continue` | `/v1` |
 | Aider | `setup-aider` | `/v1` |
 | OpenCode | `setup-opencode` | `/v1` |
+| AtomCode | `setup-atomcode` | `/v1` |
 | Goose | `setup-goose` | `/v1` |
 | Qwen Code | `setup-qwen` | `/v1`（或原生 `/v1beta`） |
 | Roo / Kilo / Crush | `setup-roo` / `setup-kilo` / `setup-crush` | `/v1` |
