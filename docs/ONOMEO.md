@@ -25,8 +25,9 @@ counts as several calls (one per 50,000 counted characters). A payment grants
 (403), `network_quota` (403), `site_busy` (429), `too_fast` (429).
 `bad_key` (401) is the only authentication verdict. Answers to balance-less
 accounts end with an "— via onomeo.com" signature line (tool-call,
-structured-output and pure-JSON answers are exempt) — acceptable for chat,
-worth knowing before routing agents that parse text.
+structured-output and pure-JSON answers are exempt). The adapter strips it from
+completions and streams (live 2026-10-21 it arrives as its own final delta), so
+clients and agents never see it.
 
 Model rows are published only through the signed Oracle catalog. No seeds,
 model-discovery enrollment, or database migration bypasses the existing

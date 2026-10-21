@@ -1,7 +1,33 @@
-import { providerHttpError, type KeyValidationResult } from './base.js';
+import type { ChatCompletionChunk, ChatCompletionResponse, ChatMessage } from '@freellmapi/shared/types.js';
+import { providerHttpError, type CompletionOptions, type KeyValidationResult } from './base.js';
+import type { QuotaObservationContext } from '../services/provider-quota.js';
 import { OpenAICompatProvider } from './openai-compat.js';
 
 export const ONOMEO_BASE_URL = 'https://onomeo.com/v1';
+
+// Free-tier answers end with this line (verified live 2026-10-21: every text
+// reply, streamed as its own final delta "\n\n— via onomeo.com"; tool-call
+// turns carry none). It is provider branding, not model output, so it must not
+// reach clients or agents that parse the text.
+const SIGNATURE = '— via onomeo.com';
+const SIGNATURE_TAIL = /\s*— via onomeo\.com\s*$/;
+const SIGNATURE_FORMS = [`\n\n${SIGNATURE}`, `\n${SIGNATURE}`, SIGNATURE];
+
+export function stripOnomeoSignature(text: string): string {
+  return text.replace(SIGNATURE_TAIL, '');
+}
+
+/** Length of the longest suffix of `text` that could still grow into the
+ *  signature, so a stream holds back only what might be branding. */
+function heldSuffixLength(text: string): number {
+  let held = 0;
+  for (const form of SIGNATURE_FORMS) {
+    for (let n = Math.min(form.length, text.length); n > held; n--) {
+      if (form.startsWith(text.slice(text.length - n))) { held = n; break; }
+    }
+  }
+  return held;
+}
 
 /**
  * onomeo (#1460): an OpenAI-compatible gateway whose free models share one
@@ -33,5 +59,57 @@ export class OnomeoProvider extends OpenAICompatProvider {
       throw Object.assign(new Error('onomeo returned an invalid model list'), { status: 502 });
     }
     return true;
+  }
+
+  override async chatCompletion(
+    apiKey: string, messages: ChatMessage[], modelId: string,
+    options?: CompletionOptions, quotaContext?: QuotaObservationContext,
+  ): Promise<ChatCompletionResponse> {
+    const response = await super.chatCompletion(apiKey, messages, modelId, options, quotaContext);
+    for (const choice of response.choices ?? []) {
+      if (typeof choice.message?.content === 'string') {
+        choice.message.content = stripOnomeoSignature(choice.message.content);
+      }
+    }
+    return response;
+  }
+
+  override async *streamChatCompletion(
+    apiKey: string, messages: ChatMessage[], modelId: string,
+    options?: CompletionOptions, quotaContext?: QuotaObservationContext,
+  ): AsyncGenerator<ChatCompletionChunk> {
+    // Text that might be the start of the signature is held back until the
+    // next delta settles it; a signature at the end of the stream is dropped.
+    let held = '';
+    let lastChunk: ChatCompletionChunk | null = null;
+    for await (const chunk of super.streamChatCompletion(apiKey, messages, modelId, options, quotaContext)) {
+      lastChunk = chunk;
+      const delta = chunk.choices?.[0]?.delta;
+      if (typeof delta?.content !== 'string') {
+        if (held && chunk.choices?.[0]?.finish_reason) {
+          const tail = stripOnomeoSignature(held);
+          held = '';
+          if (tail && delta) delta.content = tail;
+        }
+        yield chunk;
+        continue;
+      }
+      const hadText = delta.content.length > 0;
+      let text = held + delta.content;
+      if (text.trimEnd().endsWith(SIGNATURE)) text = stripOnomeoSignature(text);
+      const keep = heldSuffixLength(text);
+      held = text.slice(text.length - keep);
+      delta.content = text.slice(0, text.length - keep);
+      // Skip only a delta whose text was entirely held back or stripped; role
+      // and finish chunks with empty content still pass through.
+      if (delta.content || !hadText || chunk.choices[0].finish_reason) yield chunk;
+    }
+    const tail = stripOnomeoSignature(held);
+    if (tail && lastChunk) {
+      yield {
+        ...lastChunk,
+        choices: [{ index: 0, delta: { content: tail }, finish_reason: null }],
+      } as ChatCompletionChunk;
+    }
   }
 }
