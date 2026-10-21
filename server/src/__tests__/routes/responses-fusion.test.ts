@@ -13,7 +13,8 @@ vi.mock('../../services/fusion.js', async (importOriginal) => {
 
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getUnifiedApiKey } from '../../db/index.js';
+import { getUnifiedApiKey } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function post(app: Express, body: unknown, key: string) {
   const server = app.listen(0, '127.0.0.1');
@@ -63,11 +64,11 @@ describe('POST /v1/responses virtual Fusion model', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
   beforeEach(() => mockRunFusion.mockReset());

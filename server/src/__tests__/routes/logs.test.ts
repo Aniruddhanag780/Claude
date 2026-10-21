@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import {
   RING_CAPACITY,
@@ -15,6 +15,7 @@ import {
 } from '../../lib/server-logs.js';
 import { installLogRedaction } from '../../lib/log-redaction.js';
 import { getServerLogRetentionConfig, pruneServerLogs } from '../../services/request-retention.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // The dashboard's server-log viewer: capture, storage, the query surface and
 // the auth gate. Same in-memory DB + minted dashboard session as the other
@@ -64,18 +65,18 @@ describe('server log viewer', () => {
   let dashToken: string;
   let unifiedKey: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    unifiedKey = getUnifiedApiKey();
-    dashToken = mintDashboardToken('logs@example.com');
+    unifiedKey = await getUnifiedApiKey();
+    dashToken = await mintDashboardToken('logs@example.com');
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM server_logs').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM server_logs'));
     resetServerLogsForTest();
-    initServerLogs();
+    await initServerLogs();
   });
 
   async function fetchLogs(query = ''): Promise<{ status: number; body: LogsResponse }> {
@@ -145,8 +146,8 @@ describe('server log viewer', () => {
       expect(messages).toEqual(['GET /api/models 200 8ms']);
     });
 
-    it('caps a very long line instead of dropping it', () => {
-      recordLogEntry({ level: 'info', message: 'x'.repeat(20_000) });
+    it('caps a very long line instead of dropping it', async () => {
+      await recordLogEntry({ level: 'info', message: 'x'.repeat(20_000) });
       const entry = ringSnapshot().at(-1)!;
       expect(entry.message.length).toBeLessThanOrEqual(6000);
       expect(entry.message.endsWith('[truncated]')).toBe(true);
@@ -155,13 +156,13 @@ describe('server log viewer', () => {
 
   // ── Structured events ──────────────────────────────────────────────────────
 
-  it('providerLog round-trips its metadata and mirrors to stdout exactly once', () => {
+  it('providerLog round-trips its metadata and mirrors to stdout exactly once', async () => {
     const seen: unknown[][] = [];
     const origWarn = console.warn;
     console.warn = (...args: unknown[]) => { seen.push(args); };
     const restore = installLogRedaction();
 
-    providerLog('warn', '[Health] Key 7 (groq) invalid: unauthorized', {
+    await providerLog('warn', '[Health] Key 7 (groq) invalid: unauthorized', {
       provider: 'groq',
       model: 'llama-3.3-70b',
       event: 'key_invalid',
@@ -189,29 +190,27 @@ describe('server log viewer', () => {
     });
   });
 
-  it('redacts a providerLog message even though it bypasses the console wrapper', () => {
+  it('redacts a providerLog message even though it bypasses the console wrapper', async () => {
     const secret = filler(40);
-    providerLog('error', `[Health] key rejected: sk-${secret}`, { provider: 'openrouter' });
+    await providerLog('error', `[Health] key rejected: sk-${secret}`, { provider: 'openrouter' });
     expect(ringSnapshot().at(-1)!.message).not.toContain(secret);
   });
 
   // ── Storage ────────────────────────────────────────────────────────────────
 
-  it('persists warn and error only, and preloads them on a cold start', () => {
-    recordLogEntry({ level: 'info', message: 'routine' });
-    recordLogEntry({ level: 'warn', message: '[Health] key benched', provider: 'groq' });
-    recordLogEntry({ level: 'error', message: '[Router] no key available', provider: 'cerebras' });
-    recordLogEntry({ level: 'debug', message: 'cache probe' });
+  it('persists warn and error only, and preloads them on a cold start', async () => {
+    await recordLogEntry({ level: 'info', message: 'routine' });
+    await recordLogEntry({ level: 'warn', message: '[Health] key benched', provider: 'groq' });
+    await recordLogEntry({ level: 'error', message: '[Router] no key available', provider: 'cerebras' });
+    await recordLogEntry({ level: 'debug', message: 'cache probe' });
 
-    const rows = getDb()
-      .prepare('SELECT level, provider, message FROM server_logs ORDER BY id')
-      .all() as Array<{ level: string; provider: string | null; message: string }>;
+    const rows = (await getDb().all('SELECT level, provider, message FROM server_logs ORDER BY id')) as Array<{ level: string; provider: string | null; message: string }>;
     expect(rows.map(r => r.level)).toEqual(['warn', 'error']);
     expect(rows[0]!.provider).toBe('groq');
 
     // Cold start: the ring is empty in memory but the durable rows come back.
     resetServerLogsForTest();
-    initServerLogs();
+    await initServerLogs();
     const reloaded = ringSnapshot();
     expect(reloaded.map(e => e.message)).toEqual([
       '[Health] key benched',
@@ -220,39 +219,39 @@ describe('server log viewer', () => {
     expect(reloaded.map(e => e.level)).toEqual(['warn', 'error']);
   });
 
-  it('keeps ids strictly increasing across a simulated restart', () => {
-    recordLogEntry({ level: 'warn', message: 'before the restart' });
-    const beforeMax = currentMaxId();
+  it('keeps ids strictly increasing across a simulated restart', async () => {
+    await recordLogEntry({ level: 'warn', message: 'before the restart' });
+    const beforeMax = await currentMaxId();
     expect(beforeMax).toBeGreaterThan(0);
 
     resetServerLogsForTest();
-    initServerLogs();
+    await initServerLogs();
     // Seeded from MAX(id), so nothing is handed out twice.
-    expect(currentMaxId()).toBe(beforeMax);
+    expect(await currentMaxId()).toBe(beforeMax);
 
-    const next = recordLogEntry({ level: 'info', message: 'after the restart' })!;
+    const next = await recordLogEntry({ level: 'info', message: 'after the restart' })!;
     expect(next.id).toBe(beforeMax + 1);
     expect(ringSnapshot().map(e => e.id)).toEqual([beforeMax, beforeMax + 1]);
   });
 
-  it('bounds the ring at its capacity while ids keep climbing', () => {
+  it('bounds the ring at its capacity while ids keep climbing', async () => {
     for (let i = 0; i < RING_CAPACITY + 25; i++) {
-      recordLogEntry({ level: 'info', message: `line ${i}` });
+      await recordLogEntry({ level: 'info', message: `line ${i}` });
     }
     const entries = ringSnapshot();
     expect(entries).toHaveLength(RING_CAPACITY);
     expect(entries[0]!.message).toBe('line 25');
-    expect(currentMaxId()).toBe(RING_CAPACITY + 25);
+    expect(await currentMaxId()).toBe(RING_CAPACITY + 25);
   });
 
   // ── API ────────────────────────────────────────────────────────────────────
 
   describe('GET /api/logs', () => {
-    beforeEach(() => {
-      recordLogEntry({ level: 'debug', message: 'cache probe', provider: 'groq' });
-      recordLogEntry({ level: 'info', message: '[Router] routed to cerebras', provider: 'cerebras' });
-      recordLogEntry({ level: 'warn', message: '[Health] key benched', provider: 'groq', event: 'key_invalid' });
-      recordLogEntry({ level: 'error', message: '[Router] all keys exhausted', provider: 'groq' });
+    beforeEach(async () => {
+      await recordLogEntry({ level: 'debug', message: 'cache probe', provider: 'groq' });
+      await recordLogEntry({ level: 'info', message: '[Router] routed to cerebras', provider: 'cerebras' });
+      await recordLogEntry({ level: 'warn', message: '[Health] key benched', provider: 'groq', event: 'key_invalid' });
+      await recordLogEntry({ level: 'error', message: '[Router] all keys exhausted', provider: 'groq' });
     });
 
     it('returns entries oldest→newest with an ISO ms timestamp and level counts', async () => {
@@ -265,7 +264,7 @@ describe('server log viewer', () => {
         '[Router] all keys exhausted',
       ]);
       expect(body.entries[0]!.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-      expect(body.nextId).toBe(currentMaxId());
+      expect(body.nextId).toBe(await currentMaxId());
       expect(body.counts).toEqual({ debug: 1, info: 1, warn: 1, error: 1 });
       // Absent metadata is omitted rather than sent as null.
       expect(body.entries[0]).not.toHaveProperty('model');
@@ -304,23 +303,23 @@ describe('server log viewer', () => {
       const first = await fetchLogs();
       const cursor = first.body.nextId;
 
-      recordLogEntry({ level: 'info', message: 'brand new' });
+      await recordLogEntry({ level: 'info', message: 'brand new' });
       const second = await fetchLogs(`?sinceId=${cursor}`);
       expect(second.body.entries.map(e => e.message)).toEqual(['brand new']);
       expect(second.body.nextId).toBe(cursor + 1);
     });
 
     it('returns nothing cheaply when the caller is already caught up', async () => {
-      const { body } = await fetchLogs(`?sinceId=${currentMaxId()}`);
+      const { body } = await fetchLogs(`?sinceId=${await currentMaxId()}`);
       expect(body.entries).toEqual([]);
       // The cursor still advances-in-place and the badges still render.
-      expect(body.nextId).toBe(currentMaxId());
+      expect(body.nextId).toBe(await currentMaxId());
       expect(body.counts.error).toBe(1);
     });
 
     it('advances nextId past entries the filter removed', async () => {
-      const before = currentMaxId();
-      recordLogEntry({ level: 'info', message: 'noise nobody asked for' });
+      const before = await currentMaxId();
+      await recordLogEntry({ level: 'info', message: 'noise nobody asked for' });
       const { body } = await fetchLogs(`?levels=error&sinceId=${before}`);
       expect(body.entries).toEqual([]);
       expect(body.nextId).toBe(before + 1);
@@ -339,7 +338,7 @@ describe('server log viewer', () => {
         '[Router] all keys exhausted',
       ]);
 
-      for (let i = 0; i < 600; i++) recordLogEntry({ level: 'info', message: `bulk ${i}` });
+      for (let i = 0; i < 600; i++) await recordLogEntry({ level: 'info', message: `bulk ${i}` });
       expect((await fetchLogs('?limit=9999')).body.entries).toHaveLength(500);
       expect((await fetchLogs('?limit=0')).body.entries).toHaveLength(1);
       // A non-numeric limit falls back to the default rather than 400ing.
@@ -348,18 +347,18 @@ describe('server log viewer', () => {
   });
 
   it('POST /api/logs/clear empties both tiers without rewinding the cursor', async () => {
-    recordLogEntry({ level: 'error', message: '[Router] boom' });
-    const maxBefore = currentMaxId();
+    await recordLogEntry({ level: 'error', message: '[Router] boom' });
+    const maxBefore = await currentMaxId();
 
     const res = await request(app, 'POST', '/api/logs/clear', { token: dashToken });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
 
     expect(ringSnapshot()).toEqual([]);
-    const remaining = getDb().prepare('SELECT COUNT(*) AS n FROM server_logs').get() as { n: number };
+    const remaining = (await getDb().get('SELECT COUNT(*) AS n FROM server_logs')) as { n: number };
     expect(remaining.n).toBe(0);
     // Ids must not be reused: an open tab is still holding the old cursor.
-    expect(currentMaxId()).toBe(maxBefore);
+    expect(await currentMaxId()).toBe(maxBefore);
   });
 
   // ── Auth ───────────────────────────────────────────────────────────────────
@@ -386,15 +385,14 @@ describe('server log viewer', () => {
       else process.env.SERVER_LOGS_MAX_ROWS = ORIGINAL_ROWS;
     });
 
-    function seedRow(id: number, ageMs: number, now: number): void {
-      getDb().prepare(`
+    async function seedRow(id: number, ageMs: number, now: number): void {
+      (await getDb().run(`
         INSERT INTO server_logs (id, level, message, created_at_ms)
-        VALUES (?, 'warn', ?, ?)
-      `).run(id, `row ${id}`, now - ageMs);
+        VALUES (?, 'warn', ?, ?) RETURNING id`, [id, `row ${id}`, now - ageMs]));
     }
 
-    function rowIds(): number[] {
-      return (getDb().prepare('SELECT id FROM server_logs ORDER BY id').all() as { id: number }[])
+    async function rowIds(): number[] {
+      return ((await getDb().all('SELECT id FROM server_logs ORDER BY id')) as { id: number }[])
         .map(r => r.id);
     }
 
@@ -402,47 +400,47 @@ describe('server log viewer', () => {
       expect(getServerLogRetentionConfig()).toEqual({ retentionDays: 7, maxRows: 50_000 });
     });
 
-    it('deletes rows past the retention window', () => {
+    it('deletes rows past the retention window', async () => {
       const now = Date.now();
       const day = 24 * 60 * 60 * 1000;
-      seedRow(1, 9 * day, now);
-      seedRow(2, 8 * day, now);
-      seedRow(3, 1 * day, now);
+      await seedRow(1, 9 * day, now);
+      await seedRow(2, 8 * day, now);
+      await seedRow(3, 1 * day, now);
 
       process.env.SERVER_LOGS_RETENTION_DAYS = '7';
       process.env.SERVER_LOGS_MAX_ROWS = '0';
-      expect(pruneServerLogs(getDb(), now)).toBe(2);
-      expect(rowIds()).toEqual([3]);
+      expect(await pruneServerLogs(getDb(), now)).toBe(2);
+      expect(await rowIds()).toEqual([3]);
     });
 
-    it('trims the oldest rows past the row ceiling', () => {
+    it('trims the oldest rows past the row ceiling', async () => {
       const now = Date.now();
-      for (let i = 1; i <= 5; i++) seedRow(i, (5 - i) * 1000, now);
+      for (let i = 1; i <= 5; i++) await seedRow(i, (5 - i) * 1000, now);
 
       process.env.SERVER_LOGS_RETENTION_DAYS = '0';
       process.env.SERVER_LOGS_MAX_ROWS = '2';
-      expect(pruneServerLogs(getDb(), now)).toBe(3);
-      expect(rowIds()).toEqual([4, 5]);
+      expect(await pruneServerLogs(getDb(), now)).toBe(3);
+      expect(await rowIds()).toEqual([4, 5]);
     });
 
-    it('treats 0 as "no limit" on both knobs', () => {
+    it('treats 0 as "no limit" on both knobs', async () => {
       const now = Date.now();
-      seedRow(1, 400 * 24 * 60 * 60 * 1000, now);
+      await seedRow(1, 400 * 24 * 60 * 60 * 1000, now);
 
       process.env.SERVER_LOGS_RETENTION_DAYS = '0';
       process.env.SERVER_LOGS_MAX_ROWS = '0';
-      expect(pruneServerLogs(getDb(), now)).toBe(0);
-      expect(rowIds()).toEqual([1]);
+      expect(await pruneServerLogs(getDb(), now)).toBe(0);
+      expect(await rowIds()).toEqual([1]);
     });
 
-    it('is a no-op when the table has not been migrated in', () => {
+    it('is a no-op when the table has not been migrated in', async () => {
       const bare = { prepare: () => ({ get: () => undefined, all: () => [], run: () => ({ changes: 0 }) }) };
-      expect(pruneServerLogs(bare as any, Date.now())).toBe(0);
+      expect(await pruneServerLogs(bare as any, Date.now())).toBe(0);
     });
   });
 
-  it('clearLogs is safe with no rows to clear', () => {
-    clearLogs();
+  it('clearLogs is safe with no rows to clear', async () => {
+    await clearLogs();
     expect(ringSnapshot()).toEqual([]);
   });
 });

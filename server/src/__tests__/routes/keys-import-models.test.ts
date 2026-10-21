@@ -2,8 +2,9 @@ import dns from 'node:dns';
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #382, remaining gap: an imported custom endpoint can carry the models it
 // serves. Chat ids go through the same registration POST /custom runs;
@@ -51,29 +52,25 @@ function embeddingResponse(dimensions: number) {
   }), { status: 200, headers: { 'content-type': 'application/json' } });
 }
 
-function customModels() {
-  return getDb().prepare(
-    "SELECT model_id, supports_tools, supports_vision, key_id, endpoint_scope FROM models WHERE platform = 'custom' ORDER BY model_id",
-  ).all() as Array<{ model_id: string; supports_tools: number; supports_vision: number; key_id: number; endpoint_scope: string }>;
+async function customModels() {
+  return (await getDb().all("SELECT model_id, supports_tools, supports_vision, key_id, endpoint_scope FROM models WHERE platform = 'custom' ORDER BY model_id")) as Array<{ model_id: string; supports_tools: number; supports_vision: number; key_id: number; endpoint_scope: string }>;
 }
 
-function customEmbeddings() {
-  return getDb().prepare(
-    "SELECT model_id, family, dimensions, key_id FROM embedding_models WHERE platform = 'custom' ORDER BY model_id",
-  ).all() as Array<{ model_id: string; family: string; dimensions: number; key_id: number }>;
+async function customEmbeddings() {
+  return (await getDb().all("SELECT model_id, family, dimensions, key_id FROM embedding_models WHERE platform = 'custom' ORDER BY model_id")) as Array<{ model_id: string; family: string; dimensions: number; key_id: number }>;
 }
 
 describe('POST /api/keys/import-selected — model lists (#382)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     // proxyFetch runs the SSRF guard for 'custom' endpoints, which does a real
     // DNS lookup of the fake relay.example.com host. CI resolvers can take
     // seconds on that NXDOMAIN — past the 5s test timeout — and the abandoned
@@ -81,10 +78,10 @@ describe('POST /api/keys/import-selected — model lists (#382)', () => {
     // lookup immediately; the guard treats an unresolvable host as allowed.
     vi.spyOn(dns.promises, 'lookup').mockRejectedValue(new Error('dns disabled in tests'));
     const db = getDb();
-    db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')").run();
-    db.prepare("DELETE FROM models WHERE platform = 'custom'").run();
-    db.prepare("DELETE FROM embedding_models WHERE platform = 'custom'").run();
-    db.prepare('DELETE FROM api_keys').run();
+    (await db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')"));
+    (await db.run("DELETE FROM models WHERE platform = 'custom'"));
+    (await db.run("DELETE FROM embedding_models WHERE platform = 'custom'"));
+    (await db.run('DELETE FROM api_keys'));
   });
 
   afterEach(() => {
@@ -111,8 +108,8 @@ describe('POST /api/keys/import-selected — model lists (#382)', () => {
     expect(body.modelsRegistered).toBe(2);
     expect(body.errors).toEqual([]);
 
-    const keyRow = getDb().prepare("SELECT id FROM api_keys WHERE platform = 'custom'").get() as { id: number };
-    expect(customModels()).toEqual([
+    const keyRow = (await getDb().get("SELECT id FROM api_keys WHERE platform = 'custom'")) as { id: number };
+    expect(await customModels()).toEqual([
       // Flags left unset take the registration defaults (tools 1, vision 0).
       expect.objectContaining({ model_id: 'llama3', supports_tools: 1, supports_vision: 0, key_id: keyRow.id, endpoint_scope: 'https://relay.example.com/v1' }),
       expect.objectContaining({ model_id: 'qwen3', supports_tools: 1, supports_vision: 1, key_id: keyRow.id }),
@@ -137,8 +134,8 @@ describe('POST /api/keys/import-selected — model lists (#382)', () => {
     expect(body.modelsRegistered).toBe(2);
     expect(body.errors).toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(customModels().map(m => m.model_id)).toEqual(['chat-1']);
-    expect(customEmbeddings()).toEqual([
+    expect(await customModels().map(m => m.model_id)).toEqual(['chat-1']);
+    expect(await customEmbeddings()).toEqual([
       expect.objectContaining({ model_id: 'text-embedding-qwen', family: 'text-embedding-qwen', dimensions: 768 }),
     ]);
   });
@@ -162,8 +159,8 @@ describe('POST /api/keys/import-selected — model lists (#382)', () => {
     expect(body.modelsRegistered).toBe(1);
     expect(body.errors).toHaveLength(1);
     expect(body.errors[0].key).toContain('text-embedding-qwen');
-    expect(customEmbeddings()).toEqual([]);
-    expect(customModels().map(m => m.model_id)).toEqual(['chat-1']);
+    expect(await customEmbeddings()).toEqual([]);
+    expect(await customModels().map(m => m.model_id)).toEqual(['chat-1']);
   });
 
   it('is idempotent on re-import and reuses stored embedding dimensions', async () => {
@@ -183,12 +180,12 @@ describe('POST /api/keys/import-selected — model lists (#382)', () => {
     const { body } = await post(app, '/api/keys/import-selected', payload);
 
     expect(body.errors).toEqual([]);
-    expect(customModels()).toHaveLength(1);
-    expect(customEmbeddings()).toHaveLength(1);
+    expect(await customModels()).toHaveLength(1);
+    expect(await customEmbeddings()).toHaveLength(1);
     const db = getDb();
-    expect(db.prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'").get()).toEqual({ n: 1 });
-    const modelDbId = (db.prepare("SELECT id FROM models WHERE platform = 'custom'").get() as { id: number }).id;
-    expect(db.prepare('SELECT COUNT(*) AS n FROM fallback_config WHERE model_db_id = ?').get(modelDbId)).toEqual({ n: 1 });
+    expect((await db.get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'"))).toEqual({ n: 1 });
+    const modelDbId = ((await db.get("SELECT id FROM models WHERE platform = 'custom'")) as { id: number }).id;
+    expect((await db.get('SELECT COUNT(*) AS n FROM fallback_config WHERE model_db_id = ?', [modelDbId]))).toEqual({ n: 1 });
     // The second import found the dimensions on record — no second probe.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -205,7 +202,7 @@ describe('POST /api/keys/import-selected — model lists (#382)', () => {
 
     expect(body.imported).toBe(1);
     expect(body.modelsRegistered).toBe(0);
-    expect(customModels()).toEqual([]);
+    expect(await customModels()).toEqual([]);
   });
 
   it('carries models from /preview so the dialog can pass them back', async () => {

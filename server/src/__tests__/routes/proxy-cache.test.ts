@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { clearCache } from '../../services/cache.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -28,8 +29,8 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, body: json, headers: res.headers, raw };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 // Mock every groq chat-completion call, counting how many actually reach the
@@ -92,12 +93,12 @@ function mockGroq(content: string, streamOpts: { finish?: string; failMidStream?
 describe('Response cache (proxy integration)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     process.env.RESPONSE_CACHE = 'on';
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   afterAll(() => {
@@ -106,25 +107,25 @@ describe('Response cache (proxy integration)', () => {
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
-    db.prepare('DELETE FROM rate_limit_usage').run();
-    clearCache();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
+    (await db.run('DELETE FROM rate_limit_usage'));
+    await clearCache();
     const addKey = await request(app, 'POST', '/api/keys', { platform: 'groq', key: 'gsk_cache_test', label: 'cache' });
     expect(addKey.status).toBe(201);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
-    clearCache();
+    await clearCache();
   });
 
-  const chat = (extra: Record<string, unknown> = {}, headers: Record<string, string> = {}) =>
+  const chat = async (extra: Record<string, unknown> = {}, headers: Record<string, string> = {}) =>
     request(app, 'POST', '/v1/chat/completions', {
       model: 'auto',
       messages: [{ role: 'user', content: 'what is 2+2?' }],
       ...extra,
-    }, { ...authHeaders(), ...headers });
+    }, { ...await authHeaders(), ...headers });
 
   it.each([
     { response_format: { type: 'json_object' } },
@@ -132,7 +133,7 @@ describe('Response cache (proxy integration)', () => {
     { stop: 'END' },
     { parallel_tool_calls: false },
   ])('rejects idempotent retries with changed generation options: %j', async (extra) => {
-    getDb().prepare('DELETE FROM idempotency_claims').run();
+    (await getDb().run('DELETE FROM idempotency_claims'));
     const counter = mockGroq('plain text');
     const headers = { 'Idempotency-Key': 'generation-options', 'X-FreeLLM-Cache': 'off' };
     const first = await chat({}, headers);
@@ -167,9 +168,9 @@ describe('Response cache (proxy integration)', () => {
   it('does not record rate-limit usage for a cache hit (quota preserved)', async () => {
     mockGroq('four');
     await chat();
-    const usageAfterMiss = (getDb().prepare("SELECT COUNT(*) AS c FROM rate_limit_usage WHERE kind='request'").get() as { c: number }).c;
+    const usageAfterMiss = ((await getDb().get("SELECT COUNT(*) AS c FROM rate_limit_usage WHERE kind='request'")) as { c: number }).c;
     await chat(); // hit
-    const usageAfterHit = (getDb().prepare("SELECT COUNT(*) AS c FROM rate_limit_usage WHERE kind='request'").get() as { c: number }).c;
+    const usageAfterHit = ((await getDb().get("SELECT COUNT(*) AS c FROM rate_limit_usage WHERE kind='request'")) as { c: number }).c;
     expect(usageAfterHit).toBe(usageAfterMiss); // no new provider request recorded
   });
 

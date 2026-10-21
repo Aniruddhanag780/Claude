@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -31,28 +32,27 @@ async function request(app: Express, method: string, path: string, body?: any) {
 describe('Keys API — model scope', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM api_keys'));
   });
 
-  function insertKey(): number {
+  async function insertKey(): number {
     const { encrypted, iv, authTag } = encrypt('sk-test');
-    const result = getDb().prepare(`
+    const result = (await getDb().run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('groq', 'test', ?, ?, ?, 'healthy', 1)
-    `).run(encrypted, iv, authTag);
+      VALUES ('groq', 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [encrypted, iv, authTag]));
     return Number(result.lastInsertRowid);
   }
 
   it('sets a scope and surfaces it on the key list', async () => {
-    const id = insertKey();
+    const id = await insertKey();
     const patch = await request(app, 'PATCH', `/api/keys/${id}`, { modelScope: ['llama-3.3-70b', 'qwen-2.5'] });
     expect(patch.status).toBe(200);
     expect(patch.body.modelScope).toEqual(['llama-3.3-70b', 'qwen-2.5']);
@@ -63,20 +63,20 @@ describe('Keys API — model scope', () => {
   });
 
   it('dedupes repeated ids', async () => {
-    const id = insertKey();
+    const id = await insertKey();
     const patch = await request(app, 'PATCH', `/api/keys/${id}`, { modelScope: ['m1', 'm1', 'm2'] });
     expect(patch.status).toBe(200);
     expect(patch.body.modelScope).toEqual(['m1', 'm2']);
   });
 
   it('null clears the scope', async () => {
-    const id = insertKey();
+    const id = await insertKey();
     await request(app, 'PATCH', `/api/keys/${id}`, { modelScope: ['m1'] });
     const patch = await request(app, 'PATCH', `/api/keys/${id}`, { modelScope: null });
     expect(patch.status).toBe(200);
     expect(patch.body.modelScope).toBeNull();
 
-    const row = getDb().prepare('SELECT model_scope_json FROM api_keys WHERE id = ?').get(id) as any;
+    const row = (await getDb().get('SELECT model_scope_json FROM api_keys WHERE id = ?', [id])) as any;
     expect(row.model_scope_json).toBeNull();
 
     const list = await request(app, 'GET', '/api/keys');
@@ -84,17 +84,17 @@ describe('Keys API — model scope', () => {
   });
 
   it('an empty array clears the scope too', async () => {
-    const id = insertKey();
+    const id = await insertKey();
     await request(app, 'PATCH', `/api/keys/${id}`, { modelScope: ['m1'] });
     const patch = await request(app, 'PATCH', `/api/keys/${id}`, { modelScope: [] });
     expect(patch.status).toBe(200);
     expect(patch.body.modelScope).toBeNull();
-    const row = getDb().prepare('SELECT model_scope_json FROM api_keys WHERE id = ?').get(id) as any;
+    const row = (await getDb().get('SELECT model_scope_json FROM api_keys WHERE id = ?', [id])) as any;
     expect(row.model_scope_json).toBeNull();
   });
 
   it('leaves the scope alone when only other fields are patched', async () => {
-    const id = insertKey();
+    const id = await insertKey();
     await request(app, 'PATCH', `/api/keys/${id}`, { modelScope: ['m1'] });
     await request(app, 'PATCH', `/api/keys/${id}`, { label: 'renamed' });
     const list = await request(app, 'GET', '/api/keys');
@@ -102,7 +102,7 @@ describe('Keys API — model scope', () => {
   });
 
   it('rejects malformed payloads', async () => {
-    const id = insertKey();
+    const id = await insertKey();
     for (const modelScope of ['not-an-array', [''], [42], [{ id: 'x' }], ['x'.repeat(201)], Array.from({ length: 101 }, (_, i) => `m${i}`)]) {
       const patch = await request(app, 'PATCH', `/api/keys/${id}`, { modelScope });
       expect(patch.status, JSON.stringify(modelScope).slice(0, 60)).toBe(400);

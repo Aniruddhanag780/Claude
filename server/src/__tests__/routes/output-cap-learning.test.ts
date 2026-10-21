@@ -1,10 +1,11 @@
 import { it, expect, vi } from 'vitest';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { resetLearnedOutputCaps } from '../../lib/output-cap.js';
 import { getProvider } from '../../providers/index.js';
 import { setRoutingStrategy } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Claude Code sends max_tokens 128000. A model whose output ceiling is lower
 // rejects it with a 400; the gateway must learn the ceiling, retry that model
@@ -12,16 +13,15 @@ import { setRoutingStrategy } from '../../services/router.js';
 // benching it or booking it as a model without tool support.
 it('/v1/messages learns an output ceiling from a max_tokens rejection and clamps later requests', async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:'); const db = getDb(); setRoutingStrategy('priority'); resetLearnedOutputCaps();
-  db.prepare('UPDATE models SET enabled = 0').run();
-  db.prepare('DELETE FROM profile_models').run();
+  await initTestDb(); const db = getDb(); await setRoutingStrategy('priority'); resetLearnedOutputCaps();
+  (await db.run('UPDATE models SET enabled = 0'));
+  (await db.run('DELETE FROM profile_models'));
   for (const index of [0, 1]) {
-    const id = Number(db.prepare("INSERT INTO models(platform,model_id,display_name,intelligence_rank,speed_rank,size_label,context_window,enabled,supports_tools) VALUES ('groq',?,?,1,1,'Large',262144,1,1)")
-      .run('cap-test-' + index, 'Cap test ' + index).lastInsertRowid);
-    db.prepare('INSERT INTO profile_models(profile_id,model_db_id,priority,enabled) SELECT id,?,?,1 FROM profiles').run(id, index);
+    const id = Number((await db.run("INSERT INTO models(platform,model_id,display_name,intelligence_rank,speed_rank,size_label,context_window,enabled,supports_tools) VALUES ('groq',?,?,1,1,'Large',262144,1,1) RETURNING id", ['cap-test-' + index, 'Cap test ' + index])).lastInsertRowid);
+    (await db.run('INSERT INTO profile_models(profile_id,model_db_id,priority,enabled) SELECT id,?,?,1 FROM profiles RETURNING id', [id, index]));
   }
   const { encrypted, iv, authTag } = encrypt('synthetic-key');
-  db.prepare("INSERT INTO api_keys(platform,label,encrypted_key,iv,auth_tag,status,enabled) VALUES ('groq','test',?,?,?,'healthy',1)").run(encrypted, iv, authTag);
+  (await db.run("INSERT INTO api_keys(platform,label,encrypted_key,iv,auth_tag,status,enabled) VALUES ('groq','test',?,?,?,'healthy',1) RETURNING id", [encrypted, iv, authTag]));
   const calls: { model: string; budget?: number }[] = [];
   const spy = vi.spyOn(getProvider('groq')!, 'chatCompletion').mockImplementation(async (_key, _messages, model, options) => {
     calls.push({ model, budget: options?.contextBudget });
@@ -32,9 +32,9 @@ it('/v1/messages learns an output ceiling from a max_tokens rejection and clamps
   });
   const server = createApp().listen(0, '127.0.0.1');
   if (!server.listening) await new Promise<void>(r => server.once('listening', r));
-  const send = (text: string) => fetch('http://127.0.0.1:' + (server.address() as { port: number }).port + '/v1/messages', {
+  const send = async (text: string) => fetch('http://127.0.0.1:' + (server.address() as { port: number }).port + '/v1/messages', {
     method: 'POST',
-    headers: { 'x-api-key': getUnifiedApiKey(), 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+    headers: { 'x-api-key': await getUnifiedApiKey(), 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: 'claude-opus-4-5', max_tokens: 128000,
       messages: [{ role: 'user', content: text }],

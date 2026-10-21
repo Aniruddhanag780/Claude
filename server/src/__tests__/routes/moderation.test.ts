@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { listModerationModels, resolveModel } from '../../services/moderation.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // POST /v1/moderations (#…): OpenAI-compatible content-moderation shim that
 // routes to the first enabled OpenAI/OpenRouter/NVIDIA key and fails over
@@ -29,12 +30,11 @@ async function postModeration(body: unknown, token?: string) {
   return { status: res.status, body: json as any };
 }
 
-function insertKey(platform: string): number {
+async function insertKey(platform: string): number {
   const { encrypted, iv, authTag } = encrypt('sk-test');
-  const result = getDb().prepare(`
+  const result = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'test', ?, ?, ?, 'healthy', 1)
-  `).run(platform, encrypted, iv, authTag);
+    VALUES (?, 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, encrypted, iv, authTag]));
   return Number(result.lastInsertRowid);
 }
 
@@ -73,57 +73,56 @@ function restoreFetch() {
 }
 
 describe('moderation service — model resolution', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM api_keys'));
   });
 
   afterEach(restoreFetch);
 
-  it('lists one entry per enabled platform, first key per platform', () => {
-    insertKey('openai');
-    insertKey('openai'); // second openai key must be ignored
-    insertKey('nvidia');
-    const models = listModerationModels();
+  it('lists one entry per enabled platform, first key per platform', async () => {
+    await insertKey('openai');
+    await insertKey('openai'); // second openai key must be ignored
+    await insertKey('nvidia');
+    const models = await listModerationModels();
     expect(models.map(m => m.platform)).toEqual(['openai', 'nvidia']);
     const openai = models.find(m => m.platform === 'openai')!;
     expect(openai.modelId).toBe('omni-moderation-latest');
     expect(openai.baseUrl).toBe('https://api.openai.com');
   });
 
-  it('ignores disabled or unhealthy keys', () => {
+  it('ignores disabled or unhealthy keys', async () => {
     const { encrypted, iv, authTag } = encrypt('sk-test');
-    getDb().prepare(`
+    (await getDb().run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('openai', 'off', ?, ?, ?, 'healthy', 0)
-    `).run(encrypted, iv, authTag);
-    expect(listModerationModels()).toHaveLength(0);
+      VALUES ('openai', 'off', ?, ?, ?, 'healthy', 0) RETURNING id`, [encrypted, iv, authTag]));
+    expect(await listModerationModels()).toHaveLength(0);
   });
 
-  it('resolveModel maps OpenAI legacy names and unknown models to the default', () => {
-    insertKey('openai');
-    insertKey('nvidia');
-    expect(resolveModel(undefined)).toBe('omni-moderation-latest');
-    expect(resolveModel('text-moderation-latest')).toBe('omni-moderation-latest');
-    expect(resolveModel('text-moderation-stable')).toBe('omni-moderation-latest');
+  it('resolveModel maps OpenAI legacy names and unknown models to the default', async () => {
+    await insertKey('openai');
+    await insertKey('nvidia');
+    expect(await resolveModel(undefined)).toBe('omni-moderation-latest');
+    expect(await resolveModel('text-moderation-latest')).toBe('omni-moderation-latest');
+    expect(await resolveModel('text-moderation-stable')).toBe('omni-moderation-latest');
     // An unknown requested model falls back to the first available default.
-    expect(resolveModel('nonsense-model')).toBe('omni-moderation-latest');
+    expect(await resolveModel('nonsense-model')).toBe('omni-moderation-latest');
   });
 });
 
 describe('POST /v1/moderations route', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM api_keys'));
   });
 
   afterEach(restoreFetch);
@@ -134,7 +133,7 @@ describe('POST /v1/moderations route', () => {
   });
 
   it('validates the body shape', async () => {
-    const key = getUnifiedApiKey();
+    const key = await getUnifiedApiKey();
     const missing = await postModeration({}, key);
     expect(missing.status).toBe(400);
     const empty = await postModeration({ input: [] }, key);
@@ -142,7 +141,7 @@ describe('POST /v1/moderations route', () => {
   });
 
   it('proxies to the first enabled platform and returns OpenAI-shaped results', async () => {
-    insertKey('openai');
+    await insertKey('openai');
     const calls = mockModeration([
       {
         platform: 'openai',
@@ -153,7 +152,7 @@ describe('POST /v1/moderations route', () => {
     ]);
     const { status, body } = await postModeration(
       { input: 'a perfectly fine sentence' },
-      getUnifiedApiKey(),
+      await getUnifiedApiKey(),
     );
     expect(status).toBe(200);
     expect(calls).toEqual(['openai']);
@@ -166,15 +165,15 @@ describe('POST /v1/moderations route', () => {
   it('fails over to the next platform when the first errors', async () => {
     // openai and openrouter share the default 'omni-moderation-latest'
     // model, so the chain walks openai → openrouter.
-    insertKey('openai');
-    insertKey('openrouter');
+    await insertKey('openai');
+    await insertKey('openrouter');
     const calls = mockModeration([
       { platform: 'openai', response: {}, status: 500 },
       { platform: 'openrouter', response: { results: [{ flagged: true }] }, status: 200 },
     ]);
     const { status, body } = await postModeration(
       { input: 'flagged content' },
-      getUnifiedApiKey(),
+      await getUnifiedApiKey(),
     );
     expect(status).toBe(200);
     expect(body._provider).toBe('openrouter');
@@ -182,7 +181,7 @@ describe('POST /v1/moderations route', () => {
   });
 
   it('returns 503 when no moderation provider has an enabled key', async () => {
-    const { status, body } = await postModeration({ input: 'x' }, getUnifiedApiKey());
+    const { status, body } = await postModeration({ input: 'x' }, await getUnifiedApiKey());
     expect(status).toBe(503);
     expect(body.error.message).toContain('No moderation providers available');
   });

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { routePinnedModel, routeRequest, resolveModelGroupCandidates, refreshStatsCache, getRoutingScores, writeObservedSpeedRanks, resetSpeedRankWriteback } from '../../services/router.js';
 import { setCooldown, isOnCooldown, clearCooldownsForKey } from '../../services/ratelimit.js';
 import { getModelGroups, resolveRequestedIdToMembers, setUnifyOverrides } from '../../services/model-groups.js';
@@ -10,6 +10,7 @@ import { endpointHandle, qualifiedModelMemberId } from '../../lib/endpoint-scope
 import { logRequest } from '../../lib/request-log.js';
 import { buildModelListing } from '../../services/model-listing.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Per-endpoint model identity (#651). Two relays that both offer
 // `deepseek-v3.1` used to collapse into ONE models row: one enabled flag, one
@@ -47,27 +48,23 @@ const patch = (app: Express, path: string, body: unknown) => request(app, 'PATCH
 
 interface Row { id: number; key_id: number | null; enabled: number; endpoint_scope: string; speed_rank: number }
 
-function rowsFor(modelId: string): Row[] {
-  return getDb().prepare(
-    "SELECT id, key_id, enabled, endpoint_scope, speed_rank FROM models WHERE platform = 'custom' AND model_id = ? ORDER BY id",
-  ).all(modelId) as Row[];
+async function rowsFor(modelId: string): Row[] {
+  return (await getDb().all("SELECT id, key_id, enabled, endpoint_scope, speed_rank FROM models WHERE platform = 'custom' AND model_id = ? ORDER BY id", [modelId])) as Row[];
 }
 
-function rowOn(scope: string, modelId = SHARED_MODEL): Row {
-  const row = rowsFor(modelId).find(r => r.endpoint_scope === scope);
+async function rowOn(scope: string, modelId = SHARED_MODEL): Row {
+  const row = (await rowsFor(modelId)).find(r => r.endpoint_scope === scope);
   if (!row) throw new Error(`no ${modelId} row on ${scope}`);
   return row;
 }
 
 /** Log `n` requests against one model + key, so the stats cache has something to see. */
-function logRequests(modelId: string, keyId: number, status: 'success' | 'error', n: number, latencyMs = 500) {
+async function logRequests(modelId: string, keyId: number, status: 'success' | 'error', n: number, latencyMs = 500) {
   const db = getDb();
-  const stmt = db.prepare(`
-    INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type)
-    VALUES ('custom', ?, ?, ?, 100, 100, ?, ?, 'chat')
-  `);
   for (let i = 0; i < n; i++) {
-    stmt.run(modelId, keyId, status, latencyMs, status === 'error' ? 'upstream timeout' : null);
+    (await db.run(`
+    INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type)
+    VALUES ('custom', ?, ?, ?, 100, 100, ?, ?, 'chat') RETURNING id`, [modelId, keyId, status, latencyMs, status === 'error' ? 'upstream timeout' : null]));
   }
 }
 
@@ -83,21 +80,21 @@ async function registerBothRelays(app: Express) {
 describe('per-endpoint identity for custom relay models (#651)', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    getDb().prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+    await initTestDb();
+    (await getDb().run("DELETE FROM settings WHERE key = 'active_profile_id'"));
     resetModelRetirementObservations();
     resetSpeedRankWriteback();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   describe('separate rows', () => {
     it('gives each endpoint its own row for the same model id', async () => {
       await registerBothRelays(app);
 
-      const rows = rowsFor(SHARED_MODEL);
+      const rows = await rowsFor(SHARED_MODEL);
       expect(rows).toHaveLength(2);
       expect(rows.map(r => r.endpoint_scope)).toEqual([RELAY_A, RELAY_B]);
       // Each binds to its OWN endpoint's credential, not the last one added.
@@ -106,17 +103,15 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
 
     it('re-registering on one endpoint updates that row only', async () => {
       await registerBothRelays(app);
-      const before = rowsFor(SHARED_MODEL);
+      const before = await rowsFor(SHARED_MODEL);
 
       await post(app, '/api/keys/custom', {
         baseUrl: RELAY_A, models: [{ model: SHARED_MODEL, displayName: 'DeepSeek via A' }],
       });
 
-      const after = rowsFor(SHARED_MODEL);
+      const after = await rowsFor(SHARED_MODEL);
       expect(after.map(r => r.id)).toEqual(before.map(r => r.id));
-      const names = getDb().prepare(
-        "SELECT endpoint_scope, display_name FROM models WHERE platform = 'custom' AND model_id = ? ORDER BY id",
-      ).all(SHARED_MODEL) as { endpoint_scope: string; display_name: string }[];
+      const names = (await getDb().all("SELECT endpoint_scope, display_name FROM models WHERE platform = 'custom' AND model_id = ? ORDER BY id", [SHARED_MODEL])) as { endpoint_scope: string; display_name: string }[];
       expect(names).toEqual([
         { endpoint_scope: RELAY_A, display_name: 'DeepSeek via A' },
         { endpoint_scope: RELAY_B, display_name: SHARED_MODEL },
@@ -130,14 +125,14 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
 
       expect((await patch(app, `/api/models/${a.id}`, { enabled: false })).status).toBe(200);
 
-      expect(rowsFor(SHARED_MODEL).find(r => r.id === a.id)!.enabled).toBe(0);
-      expect(rowsFor(SHARED_MODEL).find(r => r.id === b.id)!.enabled).toBe(1);
+      expect((await rowsFor(SHARED_MODEL)).find(r => r.id === a.id)!.enabled).toBe(0);
+      expect((await rowsFor(SHARED_MODEL)).find(r => r.id === b.id)!.enabled).toBe(1);
       // The still-good relay keeps serving.
-      const route = routePinnedModel(b.id);
+      const route = await routePinnedModel(b.id);
       expect(route).not.toBeNull();
       expect(route!.apiKey).toBe('key-b');
       route!.release?.();
-      expect(routePinnedModel(a.id)).toBeNull();
+      expect(await routePinnedModel(a.id)).toBeNull();
     });
 
     it('deleting one endpoint\'s copy leaves the other registered', async () => {
@@ -146,7 +141,7 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
 
       expect((await request(app, 'DELETE', `/api/models/custom/${a.id}`)).status).toBe(200);
 
-      const rows = rowsFor(SHARED_MODEL);
+      const rows = await rowsFor(SHARED_MODEL);
       expect(rows).toHaveLength(1);
       expect(rows[0]!.endpoint_scope).toBe(RELAY_B);
     });
@@ -160,9 +155,9 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
 
       logRequests(SHARED_MODEL, a.key_id!, 'error', 40);
       logRequests(SHARED_MODEL, b.key_id!, 'success', 40);
-      refreshStatsCache(getDb(), true);
+      await refreshStatsCache(getDb(), true);
 
-      const scores = getRoutingScores().scores;
+      const scores = (await getRoutingScores()).scores;
       const scoreA = scores.find(s => s.modelDbId === a.id)!;
       const scoreB = scores.find(s => s.modelDbId === b.id)!;
 
@@ -179,11 +174,11 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
       // Relay A answers slowly, relay B quickly — same model id, same tokens.
       logRequests(SHARED_MODEL, a.key_id!, 'success', 40, 20_000);
       logRequests(SHARED_MODEL, b.key_id!, 'success', 40, 200);
-      refreshStatsCache(getDb(), true);
-      writeObservedSpeedRanks(getDb());
+      await refreshStatsCache(getDb(), true);
+      await writeObservedSpeedRanks(getDb());
 
-      const slow = rowsFor(SHARED_MODEL).find(r => r.id === a.id)!.speed_rank;
-      const fast = rowsFor(SHARED_MODEL).find(r => r.id === b.id)!.speed_rank;
+      const slow = (await rowsFor(SHARED_MODEL)).find(r => r.id === a.id)!.speed_rank;
+      const fast = (await rowsFor(SHARED_MODEL)).find(r => r.id === b.id)!.speed_rank;
       expect(fast).toBeLessThan(slow);
     });
 
@@ -194,16 +189,16 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
 
       setCooldown('custom', SHARED_MODEL, a.key_id!, 60_000);
 
-      expect(isOnCooldown('custom', SHARED_MODEL, a.key_id!)).toBe(true);
-      expect(isOnCooldown('custom', SHARED_MODEL, b.key_id!)).toBe(false);
-      expect(routePinnedModel(a.id)).toBeNull();
-      const route = routePinnedModel(b.id);
+      expect(await isOnCooldown('custom', SHARED_MODEL, a.key_id!)).toBe(true);
+      expect(await isOnCooldown('custom', SHARED_MODEL, b.key_id!)).toBe(false);
+      expect(await routePinnedModel(a.id)).toBeNull();
+      const route = await routePinnedModel(b.id);
       expect(route).not.toBeNull();
       route!.release?.();
 
       // The cooldown map is process-local and outlives the in-memory DB, so
       // hand it back before the next case reuses these key ids.
-      clearCooldownsForKey(a.key_id!);
+      await clearCooldownsForKey(a.key_id!);
     });
 
     it('counts an end-of-life signal against one endpoint only', async () => {
@@ -215,8 +210,8 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
       // The route each relay hands to the failure path carries ITS endpoint, so
       // the retirement heuristic counts corroboration per relay instead of
       // pooling two unrelated relays' 404s into one verdict.
-      const routeA = routePinnedModel(a.id)!;
-      const routeB = routePinnedModel(b.id)!;
+      const routeA = await routePinnedModel(a.id)!;
+      const routeB = await routePinnedModel(b.id)!;
       expect(routeA.endpointScope).toBe(RELAY_A);
       expect(routeB.endpointScope).toBe(RELAY_B);
       routeA.release?.();
@@ -226,14 +221,14 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
       // must not add up to a verdict against either. (User-added models are
       // never auto-retired anyway — that guard is asserted in
       // services/model-retirement.test.ts — so both stay on.)
-      noteModelRetirementSignal(
+      await noteModelRetirementSignal(
         { modelDbId: a.id, platform: 'custom', modelId: SHARED_MODEL, endpointScope: routeA.endpointScope }, eol, {},
       );
-      noteModelRetirementSignal(
+      await noteModelRetirementSignal(
         { modelDbId: b.id, platform: 'custom', modelId: SHARED_MODEL, endpointScope: routeB.endpointScope }, eol, {},
       );
 
-      expect(rowsFor(SHARED_MODEL).map(r => r.enabled)).toEqual([1, 1]);
+      expect((await rowsFor(SHARED_MODEL)).map(r => r.enabled)).toEqual([1, 1]);
     });
 
     it('records the concrete model row selected for each relay (#1187)', async () => {
@@ -243,20 +238,20 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
       expect(a.id).not.toBe(b.id);
 
       // Same platform + model id on both relays: only the key tells them apart.
-      logRequest('custom', SHARED_MODEL, b.key_id!, 'success', 10, 20, 30, null);
-      const logged = getDb().prepare(`
+      await logRequest('custom', SHARED_MODEL, b.key_id!, 'success', 10, 20, 30, null);
+      const logged = (await getDb().get(`
         SELECT model_db_id FROM requests
          WHERE platform = 'custom' AND model_id = ?
          ORDER BY id DESC LIMIT 1
-      `).get(SHARED_MODEL) as { model_db_id: number };
+      `, [SHARED_MODEL])) as { model_db_id: number };
       expect(logged.model_db_id).toBe(b.id);
 
-      logRequest('custom', SHARED_MODEL, a.key_id!, 'success', 10, 20, 30, null);
-      const loggedA = getDb().prepare(`
+      await logRequest('custom', SHARED_MODEL, a.key_id!, 'success', 10, 20, 30, null);
+      const loggedA = (await getDb().get(`
         SELECT model_db_id FROM requests
          WHERE platform = 'custom' AND model_id = ?
          ORDER BY id DESC LIMIT 1
-      `).get(SHARED_MODEL) as { model_db_id: number };
+      `, [SHARED_MODEL])) as { model_db_id: number };
       expect(loggedA.model_db_id).toBe(a.id);
     });
   });
@@ -266,7 +261,7 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
       await registerBothRelays(app);
       const a = rowOn(RELAY_A);
       const b = rowOn(RELAY_B);
-      const groups = getModelGroups();
+      const groups = await getModelGroups();
 
       expect(resolveRequestedIdToMembers(`custom:${SHARED_MODEL}#${endpointHandle(RELAY_A)}`, groups))
         .toEqual([a.id]);
@@ -290,7 +285,7 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
       const a = rowOn(RELAY_A);
       const b = rowOn(RELAY_B);
 
-      const groups = getModelGroups();
+      const groups = await getModelGroups();
       // Precondition: the rename really did split them across groups.
       expect(new Set(groups.filter(g => g.members.some(m => m.model_id === SHARED_MODEL))
         .map(g => g.groupKey)).size).toBe(2);
@@ -314,13 +309,13 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
 
       setCooldown('custom', SHARED_MODEL, b.key_id!, 60_000);
       try {
-        const ids = resolveRequestedIdToMembers(SHARED_MODEL, getModelGroups())!;
-        const route = routeRequest(1000, undefined, undefined, false, false, undefined,
-          resolveModelGroupCandidates(ids));
+        const ids = resolveRequestedIdToMembers(SHARED_MODEL, await getModelGroups())!;
+        const route = await routeRequest(1000, undefined, undefined, false, false, undefined,
+          await resolveModelGroupCandidates(ids));
         expect(route.modelDbId).toBe(a.id);
         route.release?.();
       } finally {
-        clearCooldownsForKey(b.key_id!);
+        await clearCooldownsForKey(b.key_id!);
       }
     });
 
@@ -330,9 +325,9 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
       const b = rowOn(RELAY_B);
       const qualifiedA = qualifiedModelMemberId('custom', SHARED_MODEL, RELAY_A)!;
 
-      setUnifyOverrides({ merges: [], splits: [{ member: qualifiedA }] });
+      await setUnifyOverrides({ merges: [], splits: [{ member: qualifiedA }] });
 
-      const groups = getModelGroups();
+      const groups = await getModelGroups();
       const groupOf = (id: number) => groups.find(g => g.members.some(m => m.model_db_id === id))!;
       expect(groupOf(a.id).groupKey).not.toBe(groupOf(b.id).groupKey);
       expect(groupOf(a.id).members.map(m => m.model_db_id)).toEqual([a.id]);
@@ -350,9 +345,9 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
       const a = rowOn(RELAY_A);
       const b = rowOn(RELAY_B);
 
-      setUnifyOverrides({ merges: [], splits: [{ member: `custom:${SHARED_MODEL}` }] });
+      await setUnifyOverrides({ merges: [], splits: [{ member: `custom:${SHARED_MODEL}` }] });
 
-      const groups = getModelGroups();
+      const groups = await getModelGroups();
       // An unqualified key names BOTH relays, so they share one split group —
       // exactly what it meant before #651, left alone rather than reinterpreted.
       const groupOf = (id: number) => groups.find(g => g.members.some(m => m.model_db_id === id))!;
@@ -367,7 +362,7 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
 
     it('keeps a bare model id working — it spans both relays', async () => {
       await registerBothRelays(app);
-      const groups = getModelGroups();
+      const groups = await getModelGroups();
       const ids = resolveRequestedIdToMembers(SHARED_MODEL, groups);
       expect(ids?.sort()).toEqual([rowOn(RELAY_A).id, rowOn(RELAY_B).id].sort());
     });
@@ -376,7 +371,7 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
       await registerBothRelays(app);
       // The public listing is still ONE logical model — clients that copied the
       // id keep working, and the two relays are its failover set.
-      const listed = buildModelListing().models.filter(m => m.id === SHARED_MODEL);
+      const listed = (await buildModelListing()).models.filter(m => m.id === SHARED_MODEL);
       expect(listed).toHaveLength(1);
       expect(listed[0]!.platforms).toEqual(['custom']);
     });
@@ -385,8 +380,8 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
       await post(app, '/api/keys/custom', {
         baseUrl: RELAY_A, model: 'solo-model', apiKey: 'key-a', label: 'Relay A',
       });
-      const groups = getModelGroups();
-      const soloId = rowsFor('solo-model')[0]!.id;
+      const groups = await getModelGroups();
+      const soloId = await rowsFor('solo-model')[0]!.id;
 
       // Bare id and the plain platform:model_id form both still resolve.
       expect(resolveRequestedIdToMembers('solo-model', groups)).toEqual([soloId]);

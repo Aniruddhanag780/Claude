@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import express, { type Express } from 'express';
 import { authRouter } from '../../routes/auth.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { generateSetupCode, getSetupCode } from '../../lib/setup-code.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // FIX 1: first-run setup is frictionless from the local machine (loopback) but
 // a remote caller must present the one-time setup code minted at boot. The real
@@ -38,16 +39,16 @@ async function postSetup(app: Express, body: unknown, headers: Record<string, st
 const CREDS = { email: 'admin@example.com', password: 'supersecret' };
 
 describe('First-run setup code gate (FIX 1)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     // Reset to an unclaimed dashboard and mint a fresh code for each case.
     const db = getDb();
-    db.prepare('DELETE FROM sessions').run();
-    db.prepare('DELETE FROM users').run();
+    await db.run('DELETE FROM sessions');
+    await db.run('DELETE FROM users');
     generateSetupCode();
   });
 
@@ -72,7 +73,7 @@ describe('First-run setup code gate (FIX 1)', () => {
     expect(status).toBe(403);
     expect(body.error.type).toBe('setup_code_required');
     // No account was created.
-    const count = (getDb().prepare('SELECT COUNT(*) AS c FROM users').get() as { c: number }).c;
+    const count = (await getDb().get('SELECT COUNT(*) AS c FROM users') as { c: number }).c;
     expect(count).toBe(0);
   });
 
@@ -103,7 +104,7 @@ describe('First-run setup code gate (FIX 1)', () => {
     );
     expect(status).toBe(403);
     expect(body.error.type).toBe('setup_code_required');
-    const count = (getDb().prepare('SELECT COUNT(*) AS c FROM users').get() as { c: number }).c;
+    const count = (await getDb().get('SELECT COUNT(*) AS c FROM users') as { c: number }).c;
     expect(count).toBe(0);
   });
 

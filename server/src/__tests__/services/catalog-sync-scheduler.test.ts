@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
-import { initDb } from '../../db/index.js';
 import { startCatalogSync, stopCatalogSync } from '../../services/catalog-sync.js';
 import type { Scheduler } from '../../lib/scheduler.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 function makeScheduler() {
   const every: { ms: number; fn: () => void | Promise<void> }[] = [];
@@ -25,9 +25,9 @@ function makeScheduler() {
 }
 
 describe('startCatalogSync / stopCatalogSync', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   afterEach(() => {
@@ -35,46 +35,46 @@ describe('startCatalogSync / stopCatalogSync', () => {
     delete process.env.CATALOG_SYNC_DISABLED;
   });
 
-  it('registers a 10-second boot delay and a 12-hour interval', () => {
+  it('registers a 10-second boot delay and a 12-hour interval', async () => {
     const { scheduler, every, after } = makeScheduler();
-    startCatalogSync(scheduler);
+    await startCatalogSync(scheduler);
     expect(after).toHaveLength(1);
     expect(after[0].ms).toBe(10 * 1000);
     expect(every).toHaveLength(1);
     expect(every[0].ms).toBe(12 * 60 * 60 * 1000);
   });
 
-  it('is idempotent — double-start registers only one set of jobs', () => {
+  it('is idempotent — double-start registers only one set of jobs', async () => {
     const { scheduler, every, after } = makeScheduler();
-    startCatalogSync(scheduler);
-    startCatalogSync(scheduler);
+    await startCatalogSync(scheduler);
+    await startCatalogSync(scheduler);
     expect(after).toHaveLength(1);
     expect(every).toHaveLength(1);
   });
 
-  it('registers nothing when CATALOG_SYNC_DISABLED=1', () => {
+  it('registers nothing when CATALOG_SYNC_DISABLED=1', async () => {
     process.env.CATALOG_SYNC_DISABLED = '1';
     const { scheduler, every, after } = makeScheduler();
-    startCatalogSync(scheduler);
+    await startCatalogSync(scheduler);
     expect(after).toHaveLength(0);
     expect(every).toHaveLength(0);
   });
 
-  it('stop invokes both cancel handles', () => {
+  it('stop invokes both cancel handles', async () => {
     const { scheduler, cancels } = makeScheduler();
-    startCatalogSync(scheduler);
+    await startCatalogSync(scheduler);
     stopCatalogSync();
     expect(cancels).toHaveLength(2);
     cancels.forEach((c) => expect(c).toHaveBeenCalledOnce());
   });
 
-  it('can re-register after stop', () => {
+  it('can re-register after stop', async () => {
     const { scheduler: s1 } = makeScheduler();
-    startCatalogSync(s1);
+    await startCatalogSync(s1);
     stopCatalogSync();
 
     const { scheduler: s2, every, after } = makeScheduler();
-    startCatalogSync(s2);
+    await startCatalogSync(s2);
     expect(after).toHaveLength(1);
     expect(every).toHaveLength(1);
   });

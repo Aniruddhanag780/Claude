@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { classifyClaudeFamily, parseTierSelector, setClaudeModelMap, resolveAnthropicModel } from '../../services/anthropic-map.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
-beforeEach(() => {
+beforeEach(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
 // classifyClaudeFamily maps a requested model alias to a Claude family (or null
@@ -47,16 +48,16 @@ describe('tier selectors in the anthropic model map', () => {
     expect(parseTierSelector('auto')).toBeNull();
   });
 
-  it('accepts tier selector values in the map', () => {
-    const map = setClaudeModelMap({ opus: 'tier:pro', sonnet: 'tier:mid', haiku: 'tier:normal' });
+  it('accepts tier selector values in the map', async () => {
+    const map = await setClaudeModelMap({ opus: 'tier:pro', sonnet: 'tier:mid', haiku: 'tier:normal' });
     expect(map.opus).toBe('tier:pro');
     expect(map.sonnet).toBe('tier:mid');
     expect(map.haiku).toBe('tier:normal');
   });
 
-  it('resolves a tier family to the whole tier pool, unpinned', () => {
-    setClaudeModelMap({ opus: 'tier:pro' });
-    const resolved = resolveAnthropicModel('claude-opus-4-5');
+  it('resolves a tier family to the whole tier pool, unpinned', async () => {
+    await setClaudeModelMap({ opus: 'tier:pro' });
+    const resolved = await resolveAnthropicModel('claude-opus-4-5');
     expect(resolved.pinned).toBe(false);
     expect(resolved.tierDbIds).toBeDefined();
     expect(resolved.tierDbIds!.length).toBeGreaterThan(0);
@@ -64,24 +65,24 @@ describe('tier selectors in the anthropic model map', () => {
     expect(resolved.preferredModelDbId).toBeUndefined();
   });
 
-  it('normal absorbs Medium and Small so the smallest providers stay reachable', () => {
-    setClaudeModelMap({ haiku: 'tier:normal' });
-    const resolved = resolveAnthropicModel('claude-haiku-4-5');
+  it('normal absorbs Medium and Small so the smallest providers stay reachable', async () => {
+    await setClaudeModelMap({ haiku: 'tier:normal' });
+    const resolved = await resolveAnthropicModel('claude-haiku-4-5');
     expect(resolved.tierDbIds).toBeDefined();
     expect(resolved.tierDbIds!.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('degrades to auto when the tier pool is empty', () => {
-    getDb().prepare(`UPDATE models SET size_label = 'Frontier'`).run();
-    setClaudeModelMap({ sonnet: 'tier:mid' });
-    const resolved = resolveAnthropicModel('claude-sonnet-4-5');
+  it('degrades to auto when the tier pool is empty', async () => {
+    (await getDb().run(`UPDATE models SET size_label = 'Frontier'`));
+    await setClaudeModelMap({ sonnet: 'tier:mid' });
+    const resolved = await resolveAnthropicModel('claude-sonnet-4-5');
     expect(resolved).toEqual({ pinned: false });
   });
 
-  it('still pins a concrete catalog model over a tier value', () => {
-    const row = getDb().prepare(`SELECT id, model_id FROM models WHERE enabled = 1 LIMIT 1`).get() as { id: number; model_id: string };
-    setClaudeModelMap({ opus: row.model_id });
-    const resolved = resolveAnthropicModel('claude-opus-4-5');
+  it('still pins a concrete catalog model over a tier value', async () => {
+    const row = (await getDb().get(`SELECT id, model_id FROM models WHERE enabled = 1 LIMIT 1`)) as { id: number; model_id: string };
+    await setClaudeModelMap({ opus: row.model_id });
+    const resolved = await resolveAnthropicModel('claude-opus-4-5');
     expect(resolved.pinned).toBe(true);
     expect(resolved.preferredModelDbId).toBe(row.id);
     expect(resolved.tierDbIds).toBeUndefined();

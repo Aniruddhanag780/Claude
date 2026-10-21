@@ -1,13 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { clearAllCooldowns } from '../../services/ratelimit.js';
 import { resetDecisionRoutingCache } from '../../services/routing-decision.js';
 import { refreshStatsCache } from '../../services/router.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 import { seedDecisionModels } from '../helpers/decision-models.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // End to end through the real chat surfaces (#1354): switch the strategy to
 // 'decision' over the dashboard API, let a (mocked) decision model pick a
@@ -36,40 +37,36 @@ async function request(method: string, path: string, body?: any, headers: Record
   return { status: res.status, body: json, headers: res.headers };
 }
 
-const auth = () => ({ Authorization: `Bearer ${getUnifiedApiKey()}` });
+const auth = async () => ({ Authorization: `Bearer ${await getUnifiedApiKey()}` });
 
-function addKey(platform: string, raw: string): void {
+async function addKey(platform: string, raw: string): void {
   const secret = encrypt(raw);
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'decision-routing', ?, ?, ?, 'healthy', 1)
-  `).run(platform, secret.encrypted, secret.iv, secret.authTag);
+    VALUES (?, 'decision-routing', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, secret.encrypted, secret.iv, secret.authTag]));
 }
 
 // Two chat models at opposite corners: a big slow one and a small fast one.
 // Smartest must serve the big one, Fastest the small one.
-function addModel(modelId: string, sizeLabel: string, speedRank: number): void {
+async function addModel(modelId: string, sizeLabel: string, speedRank: number): void {
   const db = getDb();
-  const id = Number(db.prepare(`
+  const id = Number((await db.run(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
                         monthly_token_budget, context_window, enabled, supports_vision, supports_tools)
-    VALUES ('groq', ?, ?, 1, ?, ?, '~1M', 128000, 1, 0, 1)
-  `).run(modelId, modelId, speedRank, sizeLabel).lastInsertRowid);
-  db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, id);
-  const profile = db.prepare("SELECT value FROM settings WHERE key = 'active_profile_id'").get() as { value: string } | undefined;
+    VALUES ('groq', ?, ?, 1, ?, ?, '~1M', 128000, 1, 0, 1) RETURNING id`, [modelId, modelId, speedRank, sizeLabel])).lastInsertRowid);
+  (await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1) RETURNING id', [id, id]));
+  const profile = (await db.get("SELECT value FROM settings WHERE key = 'active_profile_id'")) as { value: string } | undefined;
   if (profile) {
-    db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1)').run(Number(profile.value), id, id);
+    (await db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1) RETURNING id', [Number(profile.value), id, id]));
   }
 }
 
 // Speed is scored only from observed traffic, so give both models the same
 // success record and very different latencies: equally reliable, one fast.
-function seedHistory(modelId: string, latencyMs: number, ttfbMs: number): void {
-  const insert = getDb().prepare(`
+async function seedHistory(modelId: string, latencyMs: number, ttfbMs: number): void {
+  for (let i = 0; i < 20; i++) (await getDb().run(`
     INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, ttfb_ms)
-    VALUES ('groq', ?, 'success', 50, 300, ?, ?)
-  `);
-  for (let i = 0; i < 20; i++) insert.run(modelId, latencyMs, ttfbMs);
+    VALUES ('groq', ?, 'success', 50, 300, ?, ?) RETURNING id`, [modelId, latencyMs, ttfbMs]));
 }
 
 let decisionChoice = 'smartest';
@@ -100,26 +97,26 @@ function mockUpstreams() {
   });
 }
 
-const servedModel = () =>
-  (getDb().prepare('SELECT model_id FROM requests ORDER BY id DESC LIMIT 1').get() as { model_id: string }).model_id;
+const servedModel = async () =>
+  ((await getDb().get('SELECT model_id FROM requests ORDER BY id DESC LIMIT 1')) as { model_id: string }).model_id;
 
 describe('decision routing over HTTP (#1354)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    getDb().prepare('UPDATE models SET enabled = 0').run();
-    addModel('big-slow', 'Frontier', 11);
-    addModel('small-fast', 'Small', 1);
-    seedHistory('big-slow', 15_000, 4_000);
-    seedHistory('small-fast', 400, 100);
-    refreshStatsCache(getDb(), true);
-    seedDecisionModels();
-    addKey('groq', 'gsk-decision-routing');
-    addKey('cloudflare', 'acct:cf-token');
-    clearAllCooldowns(Number.MAX_SAFE_INTEGER);
+    await initTestDb();
+    (await getDb().run('UPDATE models SET enabled = 0'));
+    await addModel('big-slow', 'Frontier', 11);
+    await addModel('small-fast', 'Small', 1);
+    await seedHistory('big-slow', 15_000, 4_000);
+    await seedHistory('small-fast', 400, 100);
+    await refreshStatsCache(getDb(), true);
+    await seedDecisionModels();
+    await addKey('groq', 'gsk-decision-routing');
+    await addKey('cloudflare', 'acct:cf-token');
+    await clearAllCooldowns(Number.MAX_SAFE_INTEGER);
     resetDecisionRoutingCache();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
     decisionChoice = 'smartest';
     decisionCalls = 0;
     mockUpstreams();
@@ -146,16 +143,16 @@ describe('decision routing over HTTP (#1354)', () => {
 
     for (let i = 0; i < 5; i++) {
       decisionChoice = 'smartest';
-      const smart = await request('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: `prove a theorem ${i}` }] }, auth());
+      const smart = await request('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: `prove a theorem ${i}` }] }, await auth());
       expect(smart.status).toBe(200);
       expect(smart.headers.get('x-freellm-routing-strategy')).toBe('smartest');
-      expect(servedModel()).toBe('big-slow');
+      expect(await servedModel()).toBe('big-slow');
 
       decisionChoice = 'fastest';
-      const fast = await request('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: `what is ${i}+${i}` }] }, auth());
+      const fast = await request('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: `what is ${i}+${i}` }] }, await auth());
       expect(fast.status).toBe(200);
       expect(fast.headers.get('x-freellm-routing-strategy')).toBe('fastest');
-      expect(servedModel()).toBe('small-fast');
+      expect(await servedModel()).toBe('small-fast');
     }
     expect(decisionCalls).toBe(10);
   });
@@ -163,26 +160,26 @@ describe('decision routing over HTTP (#1354)', () => {
   it('works on the Anthropic and Responses surfaces too', async () => {
     await request('PUT', '/api/fallback/routing', { strategy: 'decision', exploreEnabled: false });
     decisionChoice = 'fastest';
-    const msgs = await request('POST', '/v1/messages', { max_tokens: 50, messages: [{ role: 'user', content: 'hi there' }] }, auth());
+    const msgs = await request('POST', '/v1/messages', { max_tokens: 50, messages: [{ role: 'user', content: 'hi there' }] }, await auth());
     expect(msgs.status).toBe(200);
     expect(msgs.headers.get('x-freellm-routing-strategy')).toBe('fastest');
-    expect(servedModel()).toBe('small-fast');
+    expect(await servedModel()).toBe('small-fast');
 
     decisionChoice = 'smartest';
-    const resp = await request('POST', '/v1/responses', { input: 'derive the quadratic formula' }, auth());
+    const resp = await request('POST', '/v1/responses', { input: 'derive the quadratic formula' }, await auth());
     expect(resp.status).toBe(200);
     expect(resp.headers.get('x-freellm-routing-strategy')).toBe('smartest');
-    expect(servedModel()).toBe('big-slow');
+    expect(await servedModel()).toBe('big-slow');
   });
 
   it('never asks when another strategy is active, or when the request pins a model', async () => {
     await request('PUT', '/api/fallback/routing', { strategy: 'balanced' });
-    const plain = await request('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] }, auth());
+    const plain = await request('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] }, await auth());
     expect(plain.status).toBe(200);
     expect(plain.headers.get('x-freellm-routing-strategy')).toBeNull();
 
     await request('PUT', '/api/fallback/routing', { strategy: 'decision' });
-    const pinned = await request('POST', '/v1/chat/completions', { model: 'small-fast', messages: [{ role: 'user', content: 'hi' }] }, auth());
+    const pinned = await request('POST', '/v1/chat/completions', { model: 'small-fast', messages: [{ role: 'user', content: 'hi' }] }, await auth());
     expect(pinned.status).toBe(200);
     expect(pinned.headers.get('x-freellm-routing-strategy')).toBeNull();
     expect(decisionCalls).toBe(0);
@@ -204,7 +201,7 @@ describe('decision routing over HTTP (#1354)', () => {
       }
       return origFetch(url as any, init);
     });
-    const res = await request('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hello' }] }, auth());
+    const res = await request('POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hello' }] }, await auth());
     expect(res.status).toBe(200);
     expect(res.headers.get('x-freellm-routing-strategy')).toBe('balanced; fallback=error');
   });

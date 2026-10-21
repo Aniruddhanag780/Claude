@@ -1,19 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { MAX_TRANSCRIPTION_BYTES } from '../../services/media.js';
 import { clearCooldownsForKey } from '../../services/ratelimit.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const realFetch = globalThis.fetch;
 
-function addKey(platform: string, raw = `${platform}-test-key`): number {
+async function addKey(platform: string, raw = `${platform}-test-key`): number {
   const { encrypted, iv, authTag } = encrypt(raw);
-  const row = getDb().prepare(`
+  const row = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'test', ?, ?, ?, 'healthy', 1)
-  `).run(platform, encrypted, iv, authTag);
+    VALUES (?, 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, encrypted, iv, authTag]));
   return Number(row.lastInsertRowid);
 }
 
@@ -24,19 +24,19 @@ function jsonResponse(body: unknown, status = 200) {
 /** Seed the catalog-delivered STT registry (media_models, modality
  *  'transcription') exactly as the published `transcriptionModels` fragment
  *  would land it via catalog-sync. */
-function seedTranscriptionModels(): void {
-  const insert = getDb().prepare(`
+async function seedTranscriptionModels(): void {
+  (await getDb().run(`
     INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
-    VALUES (?, ?, ?, 'transcription', ?, 1, '', ?)
-  `);
-  insert.run('groq', 'whisper-large-v3-turbo', 'Whisper Large v3 Turbo (Groq)', 0,
-    JSON.stringify({ maxBytes: 25 * 1024 * 1024 }));
-  insert.run('groq', 'whisper-large-v3', 'Whisper Large v3 (Groq)', 1,
-    JSON.stringify({ maxBytes: 25 * 1024 * 1024 }));
-  insert.run('cloudflare', '@cf/openai/whisper-large-v3-turbo', 'Whisper Large v3 Turbo (Cloudflare Workers AI)', 2,
-    JSON.stringify({ subtitleFormats: ['vtt'], requestStyle: 'json' }));
-  insert.run('cloudflare', '@cf/openai/whisper', 'Whisper (Cloudflare Workers AI)', 3,
-    JSON.stringify({ subtitleFormats: ['vtt'], requestStyle: 'binary' }));
+    VALUES (?, ?, ?, 'transcription', ?, 1, '', ?) RETURNING id`, ['groq', 'whisper-large-v3-turbo', 'Whisper Large v3 Turbo (Groq)', 0, JSON.stringify({ maxBytes: 25 * 1024 * 1024 })]));
+  (await getDb().run(`
+    INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
+    VALUES (?, ?, ?, 'transcription', ?, 1, '', ?) RETURNING id`, ['groq', 'whisper-large-v3', 'Whisper Large v3 (Groq)', 1, JSON.stringify({ maxBytes: 25 * 1024 * 1024 })]));
+  (await getDb().run(`
+    INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
+    VALUES (?, ?, ?, 'transcription', ?, 1, '', ?) RETURNING id`, ['cloudflare', '@cf/openai/whisper-large-v3-turbo', 'Whisper Large v3 Turbo (Cloudflare Workers AI)', 2, JSON.stringify({ subtitleFormats: ['vtt'], requestStyle: 'json' })]));
+  (await getDb().run(`
+    INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
+    VALUES (?, ?, ?, 'transcription', ?, 1, '', ?) RETURNING id`, ['cloudflare', '@cf/openai/whisper', 'Whisper (Cloudflare Workers AI)', 3, JSON.stringify({ subtitleFormats: ['vtt'], requestStyle: 'binary' })]));
 }
 
 interface MultipartOpts {
@@ -58,7 +58,7 @@ async function postTranscription(app: Express, opts: MultipartOpts) {
   }
   for (const [k, v] of Object.entries(opts.fields ?? {})) form.append(k, v);
   const headers: Record<string, string> = {};
-  if (opts.auth !== null) headers.Authorization = `Bearer ${opts.auth ?? getUnifiedApiKey()}`;
+  if (opts.auth !== null) headers.Authorization = `Bearer ${opts.auth ?? await getUnifiedApiKey()}`;
   const res = await realFetch(`http://127.0.0.1:${addr.port}/v1/audio/transcriptions`, {
     method: 'POST',
     headers,
@@ -76,11 +76,11 @@ const AUDIO = Buffer.from('RIFFfakewavbytes');
 describe('POST /v1/audio/transcriptions', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    for (let id = 1; id <= 10; id++) clearCooldownsForKey(id);
-    seedTranscriptionModels();
+    await initTestDb();
+    for (let id = 1; id <= 10; id++) await clearCooldownsForKey(id);
+    await seedTranscriptionModels();
     app = createApp();
   });
 
@@ -167,7 +167,7 @@ describe('POST /v1/audio/transcriptions', () => {
   });
 
   it('default json format returns {"text": ...} and provider headers', async () => {
-    addKey('groq');
+    await addKey('groq');
     globalThis.fetch = vi.fn(async () => jsonResponse({ text: 'hello from groq' })) as any;
     const { status, body, headers } = await postTranscription(app, {
       file: { bytes: AUDIO, name: 'a.wav' },
@@ -179,7 +179,7 @@ describe('POST /v1/audio/transcriptions', () => {
   });
 
   it("response_format 'text' returns the plain string", async () => {
-    addKey('groq');
+    await addKey('groq');
     globalThis.fetch = vi.fn(async () => jsonResponse({ text: 'plain words' })) as any;
     const { status, raw, headers } = await postTranscription(app, {
       file: { bytes: AUDIO, name: 'a.wav' },
@@ -191,7 +191,7 @@ describe('POST /v1/audio/transcriptions', () => {
   });
 
   it("response_format 'verbose_json' returns the OpenAI verbose shape when segments exist", async () => {
-    addKey('groq');
+    await addKey('groq');
     const segments = [{ id: 0, start: 0, end: 1, text: 'hi' }];
     globalThis.fetch = vi.fn(async () =>
       jsonResponse({ text: 'hi', language: 'en', duration: 1, segments })) as any;
@@ -207,7 +207,7 @@ describe('POST /v1/audio/transcriptions', () => {
   });
 
   it("'verbose_json' falls back to the plain json shape when the provider has no segments", async () => {
-    addKey('groq');
+    await addKey('groq');
     globalThis.fetch = vi.fn(async () => jsonResponse({ text: 'no segments here' })) as any;
     const { status, body } = await postTranscription(app, {
       file: { bytes: AUDIO, name: 'a.wav' },
@@ -218,8 +218,8 @@ describe('POST /v1/audio/transcriptions', () => {
   });
 
   it('falls over to cloudflare when groq is rate-limited (429)', async () => {
-    addKey('groq');
-    addKey('cloudflare', 'acct123:token456');
+    await addKey('groq');
+    await addKey('cloudflare', 'acct123:token456');
     globalThis.fetch = vi.fn(async (url: any) => {
       if (String(url).includes('groq.com')) return jsonResponse({ error: { message: 'slow down' } }, 429);
       return jsonResponse({ result: { text: 'cf text' }, success: true });
@@ -234,7 +234,7 @@ describe('POST /v1/audio/transcriptions', () => {
   });
 
   it('429 rate_limit_error when every provider is rate-limited', async () => {
-    addKey('groq');
+    await addKey('groq');
     globalThis.fetch = vi.fn(async () => jsonResponse({ error: { message: 'slow down' } }, 429)) as any;
     const { status, body } = await postTranscription(app, {
       file: { bytes: AUDIO, name: 'a.wav' },
@@ -245,8 +245,8 @@ describe('POST /v1/audio/transcriptions', () => {
   });
 
   it("503 with code 'no_transcription_models' when the registry has never been synced", async () => {
-    getDb().prepare("DELETE FROM media_models WHERE modality = 'transcription'").run();
-    addKey('groq');
+    (await getDb().run("DELETE FROM media_models WHERE modality = 'transcription'"));
+    await addKey('groq');
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as any;
     const { status, body } = await postTranscription(app, {
@@ -260,7 +260,7 @@ describe('POST /v1/audio/transcriptions', () => {
   });
 
   it("response_format 'vtt' streams native subtitles from cloudflare", async () => {
-    addKey('cloudflare', 'acct123:token456');
+    await addKey('cloudflare', 'acct123:token456');
     const vtt = 'WEBVTT\n\n00:00.000 --> 00:01.000\nhello';
     globalThis.fetch = vi.fn(async () =>
       jsonResponse({ result: { text: 'hello', vtt }, success: true })) as any;

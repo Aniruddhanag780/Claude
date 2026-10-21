@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { resetServedModelObservations } from '../../lib/served-model.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Served-model drift guard (#534 follow-up): the proxy overwrites the
 // upstream `model` field with the routed id before the caller sees it (the
@@ -35,8 +36,8 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, headers: res.headers, text, body: json };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 /** Parse an SSE response body into JSON frames (excluding [DONE]). */
@@ -73,10 +74,8 @@ function mockUpstream(opts: { upstreamModel: string; stream?: boolean }) {
   });
 }
 
-function lastRequestRow(): any {
-  return getDb().prepare(
-    'SELECT id, model_id, served_model, status FROM requests ORDER BY id DESC LIMIT 1'
-  ).get();
+async function lastRequestRow(): any {
+  return (await getDb().get('SELECT id, model_id, served_model, status FROM requests ORDER BY id DESC LIMIT 1'));
 }
 
 function servedModelWarns(): string[] {
@@ -89,26 +88,26 @@ describe('served-model drift guard (#534)', () => {
   let app: Express;
   let groqModelId: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
-    groqModelId = (getDb().prepare(`
+    dashToken = await mintDashboardToken();
+    groqModelId = ((await getDb().get(`
       SELECT m.model_id FROM models m
       JOIN fallback_config fc ON fc.model_db_id = m.id
       WHERE m.platform = 'groq' AND m.enabled = 1
       ORDER BY fc.priority LIMIT 1
-    `).get() as { model_id: string }).model_id;
+    `)) as { model_id: string }).model_id;
   });
 
   beforeEach(async () => {
     resetServedModelObservations();
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
-    db.prepare('DELETE FROM rate_limit_usage').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
+    (await db.run('DELETE FROM rate_limit_usage'));
     const addKey = await request(app, 'POST', '/api/keys',
       { platform: 'groq', key: 'gsk_served_model_guard_test', label: 'served-model' });
     expect(addKey.status).toBe(201);
@@ -123,12 +122,12 @@ describe('served-model drift guard (#534)', () => {
     mockUpstream({ upstreamModel: 'gemma-3-27b-it' });
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       model: groqModelId, messages: [{ role: 'user', content: 'drift test' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).toBe(200);
     // Contract unchanged: the caller still sees the ROUTED model.
     expect(body.model).toBe(groqModelId);
 
-    const row = lastRequestRow();
+    const row = await lastRequestRow();
     expect(row.status).toBe('success');
     expect(row.model_id).toBe(groqModelId);
     expect(row.served_model).toBe('gemma-3-27b-it');
@@ -143,13 +142,11 @@ describe('served-model drift guard (#534)', () => {
     for (let i = 0; i < 2; i++) {
       const { status } = await request(app, 'POST', '/v1/chat/completions', {
         model: groqModelId, messages: [{ role: 'user', content: `drift repeat ${i}` }],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).toBe(200);
     }
     expect(servedModelWarns()).toHaveLength(1);
-    const rows = getDb().prepare(
-      "SELECT served_model FROM requests WHERE status = 'success' ORDER BY id"
-    ).all() as any[];
+    const rows = (await getDb().all("SELECT served_model FROM requests WHERE status = 'success' ORDER BY id")) as any[];
     expect(rows).toHaveLength(2);
     for (const r of rows) expect(r.served_model).toBe('gemma-3-27b-it');
   });
@@ -158,10 +155,10 @@ describe('served-model drift guard (#534)', () => {
     mockUpstream({ upstreamModel: `some-org/${groqModelId}:free`.toUpperCase() });
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       model: groqModelId, messages: [{ role: 'user', content: 'cosmetic test' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).toBe(200);
     expect(body.model).toBe(groqModelId);
-    expect(lastRequestRow().served_model).toBeNull();
+    expect((await lastRequestRow()).served_model).toBeNull();
     expect(servedModelWarns()).toHaveLength(0);
   });
 
@@ -169,9 +166,9 @@ describe('served-model drift guard (#534)', () => {
     mockUpstream({ upstreamModel: groqModelId });
     const { status } = await request(app, 'POST', '/v1/chat/completions', {
       model: groqModelId, messages: [{ role: 'user', content: 'same id test' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).toBe(200);
-    expect(lastRequestRow().served_model).toBeNull();
+    expect((await lastRequestRow()).served_model).toBeNull();
     expect(servedModelWarns()).toHaveLength(0);
   });
 
@@ -179,7 +176,7 @@ describe('served-model drift guard (#534)', () => {
     mockUpstream({ upstreamModel: 'mystery-substitute-model', stream: true });
     const r = await request(app, 'POST', '/v1/chat/completions', {
       model: groqModelId, stream: true, messages: [{ role: 'user', content: 'stream drift test' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(r.status).toBe(200);
     const fs = frames(r.text);
     expect(fs.length).toBeGreaterThan(0);
@@ -187,7 +184,7 @@ describe('served-model drift guard (#534)', () => {
     for (const f of fs) expect(f.model).toBe(groqModelId);
     expect(fs.some(f => f.choices?.[0]?.delta?.content?.includes('streamed hello'))).toBe(true);
 
-    const row = lastRequestRow();
+    const row = await lastRequestRow();
     expect(row.status).toBe('success');
     expect(row.served_model).toBe('mystery-substitute-model');
     const warns = servedModelWarns();
@@ -199,9 +196,9 @@ describe('served-model drift guard (#534)', () => {
     mockUpstream({ upstreamModel: groqModelId, stream: true });
     const r = await request(app, 'POST', '/v1/chat/completions', {
       model: groqModelId, stream: true, messages: [{ role: 'user', content: 'stream same test' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(r.status).toBe(200);
-    expect(lastRequestRow().served_model).toBeNull();
+    expect((await lastRequestRow()).served_model).toBeNull();
     expect(servedModelWarns()).toHaveLength(0);
   });
 
@@ -209,9 +206,9 @@ describe('served-model drift guard (#534)', () => {
     mockUpstream({ upstreamModel: 'gemma-3-27b-it' });
     const { status } = await request(app, 'POST', '/v1/chat/completions', {
       model: groqModelId, messages: [{ role: 'user', content: 'detail test' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).toBe(200);
-    const row = lastRequestRow();
+    const row = await lastRequestRow();
 
     const detail = await request(app, 'GET', `/api/analytics/requests/${row.id}`);
     expect(detail.status).toBe(200);

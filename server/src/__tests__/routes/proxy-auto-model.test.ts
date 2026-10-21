@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -27,18 +28,18 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, body: json, headers: res.headers, raw: data };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 describe('Virtual "auto" model', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
@@ -47,8 +48,8 @@ describe('Virtual "auto" model', () => {
     // (owned_by = freellmapi, id = canonical slug) that aggregates availability
     // across its providers. This suite asserts the availability tagging (#242)
     // and context-window advertising (#282) under that unified shape.
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
 
     const addKey = await request(app, 'POST', '/api/keys', {
       platform: 'groq',
@@ -63,7 +64,7 @@ describe('Virtual "auto" model', () => {
   });
 
   it('lists "auto" as the first /v1/models entry', async () => {
-    const { status, body } = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+    const { status, body } = await request(app, 'GET', '/v1/models', undefined, await authHeaders());
     expect(status).toBe(200);
     expect(body.object).toBe('list');
     expect(body.data[0]).toMatchObject({
@@ -84,7 +85,7 @@ describe('Virtual "auto" model', () => {
   });
 
   it('returns unique model ids from /v1/models', async () => {
-    const { status, body } = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+    const { status, body } = await request(app, 'GET', '/v1/models', undefined, await authHeaders());
     expect(status).toBe(200);
 
     const ids = body.data.map((model: { id: string }) => model.id);
@@ -94,7 +95,7 @@ describe('Virtual "auto" model', () => {
   // #242: default returns the whole catalog, each entry annotated with whether
   // it's currently usable (connected) and, if not, why.
   it('returns the whole catalog by default, each tagged with availability (#242)', async () => {
-    const { status, body } = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+    const { status, body } = await request(app, 'GET', '/v1/models', undefined, await authHeaders());
     expect(status).toBe(200);
     expect(body.data[0]).toMatchObject({ id: 'auto', available: true, unavailable_reason: null });
 
@@ -114,14 +115,14 @@ describe('Virtual "auto" model', () => {
   });
 
   it('?available=true narrows to only connected models (#242)', async () => {
-    const filtered = await request(app, 'GET', '/v1/models?available=true', undefined, authHeaders());
+    const filtered = await request(app, 'GET', '/v1/models?available=true', undefined, await authHeaders());
     expect(filtered.status).toBe(200);
     const filteredModels = filtered.body.data.filter((m: any) => m.id !== 'auto');
     expect(filteredModels.length).toBeGreaterThan(0);
     expect(filteredModels.every((m: any) => m.available === true)).toBe(true);
 
     // The unfiltered list is strictly larger — the keyless models reappear.
-    const all = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+    const all = await request(app, 'GET', '/v1/models', undefined, await authHeaders());
     const allModels = all.body.data.filter((m: any) => m.id !== 'auto');
     expect(allModels.length).toBeGreaterThan(filteredModels.length);
   });
@@ -130,7 +131,7 @@ describe('Virtual "auto" model', () => {
   // `?execution_status=` narrows to one of them so an agent can ask for models
   // it can call right now without parsing the whole list.
   it('?execution_status= narrows to that status (#1100)', async () => {
-    const all = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+    const all = await request(app, 'GET', '/v1/models', undefined, await authHeaders());
     expect(all.status).toBe(200);
     const catalog = all.body.data.filter((m: any) => m.execution_status !== undefined);
     expect(catalog.length).toBeGreaterThan(0);
@@ -138,37 +139,37 @@ describe('Virtual "auto" model', () => {
     expect(catalog.some((m: any) => m.execution_status === 'ready')).toBe(true);
     expect(catalog.some((m: any) => m.execution_status === 'needsKey')).toBe(true);
 
-    const ready = await request(app, 'GET', '/v1/models?execution_status=ready', undefined, authHeaders());
+    const ready = await request(app, 'GET', '/v1/models?execution_status=ready', undefined, await authHeaders());
     const readyModels = ready.body.data.filter((m: any) => m.execution_status !== undefined);
     expect(readyModels.length).toBeGreaterThan(0);
     expect(readyModels.every((m: any) => m.execution_status === 'ready')).toBe(true);
     expect(readyModels.length).toBeLessThan(catalog.length);
 
     // The value is camelCase but the query is matched case-insensitively.
-    const needsKey = await request(app, 'GET', '/v1/models?execution_status=needskey', undefined, authHeaders());
+    const needsKey = await request(app, 'GET', '/v1/models?execution_status=needskey', undefined, await authHeaders());
     const needsKeyModels = needsKey.body.data.filter((m: any) => m.execution_status !== undefined);
     expect(needsKeyModels.length).toBeGreaterThan(0);
     expect(needsKeyModels.every((m: any) => m.execution_status === 'needsKey')).toBe(true);
 
     // An unrecognised value filters nothing rather than emptying the list.
-    const bogus = await request(app, 'GET', '/v1/models?execution_status=banana', undefined, authHeaders());
+    const bogus = await request(app, 'GET', '/v1/models?execution_status=banana', undefined, await authHeaders());
     expect(bogus.body.data.filter((m: any) => m.execution_status !== undefined).length).toBe(catalog.length);
   });
 
   it('marks a fully-disabled model with unavailable_reason "disabled" (#242)', async () => {
     const db = getDb();
-    const row = db.prepare("SELECT display_name FROM models WHERE platform='groq' AND enabled=1 LIMIT 1").get() as { display_name: string } | undefined;
+    const row = (await db.get("SELECT display_name FROM models WHERE platform='groq' AND enabled=1 LIMIT 1")) as { display_name: string } | undefined;
     expect(row).toBeDefined();
     // A unified model stays available while ANY of its providers is enabled, so
     // disable every provider that serves this logical model (same display_name).
-    db.prepare('UPDATE models SET enabled=0 WHERE display_name=?').run(row!.display_name);
+    (await db.run('UPDATE models SET enabled=0 WHERE display_name=?', [row!.display_name]));
     try {
-      const { body } = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+      const { body } = await request(app, 'GET', '/v1/models', undefined, await authHeaders());
       const disabled = body.data.filter((m: any) => m.id !== 'auto' && m.unavailable_reason === 'disabled');
       expect(disabled.length).toBeGreaterThan(0);
       expect(disabled.every((m: any) => m.available === false)).toBe(true);
     } finally {
-      db.prepare('UPDATE models SET enabled=1 WHERE display_name=?').run(row!.display_name);
+      (await db.run('UPDATE models SET enabled=1 WHERE display_name=?', [row!.display_name]));
     }
   });
 
@@ -177,7 +178,7 @@ describe('Virtual "auto" model', () => {
   // and give "auto" the largest window among connected models so clients don't
   // fall back to a conservative ~16k default and truncate long inputs.
   it('advertises context_length and a non-null auto context window (#282)', async () => {
-    const { status, body } = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+    const { status, body } = await request(app, 'GET', '/v1/models', undefined, await authHeaders());
     expect(status).toBe(200);
 
     const auto = body.data.find((m: any) => m.id === 'auto');
@@ -227,7 +228,7 @@ describe('Virtual "auto" model', () => {
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       model: 'auto',
       messages: [{ role: 'user', content: 'hello' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(body.choices[0].message.content).toBe('routed via auto');
@@ -237,7 +238,7 @@ describe('Virtual "auto" model', () => {
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       model: 'definitely-not-a-real-model',
       messages: [{ role: 'user', content: 'hello' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(404);
     expect(body.error.code).toBe('model_not_found');

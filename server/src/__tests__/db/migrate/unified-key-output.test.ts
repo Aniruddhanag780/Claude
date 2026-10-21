@@ -1,6 +1,6 @@
-import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { up as runLegacyBaseline } from '../../../db/migrations/20260101_000000_legacy_baseline.js';
+import { createEmptyTestDb } from '../../helpers/test-db.js';
 
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 const ORIGINAL_CI = process.env.CI;
@@ -40,68 +40,70 @@ describe('legacy baseline unified API key output', () => {
     }
   });
 
-  it('does not put a fresh key in production logs, even with an attached TTY', () => {
+  it('does not put a fresh key in production logs, even with an attached TTY', async () => {
     process.env.NODE_ENV = 'production';
     setStdoutTTY(true);
 
-    const key = runBaselineAndReadKey();
+    const key = await runBaselineAndReadKey();
 
     expect(output.join('')).not.toContain(key);
     expect(output.join('')).toContain('dashboard');
     expect(output.join('')).toContain('Keys page');
   });
 
-  it('does not put a fresh key in non-TTY development logs', () => {
+  it('does not put a fresh key in non-TTY development logs', async () => {
     process.env.NODE_ENV = 'development';
     setStdoutTTY(false);
 
-    const key = runBaselineAndReadKey();
+    const key = await runBaselineAndReadKey();
 
     expect(output.join('')).not.toContain(key);
     expect(output.join('')).toContain('dashboard');
     expect(output.join('')).toContain('Keys page');
   });
 
-  it('does not disclose a key from a Kubernetes TTY', () => {
+  it('does not disclose a key from a Kubernetes TTY', async () => {
     process.env.NODE_ENV = 'development';
     process.env.KUBERNETES_SERVICE_HOST = '10.0.0.1';
     setStdoutTTY(true);
 
-    const key = runBaselineAndReadKey();
+    const key = await runBaselineAndReadKey();
 
     expect(output.join('')).not.toContain(key);
     expect(output.join('')).toContain('not printed to logs');
   });
 
-  it('does not disclose a key in CI even with a development TTY', () => {
+  it('does not disclose a key in CI even with a development TTY', async () => {
     process.env.NODE_ENV = 'development';
     process.env.CI = 'true';
     setStdoutTTY(true);
 
-    const key = runBaselineAndReadKey();
+    const key = await runBaselineAndReadKey();
 
     expect(output.join('')).not.toContain(key);
     expect(output.join('')).toContain('not printed to logs');
   });
 
-  it('discloses the full key only for interactive local development', () => {
+  it('discloses the full key only for interactive local development', async () => {
     process.env.NODE_ENV = 'development';
     setStdoutTTY(true);
 
-    const key = runBaselineAndReadKey();
+    const key = await runBaselineAndReadKey();
 
     expect(output.join('')).toContain(`Your unified API key: ${key}`);
   });
 });
 
-function runBaselineAndReadKey(): string {
-  const db = new Database(':memory:');
+async function runBaselineAndReadKey(): Promise<string> {
+  // PG: an EMPTY scratch database stands in for the old throwaway
+  // `new Database(':memory:')`; the baseline seeds it and prints the key.
+  const { db, cleanup } = await createEmptyTestDb();
   try {
-    runLegacyBaseline(db);
-    const row = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get() as { value: string };
+    await runLegacyBaseline(db);
+    const row = await db.get("SELECT value FROM settings WHERE key = 'unified_api_key'") as { value: string };
     return row.value;
   } finally {
-    db.close();
+    await cleanup();
   }
 }
 

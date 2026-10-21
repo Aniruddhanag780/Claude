@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import {
   recordQuotaObservation,
   getQuotaStateForKeys,
@@ -7,8 +7,9 @@ import {
   inferQuotaPoolKey,
 } from '../../services/provider-quota.js';
 import { pruneQuotaObservations } from '../../services/request-retention.js';
+import { initTestDb } from '../helpers/test-db.js';
 
-function insertState(row: {
+async function insertState(row: {
   platform: string;
   keyId: number;
   pool: string;
@@ -17,25 +18,25 @@ function insertState(row: {
   remaining: number | null;
   resetAt: string | null;
 }) {
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO provider_quota_state
       (platform, key_id, quota_pool_key, metric, limit_value, remaining_value, reset_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(row.platform, row.keyId, row.pool, row.metric, row.limit, row.remaining, row.resetAt);
+  `, [row.platform, row.keyId, row.pool, row.metric, row.limit, row.remaining, row.resetAt]));
 }
 
-function readState(platform: string, keyId: number, pool: string, metric: string) {
-  return getDb().prepare(`
+async function readState(platform: string, keyId: number, pool: string, metric: string) {
+  return (await getDb().get(`
     SELECT limit_value AS lim, remaining_value AS remaining, reset_at AS resetAt
       FROM provider_quota_state
      WHERE platform = ? AND key_id = ? AND quota_pool_key = ? AND metric = ?
-  `).get(platform, keyId, pool, metric) as { lim: number | null; remaining: number | null; resetAt: string | null } | undefined;
+  `, [platform, keyId, pool, metric])) as { lim: number | null; remaining: number | null; resetAt: string | null } | undefined;
 }
 
 describe('provider-quota: pool inference', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   it('buckets shared-pool providers per account and openrouter free vs account', () => {
@@ -77,95 +78,91 @@ describe('provider-quota: pool inference', () => {
 });
 
 describe('provider-quota: record + read round-trip', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM provider_quota_state').run();
-    getDb().prepare('DELETE FROM provider_quota_observations').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM provider_quota_state'));
+    (await getDb().run('DELETE FROM provider_quota_observations'));
   });
 
-  it('surfaces the newest observation per pool when the log holds many', () => {
+  it('surfaces the newest observation per pool when the log holds many', async () => {
     // Older rows for the same pool must never win, and rows for a sibling pool
     // must never bleed across. Mirrors the dashboard poll on a long-lived
     // install whose log holds hundreds of thousands of rows per pool.
     for (let i = 0; i < 25; i++) {
-      recordQuotaObservation({
+      await recordQuotaObservation({
         platform: 'groq', keyId: 7, quotaPoolKey: 'groq::account', metric: 'tokens',
         limit: 1000, remaining: 1000 - i, modelId: `old-${i}`, source: 'header',
         observedAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
       });
     }
-    recordQuotaObservation({
+    await recordQuotaObservation({
       platform: 'groq', keyId: 7, quotaPoolKey: 'groq::account', metric: 'tokens',
       limit: 1000, remaining: 5, modelId: 'newest', source: 'header',
       observedAt: new Date(Date.UTC(2026, 0, 2)).toISOString(),
     });
-    recordQuotaObservation({
+    await recordQuotaObservation({
       platform: 'groq', keyId: 7, quotaPoolKey: 'groq::account', metric: 'requests',
       limit: 30, remaining: 1, modelId: 'other-metric', source: 'header',
       observedAt: new Date(Date.UTC(2026, 0, 3)).toISOString(),
     });
-    const rows = getQuotaStateForKeys().filter(r => r.platform === 'groq' && r.keyId === 7);
+    const rows = (await getQuotaStateForKeys()).filter(r => r.platform === 'groq' && r.keyId === 7);
     expect(rows).toHaveLength(2);
     expect(rows.find(r => r.metric === 'tokens')?.modelId).toBe('newest');
     expect(rows.find(r => r.metric === 'tokens')?.remaining).toBe(5);
     expect(rows.find(r => r.metric === 'requests')?.modelId).toBe('other-metric');
   });
 
-  it('prunes the observation log by age and count without touching state', () => {
+  it('prunes the observation log by age and count without touching state', async () => {
     const db = getDb();
-    const insert = db.prepare(`
-      INSERT INTO provider_quota_observations
-        (id, platform, key_id, quota_pool_key, metric, observed_at, created_at)
-      VALUES (?, 'groq', 7, 'groq::account', 'tokens', ?, ?)
-    `);
     const now = Date.UTC(2026, 8, 1);
     const stamp = (ms: number) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
     for (let i = 0; i < 10; i++) {
       // 5 rows older than 30 days, 5 fresh ones.
       const at = stamp(now - (i < 5 ? 40 : 1) * 86_400_000 - i * 1000);
-      insert.run(`obs-${i}`, at, at);
+      (await db.run(`
+      INSERT INTO provider_quota_observations
+        (id, platform, key_id, quota_pool_key, metric, observed_at, created_at)
+      VALUES (?, 'groq', 7, 'groq::account', 'tokens', ?, ?) RETURNING id`, [`obs-${i}`, at, at]));
     }
-    insertState({ platform: 'groq', keyId: 7, pool: 'groq::account', metric: 'tokens', limit: 1000, remaining: 10, resetAt: null });
+    await insertState({ platform: 'groq', keyId: 7, pool: 'groq::account', metric: 'tokens', limit: 1000, remaining: 10, resetAt: null });
 
-    expect(pruneQuotaObservations(db, now)).toEqual({ deleted: 5, done: true });
-    expect(db.prepare('SELECT COUNT(*) AS n FROM provider_quota_observations').get()).toEqual({ n: 5 });
+    expect(await pruneQuotaObservations(db, now)).toEqual({ deleted: 5, done: true });
+    expect((await db.get('SELECT COUNT(*) AS n FROM provider_quota_observations'))).toEqual({ n: 5 });
 
     process.env.QUOTA_OBSERVATIONS_MAX_ROWS = '2';
     try {
-      expect(pruneQuotaObservations(db, now)).toEqual({ deleted: 3, done: true });
+      expect(await pruneQuotaObservations(db, now)).toEqual({ deleted: 3, done: true });
     } finally {
       delete process.env.QUOTA_OBSERVATIONS_MAX_ROWS;
     }
-    const left = db.prepare('SELECT id FROM provider_quota_observations ORDER BY created_at DESC').all() as { id: string }[];
+    const left = (await db.all('SELECT id FROM provider_quota_observations ORDER BY created_at DESC')) as { id: string }[];
     expect(left.map(r => r.id)).toEqual(['obs-5', 'obs-6']);
-    expect(readState('groq', 7, 'groq::account', 'tokens')?.remaining).toBe(10);
+    expect((await readState('groq', 7, 'groq::account', 'tokens'))?.remaining).toBe(10);
   });
 
-  it('stops a large sweep at its time budget and reports it unfinished', () => {
+  it('stops a large sweep at its time budget and reports it unfinished', async () => {
     const db = getDb();
-    const insert = db.prepare(`
-      INSERT INTO provider_quota_observations
-        (id, platform, key_id, quota_pool_key, metric, observed_at, created_at)
-      VALUES (?, 'groq', 7, 'groq::account', 'tokens', ?, ?)
-    `);
     const now = Date.UTC(2026, 8, 1);
     const old = new Date(now - 60 * 86_400_000).toISOString().slice(0, 19).replace('T', ' ');
-    const tx = db.transaction(() => { for (let i = 0; i < 45_000; i++) insert.run(`o-${i}`, old, old); });
+    const tx = db.transaction(async () => { for (let i = 0; i < 45_000; i++) (await db.run(`
+      INSERT INTO provider_quota_observations
+        (id, platform, key_id, quota_pool_key, metric, observed_at, created_at)
+      VALUES (?, 'groq', 7, 'groq::account', 'tokens', ?, ?) RETURNING id`, [`o-${i}`, old, old])); });
     tx();
     // A zero budget allows exactly one chunk before the check trips.
-    const first = pruneQuotaObservations(db, now, 0);
+    const first = await pruneQuotaObservations(db, now, 0);
     expect(first.done).toBe(false);
     expect(first.deleted).toBe(5_000);
-    const rest = pruneQuotaObservations(db, now, 60_000);
+    const rest = await pruneQuotaObservations(db, now, 60_000);
     expect(rest).toEqual({ deleted: 40_000, done: true });
   });
 
-  it('records an observation and surfaces it via getQuotaStateForKeys', () => {
-    const rec = recordQuotaObservation({
+  it('records an observation and surfaces it via getQuotaStateForKeys', async () => {
+    const rec = await recordQuotaObservation({
       platform: 'groq',
       keyId: 7,
       quotaPoolKey: 'groq::account',
@@ -176,7 +173,7 @@ describe('provider-quota: record + read round-trip', () => {
     });
     expect(rec).not.toBeNull();
 
-    const states = getQuotaStateForKeys();
+    const states = await getQuotaStateForKeys();
     const row = states.find(s => s.platform === 'groq' && s.keyId === 7 && s.metric === 'requests');
     expect(row).toBeDefined();
     expect(row!.limit).toBe(1000);
@@ -185,28 +182,27 @@ describe('provider-quota: record + read round-trip', () => {
 
   // #705: the panel rendered a bare "key #7", which names nothing an operator
   // recognises once a provider holds several keys.
-  it('carries the label of the key the state belongs to', () => {
+  it('carries the label of the key the state belongs to', async () => {
     const db = getDb();
-    db.prepare(`
+    (await db.run(`
       INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (41, 'groq', 'Work account', 'x', 'y', 'z', 'unknown', 1)
-    `).run();
-    recordQuotaObservation({
+      VALUES (41, 'groq', 'Work account', 'x', 'y', 'z', 'unknown', 1) RETURNING id`));
+    await recordQuotaObservation({
       platform: 'groq', keyId: 41, quotaPoolKey: 'groq::account',
       metric: 'requests', limit: 10, remaining: 1, source: 'header',
     });
 
-    const row = getQuotaStateForKeys().find(s => s.keyId === 41);
+    const row = (await getQuotaStateForKeys()).find(s => s.keyId === 41);
     expect(row!.keyLabel).toBe('Work account');
   });
 
-  it('leaves the label null when the key row is gone', () => {
-    recordQuotaObservation({
+  it('leaves the label null when the key row is gone', async () => {
+    await recordQuotaObservation({
       platform: 'groq', keyId: 4242, quotaPoolKey: 'groq::account',
       metric: 'requests', limit: 10, remaining: 1, source: 'header',
     });
 
-    const row = getQuotaStateForKeys().find(s => s.keyId === 4242);
+    const row = (await getQuotaStateForKeys()).find(s => s.keyId === 4242);
     expect(row).toBeDefined();
     expect(row!.keyLabel).toBeNull();
   });
@@ -230,9 +226,9 @@ describe('provider-quota: parse from response headers (shared parseRetryAfterMs)
     const speech = parseQuotaObservationsFromResponse(new Response(null), { platform: 'speechify' });
     expect(speech.every(o => o.limit == null && o.remaining == null)).toBe(true);
   });
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   it('parses Groq ratelimit headers into a requests observation', () => {
@@ -315,49 +311,49 @@ describe('provider-quota: parse from response headers (shared parseRetryAfterMs)
 });
 
 describe('provider-quota: reset headroom without overwriting observations', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM provider_quota_state').run();
-    getDb().prepare('DELETE FROM provider_quota_observations').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM provider_quota_state'));
+    (await getDb().run('DELETE FROM provider_quota_observations'));
   });
 
   const past = () => new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const future = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
-  it('displays replenished headroom without rewriting the reported balance', () => {
-    insertState({ platform: 'groq', keyId: 1, pool: 'groq::account', metric: 'requests', limit: 100, remaining: 0, resetAt: past() });
+  it('displays replenished headroom without rewriting the reported balance', async () => {
+    await insertState({ platform: 'groq', keyId: 1, pool: 'groq::account', metric: 'requests', limit: 100, remaining: 0, resetAt: past() });
 
-    const states = getQuotaStateForKeys();
+    const states = await getQuotaStateForKeys();
     const row = states.find(s => s.platform === 'groq' && s.keyId === 1);
     expect(row!.remaining).toBe(100);      // replenished to the limit
     expect(row!.resetAt).toBeNull();        // stale reset dropped
 
     // Forecast readers retain the actual reported zero and its original reset.
-    const persisted = readState('groq', 1, 'groq::account', 'requests');
+    const persisted = await readState('groq', 1, 'groq::account', 'requests');
     expect(persisted!.remaining).toBe(0);
     expect(persisted!.resetAt).not.toBeNull();
   });
 
-  it('clears remaining to unknown when the limit is unknown and reset_at passed', () => {
-    insertState({ platform: 'ollama', keyId: 2, pool: 'ollama::cloud', metric: 'requests', limit: null, remaining: 0, resetAt: past() });
+  it('clears remaining to unknown when the limit is unknown and reset_at passed', async () => {
+    await insertState({ platform: 'ollama', keyId: 2, pool: 'ollama::cloud', metric: 'requests', limit: null, remaining: 0, resetAt: past() });
 
-    const states = getQuotaStateForKeys();
+    const states = await getQuotaStateForKeys();
     const row = states.find(s => s.platform === 'ollama' && s.keyId === 2);
     expect(row!.remaining).toBeNull();      // no known limit → clear the 0
     expect(row!.resetAt).toBeNull();
 
-    const persisted = readState('ollama', 2, 'ollama::cloud', 'requests');
+    const persisted = await readState('ollama', 2, 'ollama::cloud', 'requests');
     expect(persisted!.remaining).toBe(0);
   });
 
-  it('leaves a still-active window (reset_at in the future) untouched', () => {
-    insertState({ platform: 'groq', keyId: 3, pool: 'groq::account', metric: 'requests', limit: 100, remaining: 0, resetAt: future() });
+  it('leaves a still-active window (reset_at in the future) untouched', async () => {
+    await insertState({ platform: 'groq', keyId: 3, pool: 'groq::account', metric: 'requests', limit: 100, remaining: 0, resetAt: future() });
 
-    const states = getQuotaStateForKeys();
+    const states = await getQuotaStateForKeys();
     const row = states.find(s => s.platform === 'groq' && s.keyId === 3);
     expect(row!.remaining).toBe(0);         // still exhausted until it resets
     expect(row!.resetAt).not.toBeNull();
@@ -367,7 +363,7 @@ describe('provider-quota: reset headroom without overwriting observations', () =
 
 describe('provider quota snapshot reliability', () => {
   const now = Date.parse('2026-09-15T12:00:00Z');
-  beforeEach(() => { initDb(':memory:'); vi.spyOn(Date, 'now').mockReturnValue(now); });
+  beforeEach(async () => { await initTestDb(); vi.spyOn(Date, 'now').mockReturnValue(now); });
   afterEach(() => vi.restoreAllMocks());
 
   it.each([
@@ -399,23 +395,23 @@ describe('provider quota snapshot reliability', () => {
     expect(parseQuotaObservationsFromResponse(new Response(null,{headers:{'retry-after':'5'}}),{platform:'groq'}).some(row=>row.remaining===0)).toBe(false);
   });
 
-  it('empty and limit-only probes cannot refresh a balance timestamp or borrow its confidence', () => {
+  it('empty and limit-only probes cannot refresh a balance timestamp or borrow its confidence', async () => {
     const base={platform:'groq' as const,keyId:4};
-    recordQuotaObservation({...base,limit:100,remaining:50,resetAt:'2026-09-15T13:00:00Z',source:'header',observedAt:'2026-09-15T11:00:00Z'});
-    const before=getQuotaStateForKeys({normalizeExpired:false})[0];
-    const probe=recordQuotaObservation({...base,source:'probe',confidence:0.1,observedAt:'2026-09-15T12:00:00Z'});
-    recordQuotaObservation({...base,source:'header',limit:200,observedAt:'2026-09-15T12:01:00Z'});
+    await recordQuotaObservation({...base,limit:100,remaining:50,resetAt:'2026-09-15T13:00:00Z',source:'header',observedAt:'2026-09-15T11:00:00Z'});
+    const before=await getQuotaStateForKeys({normalizeExpired:false})[0];
+    const probe=await recordQuotaObservation({...base,source:'probe',confidence:0.1,observedAt:'2026-09-15T12:00:00Z'});
+    await recordQuotaObservation({...base,source:'header',limit:200,observedAt:'2026-09-15T12:01:00Z'});
     expect(probe?.confidence).toBe(0.1);
-    expect(getQuotaStateForKeys({normalizeExpired:false})[0]).toMatchObject({limit:100,remaining:50,resetAt:before.resetAt,observedAt:before.observedAt,source:'header',confidence:1});
-    expect(getDb().prepare("SELECT confidence FROM provider_quota_observations WHERE source='probe'").get()).toEqual({confidence:0.1});
+    expect(await getQuotaStateForKeys({normalizeExpired:false})[0]).toMatchObject({limit:100,remaining:50,resetAt:before.resetAt,observedAt:before.observedAt,source:'header',confidence:1});
+    expect((await getDb().get("SELECT confidence FROM provider_quota_observations WHERE source='probe'"))).toEqual({confidence:0.1});
   });
 
-  it('new balances replace the complete snapshot, including lower confidence and missing reset or limit', () => {
+  it('new balances replace the complete snapshot, including lower confidence and missing reset or limit', async () => {
     const base={platform:'groq' as const,keyId:4};
-    recordQuotaObservation({...base,limit:100,remaining:50,resetAt:'2026-09-15T13:00:00Z',source:'header',observedAt:'2026-09-15T11:00:00Z'});
-    recordQuotaObservation({...base,remaining:0,source:'error_body',confidence:0.55,observedAt:'2026-09-15T12:00:00Z'});
-    expect(getQuotaStateForKeys({normalizeExpired:false})[0]).toMatchObject({remaining:0,limit:null,resetAt:null,confidence:0.55,source:'error_body'});
-    recordQuotaObservation({...base,remaining:100,limit:100,source:'header',observedAt:'2026-09-15T10:00:00Z'});
-    expect(getQuotaStateForKeys({normalizeExpired:false})[0].remaining).toBe(0);
+    await recordQuotaObservation({...base,limit:100,remaining:50,resetAt:'2026-09-15T13:00:00Z',source:'header',observedAt:'2026-09-15T11:00:00Z'});
+    await recordQuotaObservation({...base,remaining:0,source:'error_body',confidence:0.55,observedAt:'2026-09-15T12:00:00Z'});
+    expect(await getQuotaStateForKeys({normalizeExpired:false})[0]).toMatchObject({remaining:0,limit:null,resetAt:null,confidence:0.55,source:'error_body'});
+    await recordQuotaObservation({...base,remaining:100,limit:100,source:'header',observedAt:'2026-09-15T10:00:00Z'});
+    expect(await getQuotaStateForKeys({normalizeExpired:false})[0].remaining).toBe(0);
   });
 });

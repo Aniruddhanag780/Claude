@@ -13,11 +13,12 @@ vi.mock('../../services/search.js', async (importOriginal) => {
 });
 
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
+import { getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { encodeHitContent, filterHitsByDomain } from '../../lib/web-search-tool.js';
 import { seedSearchEngines } from '../helpers/search-engines.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let app: Express;
 let dashToken = '';
@@ -52,8 +53,8 @@ function sseEvents(text: string): Array<{ event: string; data: any }> {
   return out;
 }
 
-const anthropicHeaders = () => ({ 'x-api-key': getUnifiedApiKey(), 'anthropic-version': '2023-06-01' });
-const bearer = () => ({ Authorization: `Bearer ${getUnifiedApiKey()}` });
+const anthropicHeaders = async () => ({ 'x-api-key': await getUnifiedApiKey(), 'anthropic-version': '2023-06-01' });
+const bearer = async () => ({ Authorization: `Bearer ${await getUnifiedApiKey()}` });
 
 const searchCall = (query: string, id = 'call_s1') => ({
   id: 'chatcmpl-s', object: 'chat.completion', created: 1, model: 'openai/gpt-oss-120b',
@@ -88,30 +89,29 @@ const HITS = [
   { title: 'Blog', url: 'https://blocked.test/post', content: 'Unrelated.', score: 0.5 },
 ];
 
-function addSearchKey() {
+async function addSearchKey() {
   const { encrypted, iv, authTag } = encrypt('tvly-test');
-  getDb().prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('tavily', 't', ?, ?, ?, 'healthy', 1)")
-    .run(encrypted, iv, authTag);
+  (await getDb().run("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('tavily', 't', ?, ?, ?, 'healthy', 1) RETURNING id", [encrypted, iv, authTag]));
 }
 
 describe('agent web search served from the search pool', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    seedSearchEngines();
+    await initTestDb();
+    await seedSearchEngines();
     app = createApp();
-    dashToken = mintDashboardToken();
-    setSetting('enable_mcp', '1');
+    dashToken = await mintDashboardToken();
+    await setSetting('enable_mcp', '1');
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
-    db.prepare('DELETE FROM rate_limit_usage').run();
-    db.prepare(`INSERT INTO settings (key, value) VALUES ('expose_cc_discovery_aliases', '0')
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
+    (await db.run('DELETE FROM rate_limit_usage'));
+    (await db.run(`INSERT INTO settings (key, value) VALUES ('expose_cc_discovery_aliases', '0')
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`));
     const { status } = await post('/api/keys', { platform: 'groq', key: 'gsk_web_search_test', label: 'g' }, { Authorization: `Bearer ${dashToken}` });
     expect(status).toBe(201);
     runSearchMock.mockReset();
@@ -130,9 +130,9 @@ describe('agent web search served from the search pool', () => {
     });
 
     it('runs the search and returns server_tool_use + web_search_tool_result blocks', async () => {
-      addSearchKey();
+      await addSearchKey();
       const bodies = mockGroq([searchCall('version 9 release'), answer('Version 9 shipped on Monday.')]);
-      const { status, body } = await post('/v1/messages', request(), anthropicHeaders());
+      const { status, body } = await post('/v1/messages', request(), await anthropicHeaders());
 
       expect(status).toBe(200);
       expect(runSearchMock).toHaveBeenCalledTimes(1);
@@ -158,9 +158,9 @@ describe('agent web search served from the search pool', () => {
     });
 
     it('streams the same blocks as SSE with web_search_requests in message_delta', async () => {
-      addSearchKey();
+      await addSearchKey();
       mockGroq([searchCall('version 9 release'), answer('Done.')]);
-      const { status, text } = await post('/v1/messages', request({ stream: true }), anthropicHeaders());
+      const { status, text } = await post('/v1/messages', request({ stream: true }), await anthropicHeaders());
 
       expect(status).toBe(200);
       const events = sseEvents(text).filter(e => e.event !== 'ping');
@@ -178,9 +178,9 @@ describe('agent web search served from the search pool', () => {
     });
 
     it('honours max_uses with a max_uses_exceeded error result', async () => {
-      addSearchKey();
+      await addSearchKey();
       mockGroq([searchCall('first'), searchCall('second', 'call_s2'), answer('ok')]);
-      const { body } = await post('/v1/messages', request({ tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 1 }] }), anthropicHeaders());
+      const { body } = await post('/v1/messages', request({ tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 1 }] }), await anthropicHeaders());
 
       expect(runSearchMock).toHaveBeenCalledTimes(1);
       const results = body.content.filter((b: any) => b.type === 'web_search_tool_result');
@@ -190,9 +190,9 @@ describe('agent web search served from the search pool', () => {
     });
 
     it('applies allowed_domains and blocked_domains to the hits', async () => {
-      addSearchKey();
+      await addSearchKey();
       mockGroq([searchCall('news'), answer('ok')]);
-      const { body } = await post('/v1/messages', request({ tools: [{ type: 'web_search_20250305', name: 'web_search', blocked_domains: ['blocked.test'] }] }), anthropicHeaders());
+      const { body } = await post('/v1/messages', request({ tools: [{ type: 'web_search_20250305', name: 'web_search', blocked_domains: ['blocked.test'] }] }), await anthropicHeaders());
       const result = body.content.find((b: any) => b.type === 'web_search_tool_result');
       expect(result.content.map((r: any) => r.url)).toEqual(['https://example.com/news/1']);
       expect(filterHitsByDomain(HITS, { allowedDomains: ['blocked.test'] }).map(h => h.url)).toEqual(['https://blocked.test/post']);
@@ -200,7 +200,7 @@ describe('agent web search served from the search pool', () => {
     });
 
     it('defers the search when the model also calls a client tool', async () => {
-      addSearchKey();
+      await addSearchKey();
       const mixed = searchCall('q');
       mixed.choices[0].message.tool_calls.push({ id: 'call_w', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Paris"}' } });
       mockGroq([mixed]);
@@ -208,7 +208,7 @@ describe('agent web search served from the search pool', () => {
         { type: 'web_search_20250305', name: 'web_search' },
         { name: 'get_weather', input_schema: { type: 'object', properties: { city: { type: 'string' } } } },
       ];
-      const { body } = await post('/v1/messages', request({ tools }), anthropicHeaders());
+      const { body } = await post('/v1/messages', request({ tools }), await anthropicHeaders());
       expect(runSearchMock).not.toHaveBeenCalled();
       expect(body.content.map((b: any) => b.type)).toEqual(['tool_use']);
       expect(body.content[0].name).toBe('get_weather');
@@ -216,7 +216,7 @@ describe('agent web search served from the search pool', () => {
     });
 
     it('turns replayed search blocks into text the routed model can read', async () => {
-      addSearchKey();
+      await addSearchKey();
       const bodies = mockGroq([answer('Following up.')]);
       const hit = { title: 'Release notes', url: 'https://example.com/news/1', content: 'Version 9 shipped on Monday.', score: 1 };
       await post('/v1/messages', request({
@@ -229,7 +229,7 @@ describe('agent web search served from the search pool', () => {
           ] },
           { role: 'user', content: 'And when?' },
         ],
-      }), anthropicHeaders());
+      }), await anthropicHeaders());
       const assistant = bodies[0].messages.find((m: any) => m.role === 'assistant');
       expect(assistant.content).toContain('[Searched the web for: version 9]');
       expect(assistant.content).toContain('https://example.com/news/1');
@@ -238,7 +238,7 @@ describe('agent web search served from the search pool', () => {
 
     it('keeps the old behaviour when no search key is configured', async () => {
       const bodies = mockGroq([answer('No search here.')]);
-      const { status, body } = await post('/v1/messages', request(), anthropicHeaders());
+      const { status, body } = await post('/v1/messages', request(), await anthropicHeaders());
       expect(status).toBe(200);
       expect(runSearchMock).not.toHaveBeenCalled();
       expect(body.content).toEqual([{ type: 'text', text: 'No search here.' }]);
@@ -248,7 +248,7 @@ describe('agent web search served from the search pool', () => {
     });
 
     it('passes a first-turn error through with its real status', async () => {
-      addSearchKey();
+      await addSearchKey();
       const { status, body } = await post('/v1/messages', request(), { 'x-api-key': 'wrong' });
       expect(status).toBe(401);
       expect(body.type).toBe('error');
@@ -265,9 +265,9 @@ describe('agent web search served from the search pool', () => {
     });
 
     it('runs the search and reports a web_search_call item before the answer', async () => {
-      addSearchKey();
+      await addSearchKey();
       const bodies = mockGroq([searchCall('version 9 release'), answer('Version 9 shipped on Monday.')]);
-      const { status, body } = await post('/v1/responses', request(), bearer());
+      const { status, body } = await post('/v1/responses', request(), await bearer());
 
       expect(status).toBe(200);
       expect(runSearchMock).toHaveBeenCalledTimes(1);
@@ -285,9 +285,9 @@ describe('agent web search served from the search pool', () => {
     });
 
     it('streams web_search_call events and a completed response', async () => {
-      addSearchKey();
+      await addSearchKey();
       mockGroq([searchCall('version 9 release'), answer('Done.')]);
-      const { status, text } = await post('/v1/responses', request({ stream: true }), bearer());
+      const { status, text } = await post('/v1/responses', request({ stream: true }), await bearer());
 
       expect(status).toBe(200);
       const events = sseEvents(text);
@@ -304,7 +304,7 @@ describe('agent web search served from the search pool', () => {
 
     it('drops the tool as before when no search key is configured', async () => {
       const bodies = mockGroq([answer('Plain answer.')]);
-      const { status, body } = await post('/v1/responses', request(), bearer());
+      const { status, body } = await post('/v1/responses', request(), await bearer());
       expect(status).toBe(200);
       expect(runSearchMock).not.toHaveBeenCalled();
       expect(body.output.map((i: any) => i.type)).toEqual(['message']);
@@ -321,7 +321,7 @@ describe('agent web search served from the search pool', () => {
           { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Version 9 shipped.' }] },
           { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'When?' }] },
         ],
-      }, bearer());
+      }, await bearer());
       const assistants = bodies[0].messages.filter((m: any) => m.role === 'assistant');
       expect(assistants).toHaveLength(1);
       expect(assistants[0].content).toContain('[Searched the web for: version 9. Sources: https://example.com/news/1]');
@@ -331,7 +331,7 @@ describe('agent web search served from the search pool', () => {
 
   describe('MCP web_search tool', () => {
     async function rpc(message: unknown) {
-      return post('/mcp', message, bearer());
+      return post('/mcp', message, await bearer());
     }
 
     it('searches through runSearch and returns the hits', async () => {

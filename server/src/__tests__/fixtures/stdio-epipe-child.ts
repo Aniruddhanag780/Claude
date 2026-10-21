@@ -9,6 +9,8 @@ import { initDb } from '../../db/index.js';
 
 installLogRedaction();
 installProcessSafetyNet();
-initDb(process.argv[2]);
+// PG: connect via the DATABASE_URL the parent test process exported (its
+// per-test clone) — there is no database file to pass on the command line.
+await initDb();
 console.log('child ready');
 setInterval(() => console.warn('[fixture] periodic warn'), 500);

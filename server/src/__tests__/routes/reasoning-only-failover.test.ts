@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import type { Express } from 'express';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Reasoning-only responses used to pass as success on the shared inbound-chat
 // lane (#1184): the empty-completion check required the turn to have no text,
@@ -29,7 +30,7 @@ vi.mock('../../providers/index.js', async (importOriginal) => {
 });
 
 const { createApp } = await import('../../app.js');
-const { initDb, getDb, setSetting } = await import('../../db/index.js');
+const { getDb, setSetting } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const { setRoutingStrategy } = await import('../../services/router.js');
 
@@ -81,32 +82,31 @@ function* reasoningThenTextTurn() {
   yield { choices: [{ delta: {}, finish_reason: 'stop' }] };
 }
 
-function insertKey(label: string): void {
+async function insertKey(label: string): void {
   const db = getDb();
   const { encrypted, iv, authTag } = encrypt('test-key');
-  db.prepare(`
+  (await db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES ('groq', ?, ?, ?, ?, 'healthy', 1)
-  `).run(label, encrypted, iv, authTag);
+    VALUES ('groq', ?, ?, ?, ?, 'healthy', 1) RETURNING id`, [label, encrypted, iv, authTag]));
 }
 
 describe('reasoning-only turns fail over on the shared inbound-chat lane (#1184)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     setSetting('ollama_emulation', 'open-loopback');
     app = createApp();
     setRoutingStrategy('priority');
-    insertKey('first');
-    insertKey('second');
+    await insertKey('first');
+    await insertKey('second');
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     chatCompletion.mockReset();
     streamChatCompletion.mockReset();
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
   });
 
   it('non-streaming: a reasoning-only answer fails over to the next key', async () => {

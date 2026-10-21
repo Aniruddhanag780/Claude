@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -19,22 +20,22 @@ async function request(app: Express, path: string, withAuth = true) {
   return { status: res.status, body: data };
 }
 
-function addKey(platform: string) {
+async function addKey(platform: string) {
   const secret = encrypt(`${platform}-test-key`);
-  getDb().prepare(`
+  await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
     VALUES (?, 'test', ?, ?, ?, 'healthy', 1)
-  `).run(platform, secret.encrypted, secret.iv, secret.authTag);
+  `, [platform, secret.encrypted, secret.iv, secret.authTag]);
 }
 
 describe('GET /api/keys/providers — provider checklist (#543)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   it('requires dashboard auth', async () => {
@@ -73,7 +74,7 @@ describe('GET /api/keys/providers — provider checklist (#543)', () => {
   });
 
   it('marks a provider configured once it has a key and updates the summary', async () => {
-    addKey('groq');
+    await addKey('groq');
     const { status, body } = await request(app, '/api/keys/providers');
     expect(status).toBe(200);
     const groq = body.providers.find((p: { platform: string }) => p.platform === 'groq');

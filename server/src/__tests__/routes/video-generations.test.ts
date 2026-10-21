@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const realFetch = globalThis.fetch;
 
@@ -14,7 +15,7 @@ async function post(app: Express, body: unknown, authenticated = true) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(authenticated ? { Authorization: `Bearer ${getUnifiedApiKey()}` } : {}),
+      ...(authenticated ? { Authorization: `Bearer ${await getUnifiedApiKey()}` } : {}),
     },
     body: JSON.stringify(body),
   });
@@ -26,20 +27,18 @@ async function post(app: Express, body: unknown, authenticated = true) {
 describe('POST /v1/videos/generations', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
     const { encrypted, iv, authTag } = encrypt('sk_pollinations_video_test');
-    getDb().prepare(`
+    (await getDb().run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('pollinations', 'video test', ?, ?, ?, 'healthy', 1)
-    `).run(encrypted, iv, authTag);
-    getDb().prepare(`
+      VALUES ('pollinations', 'video test', ?, ?, ?, 'healthy', 1) RETURNING id`, [encrypted, iv, authTag]));
+    (await getDb().run(`
       INSERT INTO media_models
         (platform, model_id, display_name, modality, priority, enabled, quota_label)
-      VALUES ('pollinations', 'nova-reel', 'Nova Reel', 'video', 0, 1, 'Recurring daily Pollen refill')
-    `).run();
+      VALUES ('pollinations', 'nova-reel', 'Nova Reel', 'video', 0, 1, 'Recurring daily Pollen refill') RETURNING id`));
   });
 
   afterEach(() => {

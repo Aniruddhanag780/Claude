@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // `document` content blocks on POST /v1/messages.
 //
@@ -29,8 +30,8 @@ async function request(app: Express, path: string, body: any, extraHeaders: Reco
   return { status: res.status, headers: res.headers, text, body: json };
 }
 
-function anthropicHeaders() {
-  return { 'x-api-key': getUnifiedApiKey(), 'anthropic-version': '2023-06-01' };
+async function anthropicHeaders() {
+  return { 'x-api-key': await getUnifiedApiKey(), 'anthropic-version': '2023-06-01' };
 }
 
 /** Mock Groq's upstream and capture the post-translation outbound body. */
@@ -72,19 +73,19 @@ const TEXT_DOC_BLOCK = {
 describe('Anthropic document blocks', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
-    db.prepare('DELETE FROM rate_limit_usage').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
+    (await db.run('DELETE FROM rate_limit_usage'));
     const { status } = await request(app, '/api/keys',
       { platform: 'groq', key: 'gsk_document_test', label: 't' },
       { Authorization: `Bearer ${dashToken}` });
@@ -100,7 +101,7 @@ describe('Anthropic document blocks', () => {
       model: 'claude-sonnet-4-5',
       max_tokens: 64,
       messages: [{ role: 'user', content: [PDF_BLOCK, { type: 'text', text: 'summarize this' }] }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(status).toBe(400);
     expect(body.type).toBe('error');
@@ -118,10 +119,10 @@ describe('Anthropic document blocks', () => {
       model: 'claude-sonnet-4-5',
       max_tokens: 64,
       messages: [{ role: 'user', content: [PDF_BLOCK] }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(captured.calls).toBe(0);
-    expect(getDb().prepare('SELECT COUNT(*) c FROM requests').get()).toMatchObject({ c: 0 });
+    expect((await getDb().get('SELECT COUNT(*) c FROM requests'))).toMatchObject({ c: 0 });
   });
 
   it('never echoes the document payload back in the error', async () => {
@@ -131,7 +132,7 @@ describe('Anthropic document blocks', () => {
       model: 'claude-sonnet-4-5',
       max_tokens: 64,
       messages: [{ role: 'user', content: [PDF_BLOCK] }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(body.error.message).not.toContain('JVBERi');
   });
@@ -143,7 +144,7 @@ describe('Anthropic document blocks', () => {
       model: 'claude-sonnet-4-5',
       max_tokens: 64,
       messages: [{ role: 'user', content: [TEXT_DOC_BLOCK, { type: 'text', text: 'what are the terms?' }] }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(status).not.toBe(400);
     if (captured.body) {
@@ -159,7 +160,7 @@ describe('Anthropic document blocks', () => {
     const { status, body } = await request(app, '/v1/messages/count_tokens', {
       model: 'claude-sonnet-4-5',
       messages: [{ role: 'user', content: [PDF_BLOCK] }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(status).toBe(400);
     expect(body.error.message).toContain('application/pdf');
@@ -169,7 +170,7 @@ describe('Anthropic document blocks', () => {
     const { status, body } = await request(app, '/v1/messages/count_tokens', {
       model: 'claude-sonnet-4-5',
       messages: [{ role: 'user', content: [TEXT_DOC_BLOCK] }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(status).toBe(200);
     expect(body.input_tokens).toBeGreaterThan(0);
@@ -182,7 +183,7 @@ describe('Anthropic document blocks', () => {
       model: 'claude-sonnet-4-5',
       max_tokens: 64,
       messages: [{ role: 'user', content: [{ type: 'text', text: 'no documents here' }] }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(status).not.toBe(400);
     if (captured.body) expect(JSON.stringify(captured.body)).toContain('no documents here');

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import type { Express } from 'express';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Mock the provider so routing is exercised without real upstream calls.
 const chatCompletion = vi.fn();
@@ -16,7 +17,7 @@ vi.mock('../../providers/index.js', async (importOriginal) => {
 });
 
 const { createApp } = await import('../../app.js');
-const { initDb, getDb, getUnifiedApiKey } = await import('../../db/index.js');
+const { getDb, getUnifiedApiKey } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const { setRoutingStrategy, routingReserveTokens, OUTPUT_RESERVE_CAP } = await import('../../services/router.js');
 
@@ -56,36 +57,35 @@ describe('max_tokens no longer starves routing (#470)', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
     key = getUnifiedApiKey();
 
     const db = getDb();
     setRoutingStrategy('priority');
-    db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+    (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
 
     const { encrypted, iv, authTag } = encrypt('groq-key');
-    db.prepare(`
+    (await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('groq', 'test', ?, ?, ?, 'healthy', 1)
-    `).run(encrypted, iv, authTag);
+      VALUES ('groq', 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [encrypted, iv, authTag]));
 
     // Only groq is keyed, so make groq the ONLY routable platform and give every
     // groq model a small per-minute TOKEN budget (6k) with a large context
     // window, so the sole thing that can exclude a groq model is the token
     // estimate: a huge client max_tokens must NOT exceed 6k once the reserved
     // output is capped, while a huge INPUT still must.
-    db.prepare("UPDATE models SET enabled = 0 WHERE platform != 'groq'").run();
-    db.prepare("UPDATE models SET tpm_limit = 6000, tpd_limit = NULL, context_window = 200000 WHERE platform = 'groq'").run();
+    (await db.run("UPDATE models SET enabled = 0 WHERE platform != 'groq'"));
+    (await db.run("UPDATE models SET tpm_limit = 6000, tpd_limit = NULL, context_window = 200000 WHERE platform = 'groq'"));
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     chatCompletion.mockReset();
     streamChatCompletion.mockReset();
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
-    getDb().prepare('DELETE FROM rate_limit_usage').run();
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
+    (await getDb().run('DELETE FROM rate_limit_usage'));
   });
 
   it('routes a tiny prompt with a huge max_tokens (was a false 429 with zero upstream calls)', async () => {

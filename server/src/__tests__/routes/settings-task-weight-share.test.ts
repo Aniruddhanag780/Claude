@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getSetting } from '../../db/index.js';
+import { getSetting } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { TASK_WEIGHT_SHARE_KEY, getTaskWeightShare, setTaskWeightShare } from '../../services/router.js';
 import { taskAdjustedWeights, TASK_WEIGHT_SHARE } from '../../services/scoring.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(app: Express, method: string, path: string, body: any, token: string) {
   const server = app.listen(0, '127.0.0.1');
@@ -28,11 +29,11 @@ describe('/api/settings/task-weight-share', () => {
   let app: Express;
   let token: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    token = mintDashboardToken();
+    token = await mintDashboardToken();
   });
 
   it('reports the scoring.ts default before anything is configured', async () => {
@@ -45,7 +46,7 @@ describe('/api/settings/task-weight-share', () => {
     const put = await request(app, 'PUT', '/api/settings/task-weight-share', { share: 0.5 }, token);
     expect(put.status).toBe(200);
     expect(put.body).toEqual({ share: 0.5 });
-    expect(getSetting(TASK_WEIGHT_SHARE_KEY)).toBe('0.5');
+    expect(await getSetting(TASK_WEIGHT_SHARE_KEY)).toBe('0.5');
 
     const get = await request(app, 'GET', '/api/settings/task-weight-share', undefined, token);
     expect(get.body).toEqual(put.body);
@@ -56,7 +57,7 @@ describe('/api/settings/task-weight-share', () => {
     const put = await request(app, 'PUT', '/api/settings/task-weight-share', { share: null }, token);
     expect(put.status).toBe(200);
     expect(put.body).toEqual({ share: TASK_WEIGHT_SHARE });
-    expect(getSetting(TASK_WEIGHT_SHARE_KEY)).toBeUndefined();
+    expect(await getSetting(TASK_WEIGHT_SHARE_KEY)).toBeUndefined();
   });
 
   it('rejects out-of-range, negative, and non-numeric shares', async () => {
@@ -72,10 +73,10 @@ describe('/api/settings/task-weight-share', () => {
   });
 
   it('a corrupt stored value falls back to the default', async () => {
-    setTaskWeightShare(0.7);
+    await setTaskWeightShare(0.7);
     const db = (await import('../../db/index.js')).getDb();
-    db.prepare('UPDATE settings SET value = ? WHERE key = ?').run('not-a-number', TASK_WEIGHT_SHARE_KEY);
-    expect(getTaskWeightShare()).toBe(TASK_WEIGHT_SHARE);
+    (await db.run('UPDATE settings SET value = ? WHERE key = ?', ['not-a-number', TASK_WEIGHT_SHARE_KEY]));
+    expect(await getTaskWeightShare()).toBe(TASK_WEIGHT_SHARE);
   });
 });
 

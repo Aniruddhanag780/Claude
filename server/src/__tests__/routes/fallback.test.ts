@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { recordRateLimitHit } from '../../services/router.js';
 import { setCooldown } from '../../services/ratelimit.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -32,11 +33,11 @@ async function request(app: Express, method: string, path: string, body?: any) {
 describe('Fallback API', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   it('GET /api/fallback returns fallback chain', async () => {
@@ -66,33 +67,29 @@ describe('Fallback API', () => {
 
   it('GET /api/fallback/token-usage reports per-model chat usage for configured platforms', async () => {
     const db = getDb();
-    const target = db.prepare(`
+    const target = (await db.get(`
       SELECT id, platform, model_id FROM models
        WHERE platform = 'groq'
        ORDER BY id LIMIT 1
-    `).get() as { id: number; platform: string; model_id: string };
-    const other = db.prepare(`
+    `)) as { id: number; platform: string; model_id: string };
+    const other = (await db.get(`
       SELECT platform, model_id FROM models
        WHERE platform <> ?
        LIMIT 1
-    `).get(target.platform) as { platform: string; model_id: string };
+    `, [target.platform])) as { platform: string; model_id: string };
     const secret = encrypt('usage-test-key');
-    db.prepare(`
+    (await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, 'usage', ?, ?, ?, 'healthy', 1)
-    `).run(target.platform, secret.encrypted, secret.iv, secret.authTag);
-    db.prepare(`
+      VALUES (?, 'usage', ?, ?, ?, 'healthy', 1) RETURNING id`, [target.platform, secret.encrypted, secret.iv, secret.authTag]));
+    (await db.run(`
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type)
-      VALUES (?, ?, NULL, 'success', 123, 45, 10, NULL, 'chat')
-    `).run(target.platform, target.model_id);
-    db.prepare(`
+      VALUES (?, ?, NULL, 'success', 123, 45, 10, NULL, 'chat') RETURNING id`, [target.platform, target.model_id]));
+    (await db.run(`
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type)
-      VALUES (?, ?, NULL, 'success', 1000, 1000, 10, NULL, 'chat')
-    `).run(other.platform, other.model_id);
-    db.prepare(`
+      VALUES (?, ?, NULL, 'success', 1000, 1000, 10, NULL, 'chat') RETURNING id`, [other.platform, other.model_id]));
+    (await db.run(`
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type)
-      VALUES (?, ?, NULL, 'success', 500, 500, 10, NULL, 'embedding')
-    `).run(target.platform, target.model_id);
+      VALUES (?, ?, NULL, 'success', 500, 500, 10, NULL, 'embedding') RETURNING id`, [target.platform, target.model_id]));
 
     const { status, body } = await request(app, 'GET', '/api/fallback/token-usage');
 
@@ -113,15 +110,14 @@ describe('Fallback API', () => {
     const db = getDb();
     // Two platforms with keys, several models each, in a deliberately
     // provider-clustered chain order so the old ORDER BY priority would fail.
-    const platforms = (db.prepare(`
+    const platforms = ((await db.all(`
       SELECT DISTINCT platform FROM models ORDER BY platform LIMIT 2
-    `).all() as { platform: string }[]).map(p => p.platform);
+    `)) as { platform: string }[]).map(p => p.platform);
     for (const platform of platforms) {
       const secret = encrypt(`order-test-${platform}`);
-      db.prepare(`
+      (await db.run(`
         INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-        VALUES (?, 'order', ?, ?, ?, 'healthy', 1)
-      `).run(platform, secret.encrypted, secret.iv, secret.authTag);
+        VALUES (?, 'order', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, secret.encrypted, secret.iv, secret.authTag]));
     }
 
     const { status, body } = await request(app, 'GET', '/api/fallback/token-usage');
@@ -157,26 +153,24 @@ describe('Fallback API', () => {
 
   it('GET /api/fallback/penalty-inspector combines penalties, cooldowns and recent errors', async () => {
     const db = getDb();
-    const target = db.prepare(`
+    const target = (await db.get(`
       SELECT id, platform, model_id, display_name
         FROM models
        WHERE platform = 'groq' AND key_id IS NULL
        ORDER BY id
        LIMIT 1
-    `).get() as { id: number; platform: string; model_id: string; display_name: string };
+    `)) as { id: number; platform: string; model_id: string; display_name: string };
     const secret = encrypt('inspector-test-key');
-    const keyId = Number(db.prepare(`
+    const keyId = Number((await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, 'inspector', ?, ?, ?, 'healthy', 1)
-    `).run(target.platform, secret.encrypted, secret.iv, secret.authTag).lastInsertRowid);
+      VALUES (?, 'inspector', ?, ?, ?, 'healthy', 1) RETURNING id`, [target.platform, secret.encrypted, secret.iv, secret.authTag])).lastInsertRowid);
 
     recordRateLimitHit(target.id);
     recordRateLimitHit(target.id);
     setCooldown(target.platform, target.model_id, keyId, 60_000);
-    db.prepare(`
+    (await db.run(`
       INSERT INTO requests (platform, model_id, key_id, status, latency_ms, error)
-      VALUES (?, ?, ?, 'error', 321, 'Groq API error 429: rate limit')
-    `).run(target.platform, target.model_id, keyId);
+      VALUES (?, ?, ?, 'error', 321, 'Groq API error 429: rate limit') RETURNING id`, [target.platform, target.model_id, keyId]));
 
     const { status, body } = await request(app, 'GET', '/api/fallback/penalty-inspector');
     expect(status).toBe(200);
@@ -201,17 +195,16 @@ describe('Fallback API', () => {
 
   it('GET /api/fallback/penalty-inspector includes recent failures even without cooldowns', async () => {
     const db = getDb();
-    const target = db.prepare(`
+    const target = (await db.get(`
       SELECT id, platform, model_id
         FROM models
        WHERE platform != 'groq'
        ORDER BY id
        LIMIT 1
-    `).get() as { id: number; platform: string; model_id: string };
-    db.prepare(`
+    `)) as { id: number; platform: string; model_id: string };
+    (await db.run(`
       INSERT INTO requests (platform, model_id, key_id, status, latency_ms, error)
-      VALUES (?, ?, NULL, 'error', 111, 'upstream 503 unavailable')
-    `).run(target.platform, target.model_id);
+      VALUES (?, ?, NULL, 'error', 111, 'upstream 503 unavailable') RETURNING id`, [target.platform, target.model_id]));
 
     const { status, body } = await request(app, 'GET', '/api/fallback/penalty-inspector');
     expect(status).toBe(200);
@@ -395,16 +388,15 @@ describe('Fallback API', () => {
     const { body: chain } = await request(app, 'GET', '/api/fallback');
     const [rpmModel, bigModel, smallModel] = chain;
     const db = getDb();
-    const orig = [rpmModel, bigModel, smallModel].map((m: any) =>
-      db.prepare('SELECT monthly_token_budget, tpd_limit FROM models WHERE id = ?').get(m.modelDbId) as any);
+    const orig: any[] = [];
+    for (const m of [rpmModel, bigModel, smallModel]) {
+      orig.push((await db.get('SELECT monthly_token_budget, tpd_limit FROM models WHERE id = ?', [m.modelDbId])) as any);
+    }
 
     try {
-      db.prepare('UPDATE models SET tpd_limit = NULL, monthly_token_budget = ? WHERE id = ?')
-        .run('free · 40 RPM', rpmModel.modelDbId);
-      db.prepare('UPDATE models SET tpd_limit = NULL, monthly_token_budget = ? WHERE id = ?')
-        .run('~25M', bigModel.modelDbId);
-      db.prepare('UPDATE models SET tpd_limit = NULL, monthly_token_budget = ? WHERE id = ?')
-        .run('~500K', smallModel.modelDbId);
+      (await db.run('UPDATE models SET tpd_limit = NULL, monthly_token_budget = ? WHERE id = ?', ['free · 40 RPM', rpmModel.modelDbId]));
+      (await db.run('UPDATE models SET tpd_limit = NULL, monthly_token_budget = ? WHERE id = ?', ['~25M', bigModel.modelDbId]));
+      (await db.run('UPDATE models SET tpd_limit = NULL, monthly_token_budget = ? WHERE id = ?', ['~500K', smallModel.modelDbId]));
 
       const { status } = await request(app, 'POST', '/api/fallback/sort/budget');
       expect(status).toBe(200);
@@ -413,21 +405,22 @@ describe('Fallback API', () => {
       // profile (the seeded DB has a default profile; fallback_config is the
       // no-profile path). GET /api/fallback re-orders by intelligence rank,
       // so it can't verify the priority the sort wrote.
-      const profileId = (db.prepare("SELECT value FROM settings WHERE key = 'active_profile_id'").get() as any)?.value;
-      const prio = (id: number) => Number(((profileId
-        ? db.prepare('SELECT priority FROM profile_models WHERE profile_id = ? AND model_db_id = ?').get(profileId, id)
-        : db.prepare('SELECT priority FROM fallback_config WHERE model_db_id = ?').get(id)
+      const profileId = ((await db.get("SELECT value FROM settings WHERE key = 'active_profile_id'")) as any)?.value;
+      const prio = async (id: number) => Number(((profileId
+        ? (await db.get('SELECT priority FROM profile_models WHERE profile_id = ? AND model_db_id = ?', [profileId, id]))
+        : (await db.get('SELECT priority FROM fallback_config WHERE model_db_id = ?', [id]))
       ) as any).priority);
       // A rate-limit label is "no budget info" (0): the real ~25M budget must
       // sort first, and even a small ~500K budget beats the inflated label.
       // With the old parser the RPM label scored 40M and took priority 1.
-      expect(prio(bigModel.modelDbId)).toBeLessThan(prio(rpmModel.modelDbId));
-      expect(prio(smallModel.modelDbId)).toBeLessThan(prio(rpmModel.modelDbId));
-      expect(prio(bigModel.modelDbId)).toBeLessThan(prio(smallModel.modelDbId));
+      expect(await prio(bigModel.modelDbId)).toBeLessThan(await prio(rpmModel.modelDbId));
+      expect(await prio(smallModel.modelDbId)).toBeLessThan(await prio(rpmModel.modelDbId));
+      expect(await prio(bigModel.modelDbId)).toBeLessThan(await prio(smallModel.modelDbId));
     } finally {
-      const restore = db.prepare('UPDATE models SET monthly_token_budget = ?, tpd_limit = ? WHERE id = ?');
-      [rpmModel, bigModel, smallModel].forEach((m: any, i: number) =>
-        restore.run(orig[i].monthly_token_budget, orig[i].tpd_limit, m.modelDbId));
+      for (const [i, m] of [rpmModel, bigModel, smallModel].entries()) {
+        (await db.run('UPDATE models SET monthly_token_budget = ?, tpd_limit = ? WHERE id = ?',
+          [orig[i].monthly_token_budget, orig[i].tpd_limit, m.modelDbId]));
+      }
     }
   });
 

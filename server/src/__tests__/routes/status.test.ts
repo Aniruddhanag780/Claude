@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(
   app: Express,
@@ -20,12 +21,11 @@ async function request(
   return { status: res.status, body: data };
 }
 
-function insertHealthyKey(platform: string) {
+async function insertHealthyKey(platform: string) {
   const secret = encrypt(`${platform}-test-key`);
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'test', ?, ?, ?, 'healthy', 1)
-  `).run(platform, secret.encrypted, secret.iv, secret.authTag);
+    VALUES (?, 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, secret.encrypted, secret.iv, secret.authTag]));
 }
 
 // These tests share one in-memory DB and run top-to-bottom: the "no upstreams"
@@ -34,11 +34,11 @@ describe('status & interop endpoints (#433)', () => {
   let app: Express;
   let unifiedKey = '';
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    unifiedKey = getUnifiedApiKey();
+    unifiedKey = await getUnifiedApiKey();
   });
 
   it('GET /livez returns 200 with status, version, and uptime', async () => {
@@ -71,7 +71,7 @@ describe('status & interop endpoints (#433)', () => {
   });
 
   it('GET /readyz returns 200 once a healthy upstream exists', async () => {
-    insertHealthyKey('groq');
+    await insertHealthyKey('groq');
     const { status, body } = await request(app, 'GET', '/readyz');
     expect(status).toBe(200);
     expect(body.status).toBe('ok');

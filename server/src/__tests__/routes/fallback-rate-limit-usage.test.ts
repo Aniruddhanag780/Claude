@@ -7,9 +7,10 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const PLATFORM = 'groq';
 const MODEL_ID = 'rate-usage-probe';
@@ -29,30 +30,22 @@ async function get(app: Express, path: string) {
   return { status: res.status, body };
 }
 
-function addKey(label: string, opts: { enabled?: number; status?: string; scope?: string[] | null } = {}): number {
+async function addKey(label: string, opts: { enabled?: number; status?: string; scope?: string[] | null } = {}): number {
   const db = getDb();
   const secret = encrypt(`secret-${label}`);
-  const info = db.prepare(`
+  const info = (await db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, model_scope_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    PLATFORM, label, secret.encrypted, secret.iv, secret.authTag,
-    opts.status ?? 'healthy',
-    opts.enabled ?? 1,
-    opts.scope ? JSON.stringify(opts.scope) : null,
-  );
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`, [PLATFORM, label, secret.encrypted, secret.iv, secret.authTag, opts.status ?? 'healthy', opts.enabled ?? 1, opts.scope ? JSON.stringify(opts.scope) : null]));
   return Number(info.lastInsertRowid);
 }
 
 /** N recorded requests for (model, key) inside the current minute. */
-function burnRequests(keyId: number, count: number) {
+async function burnRequests(keyId: number, count: number) {
   const db = getDb();
   const now = Date.now();
-  const stmt = db.prepare(`
+  for (let i = 0; i < count; i++) (await db.run(`
     INSERT INTO rate_limit_usage (platform, model_id, key_id, kind, tokens, created_at_ms)
-    VALUES (?, ?, ?, 'request', 0, ?)
-  `);
-  for (let i = 0; i < count; i++) stmt.run(PLATFORM, MODEL_ID, keyId, now - i);
+    VALUES (?, ?, ?, 'request', 0, ?) RETURNING id`, [PLATFORM, MODEL_ID, keyId, now - i]));
 }
 
 async function probeRow(app: Express) {
@@ -65,30 +58,29 @@ describe('GET /api/fallback/rate-limit-usage', () => {
   let app: Express;
   let modelDbId: number;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
     const db = getDb();
-    const info = db.prepare(`
+    const info = (await db.run(`
       INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank,
                           monthly_token_budget, rpm_limit, enabled)
-      VALUES (?, ?, 'Rate Usage Probe', 1, 1, 'unlimited', ?, 1)
-    `).run(PLATFORM, MODEL_ID, RPM_LIMIT);
+      VALUES (?, ?, 'Rate Usage Probe', 1, 1, 'unlimited', ?, 1) RETURNING id`, [PLATFORM, MODEL_ID, RPM_LIMIT]));
     modelDbId = Number(info.lastInsertRowid);
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM rate_limit_usage').run();
-    db.prepare('DELETE FROM api_keys WHERE platform = ?').run(PLATFORM);
+    (await db.run('DELETE FROM rate_limit_usage'));
+    (await db.run('DELETE FROM api_keys WHERE platform = ?', [PLATFORM]));
   });
 
   it('reports the key with the most headroom, not the busiest one', async () => {
-    const exhausted = addKey('exhausted');
-    addKey('idle');
-    burnRequests(exhausted, RPM_LIMIT);
+    const exhausted = await addKey('exhausted');
+    await addKey('idle');
+    await burnRequests(exhausted, RPM_LIMIT);
 
     const row = await probeRow(app);
     // The idle key can serve the next request, so the badge must stay low.
@@ -96,10 +88,10 @@ describe('GET /api/fallback/rate-limit-usage', () => {
   });
 
   it('goes to the ceiling only when every routable key is exhausted', async () => {
-    const a = addKey('a');
-    const b = addKey('b');
-    burnRequests(a, RPM_LIMIT);
-    burnRequests(b, RPM_LIMIT);
+    const a = await addKey('a');
+    const b = await addKey('b');
+    await burnRequests(a, RPM_LIMIT);
+    await burnRequests(b, RPM_LIMIT);
 
     const row = await probeRow(app);
     expect(row.rpm).toEqual({ used: RPM_LIMIT, limit: RPM_LIMIT });
@@ -109,29 +101,29 @@ describe('GET /api/fallback/rate-limit-usage', () => {
     // The free key is scoped to a different model, so the router can never reach
     // it; the only key that can serve this model is spent. Counting the scoped
     // key would report a comfortable 0/30 for a model that cannot be served.
-    addKey('scoped-elsewhere', { scope: ['some-other-model'] });
-    const usable = addKey('usable');
-    burnRequests(usable, RPM_LIMIT);
+    await addKey('scoped-elsewhere', { scope: ['some-other-model'] });
+    const usable = await addKey('usable');
+    await burnRequests(usable, RPM_LIMIT);
 
     const row = await probeRow(app);
     expect(row.rpm).toEqual({ used: RPM_LIMIT, limit: RPM_LIMIT });
   });
 
   it('counts a scoped key that DOES list this model', async () => {
-    const scopedIn = addKey('scoped-in', { scope: [MODEL_ID] });
-    const other = addKey('other');
-    burnRequests(other, RPM_LIMIT);
-    burnRequests(scopedIn, 3);
+    const scopedIn = await addKey('scoped-in', { scope: [MODEL_ID] });
+    const other = await addKey('other');
+    await burnRequests(other, RPM_LIMIT);
+    await burnRequests(scopedIn, 3);
 
     const row = await probeRow(app);
     expect(row.rpm).toEqual({ used: 3, limit: RPM_LIMIT });
   });
 
   it('ignores disabled and unhealthy keys', async () => {
-    addKey('disabled', { enabled: 0 });
-    addKey('errored', { status: 'error' });
-    const usable = addKey('usable');
-    burnRequests(usable, 9);
+    await addKey('disabled', { enabled: 0 });
+    await addKey('errored', { status: 'error' });
+    const usable = await addKey('usable');
+    await burnRequests(usable, 9);
 
     const row = await probeRow(app);
     expect(row.rpm).toEqual({ used: 9, limit: RPM_LIMIT });
@@ -145,7 +137,7 @@ describe('GET /api/fallback/rate-limit-usage', () => {
   });
 
   it('omits windows the model has no limit for', async () => {
-    addKey('solo');
+    await addKey('solo');
     const row = await probeRow(app);
     expect(row.modelDbId).toBe(modelDbId);
     expect(row.platform).toBe(PLATFORM);

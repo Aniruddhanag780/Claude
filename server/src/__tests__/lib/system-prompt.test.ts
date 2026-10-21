@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { ChatMessage } from '@freellmapi/shared/types.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
+import { initTestDb } from '../helpers/test-db.js';
 import {
   resolveAuth,
   prependSystemPrompt,
@@ -14,51 +15,50 @@ import {
 // prompt); profile key → its own prompt; empty prompt → neutral passthrough;
 // disabled profile → rejected exactly like an unknown key.
 
-function insertProfile(name: string, systemPrompt: string | null, enabled = 1): string {
+async function insertProfile(name: string, systemPrompt: string | null, enabled = 1): string {
   const key = mintClientProfileKey();
   const { encrypted, iv, authTag } = encrypt(key);
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO client_profiles (name, token_hash, encrypted_key, iv, auth_tag, system_prompt, enabled)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(name, hashClientProfileKey(key), encrypted, iv, authTag, systemPrompt, enabled);
+    VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`, [name, hashClientProfileKey(key), encrypted, iv, authTag, systemPrompt, enabled]));
   return key;
 }
 
 describe('resolveAuth (#411)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  it('resolves the unified key to the default behavior (no enforced prompt)', () => {
-    const auth = resolveAuth(getUnifiedApiKey());
+  it('resolves the unified key to the default behavior (no enforced prompt)', async () => {
+    const auth = await resolveAuth(await getUnifiedApiKey());
     expect(auth).toEqual({ kind: 'unified', systemPrompt: null });
   });
 
-  it('resolves a profile key to its own prompt', () => {
-    const key = insertProfile('support-bot', 'You are the support bot.');
+  it('resolves a profile key to its own prompt', async () => {
+    const key = await insertProfile('support-bot', 'You are the support bot.');
     expect(key.startsWith(CLIENT_PROFILE_KEY_PREFIX)).toBe(true);
-    const auth = resolveAuth(key);
+    const auth = await resolveAuth(key);
     expect(auth?.kind).toBe('profile');
     expect(auth?.systemPrompt).toBe('You are the support bot.');
     if (auth?.kind === 'profile') expect(auth.name).toBe('support-bot');
   });
 
-  it('treats a null or blank profile prompt as no prompt', () => {
-    expect(resolveAuth(insertProfile('no-prompt', null))?.systemPrompt).toBeNull();
-    expect(resolveAuth(insertProfile('blank-prompt', '   '))?.systemPrompt).toBeNull();
+  it('treats a null or blank profile prompt as no prompt', async () => {
+    expect((await resolveAuth(await insertProfile('no-prompt', null)))?.systemPrompt).toBeNull();
+    expect((await resolveAuth(await insertProfile('blank-prompt', '   ')))?.systemPrompt).toBeNull();
   });
 
-  it('rejects a disabled profile like a bad key', () => {
-    const key = insertProfile('disabled-bot', 'irrelevant', 0);
-    expect(resolveAuth(key)).toBeNull();
+  it('rejects a disabled profile like a bad key', async () => {
+    const key = await insertProfile('disabled-bot', 'irrelevant', 0);
+    expect(await resolveAuth(key)).toBeNull();
   });
 
-  it('rejects unknown and missing tokens', () => {
-    expect(resolveAuth(undefined)).toBeNull();
-    expect(resolveAuth('')).toBeNull();
-    expect(resolveAuth('not-a-key')).toBeNull();
-    expect(resolveAuth(`${CLIENT_PROFILE_KEY_PREFIX}${'0'.repeat(48)}`)).toBeNull();
+  it('rejects unknown and missing tokens', async () => {
+    expect(await resolveAuth(undefined)).toBeNull();
+    expect(await resolveAuth('')).toBeNull();
+    expect(await resolveAuth('not-a-key')).toBeNull();
+    expect(await resolveAuth(`${CLIENT_PROFILE_KEY_PREFIX}${'0'.repeat(48)}`)).toBeNull();
   });
 });
 

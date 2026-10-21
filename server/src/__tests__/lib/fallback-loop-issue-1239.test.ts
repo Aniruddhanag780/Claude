@@ -28,7 +28,7 @@ vi.mock('../../services/health.js', () => ({
   markKeyHealthyFromRequest: vi.fn(),
 }));
 
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import {
   newFallbackState,
@@ -54,6 +54,7 @@ import {
   resetKeyLocalityCache,
 } from '../../services/ratelimit.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // A platform the bundled baseline seeds with several models, so the key-wide
 // bench has real rows to walk (the 402 test needs the models table).
@@ -62,12 +63,11 @@ let keyA = 0;
 let keyB = 0;
 let models: { id: number; model_id: string }[] = [];
 
-function insertKey(label: string): number {
+async function insertKey(label: string): number {
   const { encrypted, iv, authTag } = encrypt(`test-${label}`);
-  const info = getDb().prepare(`
+  const info = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, ?, ?, ?, ?, 'healthy', 1)
-  `).run(PLATFORM, label, encrypted, iv, authTag);
+    VALUES (?, ?, ?, ?, ?, 'healthy', 1) RETURNING id`, [PLATFORM, label, encrypted, iv, authTag]));
   return Number(info.lastInsertRowid);
 }
 
@@ -100,24 +100,22 @@ const REAL_BAD_REQUEST = () => Object.assign(
   { status: 400 },
 );
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
   const db = getDb();
-  db.prepare('DELETE FROM api_keys').run();
-  keyA = insertKey('key-a');
-  keyB = insertKey('key-b');
+  (await db.run('DELETE FROM api_keys'));
+  keyA = await insertKey('key-a');
+  keyB = await insertKey('key-b');
   resetKeyLocalityCache();
-  models = db.prepare(
-    'SELECT id, model_id FROM models WHERE platform = ? AND enabled = 1 ORDER BY id',
-  ).all(PLATFORM) as { id: number; model_id: string }[];
+  models = (await db.all('SELECT id, model_id FROM models WHERE platform = ? AND enabled = 1 ORDER BY id', [PLATFORM])) as { id: number; model_id: string }[];
   expect(models.length).toBeGreaterThanOrEqual(3);
 });
 
-beforeEach(() => {
-  clearCooldownsForKey(keyA);
-  clearCooldownsForKey(keyB);
-  getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+beforeEach(async () => {
+  await clearCooldownsForKey(keyA);
+  await clearCooldownsForKey(keyB);
+  (await getDb().run('DELETE FROM rate_limit_cooldowns'));
   resetModelFailureWindows();
 });
 
@@ -153,9 +151,9 @@ describe("NavyAI \"The model 'x' does not exist\" is a stale model, not a bad re
     expect(isModelNotFoundError(new Error('API error 400: parameter temperature does not exist for this model family'))).toBe(false);
   });
 
-  it('rules the WHOLE model out for the rest of the request', () => {
+  it('rules the WHOLE model out for the rest of the request', async () => {
     const state = newFallbackState();
-    recordRetryableFailure(routeFor(models[0], keyA), NAVY_STALE(models[0].model_id), state);
+    await recordRetryableFailure(routeFor(models[0], keyA), NAVY_STALE(models[0].model_id), state);
     expect(state.skipModels.has(models[0].id)).toBe(true);
     // Not a platform verdict: the platform's other rows are still candidates.
     expect(state.skipPlatforms.has(PLATFORM)).toBe(false);
@@ -165,32 +163,32 @@ describe("NavyAI \"The model 'x' does not exist\" is a stale model, not a bad re
 // ── 2. 402 benches the key across the platform ───────────────────────────────
 
 describe('a 402 benches the key on every model of its platform', () => {
-  it('cools every enabled model on the broke key for the credit window and skips them for this request', () => {
+  it('cools every enabled model on the broke key for the credit window and skips them for this request', async () => {
     const state = newFallbackState();
-    recordRetryableFailure(routeFor(models[0], keyA), HF_402(), state);
+    await recordRetryableFailure(routeFor(models[0], keyA), HF_402(), state);
 
-    expect(cooldownDecisionForError(routeFor(models[0], keyA), HF_402()).source).toBe('credit');
+    expect((await cooldownDecisionForError(routeFor(models[0], keyA), HF_402())).source).toBe('credit');
     for (const m of models) {
-      expect(isOnCooldown(PLATFORM, m.model_id, keyA), m.model_id).toBe(true);
+      expect(await isOnCooldown(PLATFORM, m.model_id, keyA), m.model_id).toBe(true);
       expect(state.skipKeys.has(`${PLATFORM}:${m.model_id}:${keyA}`), m.model_id).toBe(true);
     }
   });
 
-  it('leaves a sibling key (a different wallet) and the platform itself in play', () => {
+  it('leaves a sibling key (a different wallet) and the platform itself in play', async () => {
     const state = newFallbackState();
-    recordRetryableFailure(routeFor(models[0], keyA), HF_402(), state);
+    await recordRetryableFailure(routeFor(models[0], keyA), HF_402(), state);
     for (const m of models) {
-      expect(isOnCooldown(PLATFORM, m.model_id, keyB), m.model_id).toBe(false);
+      expect(await isOnCooldown(PLATFORM, m.model_id, keyB), m.model_id).toBe(false);
       expect(state.skipKeys.has(`${PLATFORM}:${m.model_id}:${keyB}`)).toBe(false);
     }
     // Unlike a suspension, the platform is NOT ruled out: keyB may have credits.
     expect(state.skipPlatforms.has(PLATFORM)).toBe(false);
   });
 
-  it('a genuine bad request stays on the per-route path', () => {
+  it('a genuine bad request stays on the per-route path', async () => {
     const state = newFallbackState();
-    recordRetryableFailure(routeFor(models[0], keyA), REAL_BAD_REQUEST(), state);
-    expect(isOnCooldown(PLATFORM, models[1].model_id, keyA)).toBe(false);
+    await recordRetryableFailure(routeFor(models[0], keyA), REAL_BAD_REQUEST(), state);
+    expect(await isOnCooldown(PLATFORM, models[1].model_id, keyA)).toBe(false);
     expect(state.skipKeys.has(`${PLATFORM}:${models[1].model_id}:${keyA}`)).toBe(false);
   });
 });
@@ -201,12 +199,12 @@ const record = (classes: AttemptErrorClass[]): AttemptRecord[] =>
   classes.map((errorClass, i) => ({ platform: 'fake', modelId: `m${i}`, keyOrdinal: 1 + (i % 2), errorClass }));
 
 describe('exhaustedRetryError only blames the request when every attempt did', () => {
-  it("the reported trail (5× bad request + 3× out of credits) renders a 502, not 'rejected as invalid'", () => {
+  it("the reported trail (5× bad request + 3× out of credits) renders a 502, not 'rejected as invalid'", async () => {
     const attempts = record([
       'provider_bad_request', 'provider_bad_request', 'provider_bad_request', 'out_of_credits',
       'provider_bad_request', 'out_of_credits', 'out_of_credits', 'provider_bad_request',
     ]);
-    const body = exhaustedRetryError(NAVY_STALE(), 20, { attempts, timedOut: true, budgetMs: 45_000 });
+    const body = await exhaustedRetryError(NAVY_STALE(), 20, { attempts, timedOut: true, budgetMs: 45_000 });
     expect(body.status).toBe(502);
     expect(body.kind).toBe('upstream');
     expect(body.code).toBe('upstream_failed');
@@ -221,34 +219,34 @@ describe('exhaustedRetryError only blames the request when every attempt did', (
     expect(body.message).toContain('Attempt trail:');
   });
 
-  it('a unanimous bad-request trail keeps the 400 invalid_request contract', () => {
-    const body = exhaustedRetryError(REAL_BAD_REQUEST(), 20, { attempts: record(['provider_bad_request', 'provider_bad_request']) });
+  it('a unanimous bad-request trail keeps the 400 invalid_request contract', async () => {
+    const body = await exhaustedRetryError(REAL_BAD_REQUEST(), 20, { attempts: record(['provider_bad_request', 'provider_bad_request']) });
     expect(body.status).toBe(400);
     expect(body.code).toBe('provider_rejected_request');
     expect(body.message).toContain('rejected the request as invalid');
   });
 
-  it('the legacy no-trail shape still falls back to the last error', () => {
-    const body = exhaustedRetryError(REAL_BAD_REQUEST(), 20, { attempts: [] });
+  it('the legacy no-trail shape still falls back to the last error', async () => {
+    const body = await exhaustedRetryError(REAL_BAD_REQUEST(), 20, { attempts: [] });
     expect(body.status).toBe(400);
     expect(body.code).toBe('provider_rejected_request');
   });
 
-  it('a mix with no bad-request hop keeps the plain provider-side wording', () => {
-    const body = exhaustedRetryError(HF_402(), 20, { attempts: record(['model_not_found', 'out_of_credits', 'upstream_error']) });
+  it('a mix with no bad-request hop keeps the plain provider-side wording', async () => {
+    const body = await exhaustedRetryError(HF_402(), 20, { attempts: record(['model_not_found', 'out_of_credits', 'upstream_error']) });
     expect(body.status).toBe(502);
     expect(body.message).toContain('not a problem with your request');
     expect(body.message).toContain('model_not_found ×1');
   });
 
-  it('with the classifier fix the same trail reads stale models + credits and renders 502 end to end', () => {
+  it('with the classifier fix the same trail reads stale models + credits and renders 502 end to end', async () => {
     // What the reporter's chain becomes once NavyAI's wording is classified:
     // every navy hop is model_not_found, every HF hop out_of_credits.
     const attempts = record([
       'model_not_found', 'model_not_found', 'model_not_found', 'out_of_credits',
       'model_not_found', 'out_of_credits', 'out_of_credits', 'model_not_found',
     ]);
-    const body = exhaustedRetryError(NAVY_STALE(), 20, { attempts });
+    const body = await exhaustedRetryError(NAVY_STALE(), 20, { attempts });
     expect(body.status).toBe(502);
     expect(body.message).toContain('model_not_found ×5');
     expect(body.message).not.toContain('rejected the request as invalid');
@@ -290,11 +288,11 @@ describe('runFallbackLoop on the reported chain', () => {
       routeFor(models[2], keyA),
       routeFor(models[2], keyB),
     ];
-    const route = (): RouteResult => {
+    const route = async (): RouteResult => {
       for (const c of candidates) {
         if (state.skipModels.has(c.modelDbId)) continue;
         if (state.skipKeys.has(`${c.platform}:${c.modelId}:${c.keyId}`)) continue;
-        if (isOnCooldown(c.platform, c.modelId, c.keyId)) continue;
+        if (await isOnCooldown(c.platform, c.modelId, c.keyId)) continue;
         return c;
       }
       throw Object.assign(new Error('All models exhausted'), { status: 429 });

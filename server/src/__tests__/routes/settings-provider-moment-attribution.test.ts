@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getSetting } from '../../db/index.js';
+import { getDb, getSetting } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { PROVIDER_MOMENT_ATTRIBUTION_KEY } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #1347 (PR 1): GET/PUT /api/settings/provider-moment-attribution — the
 // dashboard toggle for rate-limit-aware failure attribution. Off by default;
@@ -28,16 +29,16 @@ describe('/api/settings/provider-moment-attribution (#1347 PR 1)', () => {
   let app: Express;
   let token: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    token = mintDashboardToken();
+    token = await mintDashboardToken();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     delete process.env.ROUTER_PROVIDER_MOMENT_ATTRIBUTION;
-    getDb().prepare('DELETE FROM settings WHERE key = ?').run(PROVIDER_MOMENT_ATTRIBUTION_KEY);
+    (await getDb().run('DELETE FROM settings WHERE key = ?', [PROVIDER_MOMENT_ATTRIBUTION_KEY]));
   });
 
   afterEach(() => {
@@ -54,7 +55,7 @@ describe('/api/settings/provider-moment-attribution (#1347 PR 1)', () => {
     const put = await request(app, 'PUT', '/api/settings/provider-moment-attribution', { enabled: true }, token);
     expect(put.status).toBe(200);
     expect(put.body).toEqual({ enabled: true });
-    expect(getSetting(PROVIDER_MOMENT_ATTRIBUTION_KEY)).toBe('1');
+    expect(await getSetting(PROVIDER_MOMENT_ATTRIBUTION_KEY)).toBe('1');
 
     const get = await request(app, 'GET', '/api/settings/provider-moment-attribution', undefined, token);
     expect(get.body).toEqual({ enabled: true });
@@ -64,7 +65,7 @@ describe('/api/settings/provider-moment-attribution (#1347 PR 1)', () => {
     await request(app, 'PUT', '/api/settings/provider-moment-attribution', { enabled: true }, token);
     const put = await request(app, 'PUT', '/api/settings/provider-moment-attribution', { enabled: false }, token);
     expect(put.body).toEqual({ enabled: false });
-    expect(getSetting(PROVIDER_MOMENT_ATTRIBUTION_KEY)).toBeUndefined();
+    expect(await getSetting(PROVIDER_MOMENT_ATTRIBUTION_KEY)).toBeUndefined();
   });
 
   it('rejects a non-boolean body', async () => {

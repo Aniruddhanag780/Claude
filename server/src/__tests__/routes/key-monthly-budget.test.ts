@@ -2,9 +2,10 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import { once } from 'node:events';
 import type { Server } from 'node:http';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
+import { getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { nextMonthResetAt } from '../../services/key-budget.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let server: Server;
 let baseUrl: string;
@@ -12,22 +13,22 @@ let token: string;
 let model: string;
 beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
   const db = getDb();
   const secret = encrypt('synthetic-budget-test-key');
-  const keyId = Number(db.prepare(`INSERT INTO api_keys (platform, encrypted_key, iv, auth_tag, enabled, status, monthly_request_cap)
-    VALUES ('groq', ?, ?, ?, 1, 'healthy', 1)`).run(secret.encrypted, secret.iv, secret.authTag).lastInsertRowid);
-  model = (db.prepare("SELECT model_id FROM models WHERE platform = 'groq' LIMIT 1").get() as { model_id: string }).model_id;
-  db.prepare(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms)
-    VALUES ('groq', ?, ?, 'success', 10, 5, 1)`).run(model, keyId);
-  db.prepare(`INSERT INTO embedding_models (family, platform, model_id, display_name, dimensions, priority, enabled, quota_label, key_id)
-    VALUES ('budget-embedding', 'custom', 'budget-embedding', 'Budget embedding', 2, 1, 1, '', ?)`).run(keyId);
+  const keyId = Number((await db.run(`INSERT INTO api_keys (platform, encrypted_key, iv, auth_tag, enabled, status, monthly_request_cap)
+    VALUES ('groq', ?, ?, ?, 1, 'healthy', 1) RETURNING id`, [secret.encrypted, secret.iv, secret.authTag])).lastInsertRowid);
+  model = ((await db.get("SELECT model_id FROM models WHERE platform = 'groq' LIMIT 1")) as { model_id: string }).model_id;
+  (await db.run(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms)
+    VALUES ('groq', ?, ?, 'success', 10, 5, 1) RETURNING id`, [model, keyId]));
+  (await db.run(`INSERT INTO embedding_models (family, platform, model_id, display_name, dimensions, priority, enabled, quota_label, key_id)
+    VALUES ('budget-embedding', 'custom', 'budget-embedding', 'Budget embedding', 2, 1, 1, '', ?) RETURNING id`, [keyId]));
   for (const modality of ['image', 'video', 'audio', 'transcription']) {
-    db.prepare(`INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, key_id)
-      VALUES ('custom', ?, 'Budget media', ?, 1, 1, '', ?)`).run(`budget-${modality}`, modality, keyId);
+    (await db.run(`INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, key_id)
+      VALUES ('custom', ?, 'Budget media', ?, 1, 1, '', ?) RETURNING id`, [`budget-${modality}`, modality, keyId]));
   }
-  setSetting('ollama_emulation', 'key-required');
-  token = getUnifiedApiKey();
+  await setSetting('ollama_emulation', 'key-required');
+  token = await getUnifiedApiKey();
   server = createApp().listen(0, '127.0.0.1');
   await once(server, 'listening');
   baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -65,14 +66,14 @@ describe('monthly budget exhaustion on inference endpoints', () => {
 
   it.each(['/v1/chat/completions', '/v1/responses'])('Fusion through %s cannot bypass a capped provider key', async path => {
     const input = path === '/v1/responses' ? { input: 'hello' } : { messages: [{ role: 'user', content: 'hello' }] };
-    const before = getDb().prepare('SELECT SUM(requests) AS requests FROM key_monthly_usage').get();
+    const before = (await getDb().get('SELECT SUM(requests) AS requests FROM key_monthly_usage'));
     const res = await fetch(`${baseUrl}${path}`, {
       method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...input, model: 'fusion', fusion: { models: [model] }, max_tokens: 20 }),
     });
     expect(res.status).toBe(429);
     expect((await res.json()).error.type).toBe('rate_limit_error');
-    expect(getDb().prepare('SELECT SUM(requests) AS requests FROM key_monthly_usage').get()).toEqual(before);
+    expect((await getDb().get('SELECT SUM(requests) AS requests FROM key_monthly_usage'))).toEqual(before);
   });
 
   it.each(['/v1/chat/completions', '/v1/responses', '/v1/messages'])('%s returns quota_exceeded and the month reset header', async path => {

@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
-import { initDb, getDb, getSetting, setSetting } from '../../db/index.js';
+import { getDb, getSetting, setSetting } from '../../db/index.js';
 import { applyDeclarativeConfig, applyDeclarativeConfigFromEnv, activateConfiguredLicense } from '../../services/declarative-config.js';
 import { getRoutingStrategy } from '../../services/router.js';
 import { userCount, verifyCredentials } from '../../services/auth.js';
 import { SETTING_LICENSE_KEY } from '../../services/catalog-sync.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const ORIGINAL_CONFIG_JSON = process.env.FREEAPI_CONFIG_JSON;
 const ORIGINAL_CONFIG_PATH = process.env.FREEAPI_CONFIG_PATH;
@@ -16,27 +17,27 @@ function restoreEnv() {
 }
 
 describe('declarative config import', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     delete process.env.FREEAPI_CONFIG_JSON;
     delete process.env.FREEAPI_CONFIG_PATH;
-    getDb().prepare('DELETE FROM api_keys').run();
+    (await getDb().run('DELETE FROM api_keys'));
   });
 
   afterEach(() => restoreEnv());
 
-  it('applies keys, custom providers, model overrides, fallback order and routing', () => {
-    const target = getDb().prepare(`
+  it('applies keys, custom providers, model overrides, fallback order and routing', async () => {
+    const target = (await getDb().get(`
       SELECT platform, model_id FROM models
        WHERE platform = 'groq' AND key_id IS NULL
        ORDER BY id LIMIT 1
-    `).get() as { platform: string; model_id: string };
+    `)) as { platform: string; model_id: string };
 
-    const result = applyDeclarativeConfig({
+    const result = await applyDeclarativeConfig({
       keys: [{ platform: 'groq', key: 'gsk_config_key', label: 'config' }],
       customProviders: [{
         baseUrl: 'http://127.0.0.1:9123/v1',
@@ -56,19 +57,19 @@ describe('declarative config import', () => {
     });
 
     expect(result).toMatchObject({ applied: true, keys: 1, customModels: 1, models: 1, fallback: 1, routing: true });
-    expect((getDb().prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'groq'").get() as { n: number }).n).toBe(1);
-    expect((getDb().prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'").get() as { n: number }).n).toBe(1);
-    expect(getDb().prepare(`
+    expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'groq'")) as { n: number }).n).toBe(1);
+    expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'")) as { n: number }).n).toBe(1);
+    expect((await getDb().get(`
       SELECT display_name, supports_tools, context_window FROM models
        WHERE platform = 'custom' AND model_id = 'local-chat'
-    `).get()).toEqual({ display_name: 'Local Chat', supports_tools: 1, context_window: 32000 });
+    `))).toEqual({ display_name: 'Local Chat', supports_tools: 1, context_window: 32000 });
 
-    const model = getDb().prepare(`
+    const model = (await getDb().get(`
       SELECT m.display_name, m.supports_tools, m.context_window, fc.priority, fc.enabled AS fallback_enabled
         FROM models m
         JOIN fallback_config fc ON fc.model_db_id = m.id
        WHERE m.platform = ? AND m.model_id = ?
-    `).get(target.platform, target.model_id) as {
+    `, [target.platform, target.model_id])) as {
       display_name: string;
       supports_tools: number;
       context_window: number;
@@ -82,39 +83,38 @@ describe('declarative config import', () => {
       priority: 1,
       fallback_enabled: 0,
     });
-    expect(getDb().prepare('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?')
-      .get(target.platform, target.model_id)).toBeDefined();
-    expect(getRoutingStrategy()).toBe('custom');
+    expect((await getDb().get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [target.platform, target.model_id]))).toBeDefined();
+    expect(await getRoutingStrategy()).toBe('custom');
 
-    applyDeclarativeConfig({
+    await applyDeclarativeConfig({
       models: [{ platform: target.platform, modelId: target.model_id, displayName: 'Edited Again' }],
     });
-    expect((getDb().prepare(`
+    expect(((await getDb().get(`
       SELECT fc.enabled AS fallback_enabled
         FROM models m
         JOIN fallback_config fc ON fc.model_db_id = m.id
        WHERE m.platform = ? AND m.model_id = ?
-    `).get(target.platform, target.model_id) as { fallback_enabled: number }).fallback_enabled).toBe(0);
+    `, [target.platform, target.model_id])) as { fallback_enabled: number }).fallback_enabled).toBe(0);
   });
 
-  it('applies inline JSON from FREEAPI_CONFIG_JSON idempotently', () => {
+  it('applies inline JSON from FREEAPI_CONFIG_JSON idempotently', async () => {
     process.env.FREEAPI_CONFIG_JSON = JSON.stringify({
       keys: [{ platform: 'groq', key: 'gsk_config_key', label: 'config' }],
     });
 
-    expect(applyDeclarativeConfigFromEnv().applied).toBe(true);
-    expect(applyDeclarativeConfigFromEnv().applied).toBe(true);
-    expect((getDb().prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'groq' AND label = 'config'").get() as { n: number }).n).toBe(1);
+    expect((await applyDeclarativeConfigFromEnv()).applied).toBe(true);
+    expect((await applyDeclarativeConfigFromEnv()).applied).toBe(true);
+    expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'groq' AND label = 'config'")) as { n: number }).n).toBe(1);
   });
 
   // #600: pollinations lost `keyless: true` in #573, so a legacy declarative
   // config with a keyless-era pollinations entry (no `key`) used to throw at
   // boot and brick the install. Missing-key entries must now degrade to a
   // per-entry skip + warning instead of killing the apply.
-  it('skips a legacy keyless entry without a key, warns, and still applies the rest', () => {
+  it('skips a legacy keyless entry without a key, warns, and still applies the rest', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      const result = applyDeclarativeConfig({
+      const result = await applyDeclarativeConfig({
         keys: [
           { platform: 'pollinations' },
           { platform: 'groq', key: 'gsk_config_key', label: 'config' },
@@ -127,14 +127,14 @@ describe('declarative config import', () => {
       expect(result.warnings[0]).toContain('enter.pollinations.ai');
       expect(result.warnings[0]).toContain('entry skipped');
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('pollinations'));
-      expect((getDb().prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'pollinations'").get() as { n: number }).n).toBe(0);
-      expect((getDb().prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'groq'").get() as { n: number }).n).toBe(1);
+      expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'pollinations'")) as { n: number }).n).toBe(0);
+      expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'groq'")) as { n: number }).n).toBe(1);
     } finally {
       warn.mockRestore();
     }
   });
 
-  it('boot apply (FromEnv) survives a legacy keyless pollinations entry', () => {
+  it('boot apply (FromEnv) survives a legacy keyless pollinations entry', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       process.env.FREEAPI_CONFIG_JSON = JSON.stringify({
@@ -143,27 +143,27 @@ describe('declarative config import', () => {
           { platform: 'groq', key: 'gsk_config_key', label: 'config' },
         ],
       });
-      expect(() => applyDeclarativeConfigFromEnv()).not.toThrow();
-      expect((getDb().prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'groq'").get() as { n: number }).n).toBe(1);
-      expect((getDb().prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'pollinations'").get() as { n: number }).n).toBe(0);
+      expect(async () => await applyDeclarativeConfigFromEnv()).not.toThrow();
+      expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'groq'")) as { n: number }).n).toBe(1);
+      expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'pollinations'")) as { n: number }).n).toBe(0);
     } finally {
       warn.mockRestore();
     }
   });
 
-  it('still applies a pollinations entry that has a key', () => {
-    const result = applyDeclarativeConfig({
+  it('still applies a pollinations entry that has a key', async () => {
+    const result = await applyDeclarativeConfig({
       keys: [{ platform: 'pollinations', key: 'pk_live_abc', label: 'config' }],
     });
     expect(result.keys).toBe(1);
     expect(result.warnings).toHaveLength(0);
-    expect((getDb().prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'pollinations'").get() as { n: number }).n).toBe(1);
+    expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'pollinations'")) as { n: number }).n).toBe(1);
   });
 
-  it('generic missing-key skip covers any non-keyless platform, with a platform-named warning', () => {
+  it('generic missing-key skip covers any non-keyless platform, with a platform-named warning', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      const result = applyDeclarativeConfig({
+      const result = await applyDeclarativeConfig({
         keys: [{ platform: 'groq' }],
       });
       expect(result.keys).toBe(0);
@@ -175,22 +175,22 @@ describe('declarative config import', () => {
     }
   });
 
-  it('a keyless platform entry without a key still applies its sentinel row', () => {
-    const result = applyDeclarativeConfig({
+  it('a keyless platform entry without a key still applies its sentinel row', async () => {
+    const result = await applyDeclarativeConfig({
       keys: [{ platform: 'kilo', label: 'config' }],
     });
     expect(result.keys).toBe(1);
     expect(result.warnings).toHaveLength(0);
-    expect((getDb().prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'kilo'").get() as { n: number }).n).toBe(1);
+    expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'kilo'")) as { n: number }).n).toBe(1);
   });
 
   it('genuinely malformed config still fails loudly', () => {
-    expect(() => applyDeclarativeConfig({ keys: [{ platform: 'groq' }], nonsense: true }))
+    expect(async () => await applyDeclarativeConfig({ keys: [{ platform: 'groq' }], nonsense: true }))
       .toThrow(/invalid declarative config/);
-    expect(() => applyDeclarativeConfig({ keys: [{ platform: 'unknown-platform', key: 'x' }] }))
+    expect(async () => await applyDeclarativeConfig({ keys: [{ platform: 'unknown-platform', key: 'x' }] }))
       .toThrow(/unknown provider platform/);
     process.env.FREEAPI_CONFIG_JSON = '{ not json';
-    expect(() => applyDeclarativeConfigFromEnv()).toThrow();
+    expect(async () => await applyDeclarativeConfigFromEnv()).toThrow();
   });
 });
 
@@ -203,20 +203,20 @@ describe('declarative config with two relays serving one model id', () => {
   const RELAY_A = 'http://127.0.0.1:9301/v1';
   const RELAY_B = 'http://127.0.0.1:9302/v1';
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     delete process.env.FREEAPI_CONFIG_JSON;
     delete process.env.FREEAPI_CONFIG_PATH;
     const db = getDb();
-    db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')").run();
-    db.prepare("DELETE FROM profile_models WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')").run();
-    db.prepare("DELETE FROM models WHERE platform = 'custom'").run();
-    db.prepare('DELETE FROM api_keys').run();
-    applyDeclarativeConfig({
+    (await db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')"));
+    (await db.run("DELETE FROM profile_models WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')"));
+    (await db.run("DELETE FROM models WHERE platform = 'custom'"));
+    (await db.run('DELETE FROM api_keys'));
+    await applyDeclarativeConfig({
       customProviders: [
         { baseUrl: RELAY_A, apiKey: 'sk-a', label: 'Relay A', models: ['shared-model'] },
         { baseUrl: RELAY_B, apiKey: 'sk-b', label: 'Relay B', models: ['shared-model'] },
@@ -226,60 +226,55 @@ describe('declarative config with two relays serving one model id', () => {
 
   afterEach(() => restoreEnv());
 
-  function rowOn(scope: string) {
-    return getDb().prepare(
-      "SELECT id, display_name, enabled FROM models WHERE platform = 'custom' AND model_id = 'shared-model' AND endpoint_scope = ?",
-    ).get(scope) as { id: number; display_name: string; enabled: number };
+  async function rowOn(scope: string) {
+    return (await getDb().get("SELECT id, display_name, enabled FROM models WHERE platform = 'custom' AND model_id = 'shared-model' AND endpoint_scope = ?", [scope])) as { id: number; display_name: string; enabled: number };
   }
 
-  it('refuses an ambiguous model edit instead of patching an arbitrary relay', () => {
-    expect(() => applyDeclarativeConfig({
+  it('refuses an ambiguous model edit instead of patching an arbitrary relay', async () => {
+    expect(async () => await applyDeclarativeConfig({
       models: [{ platform: 'custom', modelId: 'shared-model', displayName: 'Renamed' }],
     })).toThrow(/more than one endpoint/i);
 
     // Nothing was written — the whole apply is one transaction.
-    expect(rowOn(RELAY_A).display_name).toBe('shared-model');
-    expect(rowOn(RELAY_B).display_name).toBe('shared-model');
+    expect((await rowOn(RELAY_A)).display_name).toBe('shared-model');
+    expect((await rowOn(RELAY_B)).display_name).toBe('shared-model');
   });
 
-  it('edits exactly the endpoint the entry names', () => {
-    applyDeclarativeConfig({
+  it('edits exactly the endpoint the entry names', async () => {
+    await applyDeclarativeConfig({
       models: [{ platform: 'custom', modelId: 'shared-model', endpoint: RELAY_B, displayName: 'Only B' }],
     });
 
-    expect(rowOn(RELAY_A).display_name).toBe('shared-model');
-    expect(rowOn(RELAY_B).display_name).toBe('Only B');
+    expect((await rowOn(RELAY_A)).display_name).toBe('shared-model');
+    expect((await rowOn(RELAY_B)).display_name).toBe('Only B');
   });
 
   it('rejects an endpoint that serves no such model', () => {
-    expect(() => applyDeclarativeConfig({
+    expect(async () => await applyDeclarativeConfig({
       models: [{ platform: 'custom', modelId: 'shared-model', endpoint: 'http://127.0.0.1:9999/v1', displayName: 'x' }],
     })).toThrow(/no custom endpoint/i);
   });
 
-  it('applies a fallback entry to the named endpoint only', () => {
-    const before = getDb().prepare('SELECT priority FROM fallback_config WHERE model_db_id = ?')
-      .get(rowOn(RELAY_A).id) as { priority: number };
+  it('applies a fallback entry to the named endpoint only', async () => {
+    const before = (await getDb().get('SELECT priority FROM fallback_config WHERE model_db_id = ?', [(await rowOn(RELAY_A)).id])) as { priority: number };
 
-    applyDeclarativeConfig({
+    await applyDeclarativeConfig({
       fallback: [{ platform: 'custom', modelId: 'shared-model', endpoint: RELAY_B, priority: 3 }],
     });
 
-    expect((getDb().prepare('SELECT priority FROM fallback_config WHERE model_db_id = ?')
-      .get(rowOn(RELAY_B).id) as { priority: number }).priority).toBe(3);
-    expect((getDb().prepare('SELECT priority FROM fallback_config WHERE model_db_id = ?')
-      .get(rowOn(RELAY_A).id) as { priority: number }).priority).toBe(before.priority);
+    expect(((await getDb().get('SELECT priority FROM fallback_config WHERE model_db_id = ?', [(await rowOn(RELAY_B)).id])) as { priority: number }).priority).toBe(3);
+    expect(((await getDb().get('SELECT priority FROM fallback_config WHERE model_db_id = ?', [(await rowOn(RELAY_A)).id])) as { priority: number }).priority).toBe(before.priority);
   });
 
-  it('leaves a single-endpoint declaration working with no endpoint field', () => {
+  it('leaves a single-endpoint declaration working with no endpoint field', async () => {
     const db = getDb();
-    db.prepare("DELETE FROM fallback_config WHERE model_db_id = ?").run(rowOn(RELAY_B).id);
-    db.prepare("DELETE FROM profile_models WHERE model_db_id = ?").run(rowOn(RELAY_B).id);
-    db.prepare("DELETE FROM models WHERE platform = 'custom' AND endpoint_scope = ?").run(RELAY_B);
-    applyDeclarativeConfig({
+    (await db.run("DELETE FROM fallback_config WHERE model_db_id = ?", [(await rowOn(RELAY_B)).id]));
+    (await db.run("DELETE FROM profile_models WHERE model_db_id = ?", [(await rowOn(RELAY_B)).id]));
+    (await db.run("DELETE FROM models WHERE platform = 'custom' AND endpoint_scope = ?", [RELAY_B]));
+    await applyDeclarativeConfig({
       models: [{ platform: 'custom', modelId: 'shared-model', displayName: 'Solo' }],
     });
-    expect(rowOn(RELAY_A).display_name).toBe('Solo');
+    expect((await rowOn(RELAY_A)).display_name).toBe('Solo');
   });
 });
 
@@ -289,43 +284,43 @@ describe('declarative config with two relays serving one model id', () => {
 // file can never take over a claimed install. The license entry goes through
 // the same validate-then-store contract as POST /api/premium/key.
 describe('declarative config admin', () => {
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM users').run();
-    getDb().prepare('DELETE FROM sessions').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM users'));
+    (await getDb().run('DELETE FROM sessions'));
   });
 
-  it('creates the first dashboard account only while no user exists', () => {
+  it('creates the first dashboard account only while no user exists', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const first = applyDeclarativeConfig({
+    const first = await applyDeclarativeConfig({
       admin: { email: 'Ops@Example.com', password: 'correct horse battery' },
     });
     expect(first.admin).toBe(true);
-    expect(userCount()).toBe(1);
+    expect(await userCount()).toBe(1);
     // Email is normalized on write, password verifies via the same helpers
     // the /api/auth routes use.
-    expect(verifyCredentials('ops@example.com', 'correct horse battery')).toBeTruthy();
+    expect(await verifyCredentials('ops@example.com', 'correct horse battery')).toBeTruthy();
 
-    const second = applyDeclarativeConfig({
+    const second = await applyDeclarativeConfig({
       admin: { email: 'attacker@example.com', password: 'totally different' },
     });
     expect(second.admin).toBe(false);
     expect(second.warnings.some(w => w.startsWith('admin:'))).toBe(true);
-    expect(userCount()).toBe(1);
+    expect(await userCount()).toBe(1);
     // The original account is untouched — the second entry changed nothing.
-    expect(verifyCredentials('ops@example.com', 'correct horse battery')).toBeTruthy();
-    expect(verifyCredentials('attacker@example.com', 'totally different')).toBeNull();
+    expect(await verifyCredentials('ops@example.com', 'correct horse battery')).toBeTruthy();
+    expect(await verifyCredentials('attacker@example.com', 'totally different')).toBeNull();
     warn.mockRestore();
   });
 
-  it('rejects malformed admin entries at schema validation', () => {
-    expect(() => applyDeclarativeConfig({
+  it('rejects malformed admin entries at schema validation', async () => {
+    expect(async () => await applyDeclarativeConfig({
       admin: { email: 'not-an-email', password: 'long-enough-password' },
     })).toThrow(/invalid declarative config/);
-    expect(() => applyDeclarativeConfig({
+    expect(async () => await applyDeclarativeConfig({
       admin: { email: 'a@b.co', password: 'short' },
     })).toThrow(/invalid declarative config/);
-    expect(userCount()).toBe(0);
+    expect(await userCount()).toBe(0);
   });
 });
 
@@ -347,17 +342,17 @@ describe('declarative config license', () => {
     });
   }
 
-  beforeEach(() => {
-    getDb().prepare("DELETE FROM settings WHERE key IN ('premium_license_key', 'premium_license_status')").run();
+  beforeEach(async () => {
+    (await getDb().run("DELETE FROM settings WHERE key IN ('premium_license_key', 'premium_license_status')"));
   });
 
   afterEach(() => vi.restoreAllMocks());
 
   it('validates and stores a configured license key, then kicks a live sync', async () => {
     const fetchMock = mockLicenseService();
-    const result = applyDeclarativeConfig({ license: 'flk_valid_test_key' });
+    const result = await applyDeclarativeConfig({ license: 'flk_valid_test_key' });
     expect(result.license).toBe(true);
-    await vi.waitFor(() => expect(getSetting(SETTING_LICENSE_KEY)).toBe('flk_valid_test_key'));
+    await vi.waitFor(async () => expect(await getSetting(SETTING_LICENSE_KEY)).toBe('flk_valid_test_key'));
     const called = fetchMock.mock.calls.map(c => String(c[0] instanceof Request ? c[0].url : c[0]));
     expect(called.some(u => u.endsWith('/v1/license/activate'))).toBe(true);
   });
@@ -366,7 +361,7 @@ describe('declarative config license', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     mockLicenseService({ valid: false, reason: 'unknown_key' });
     await activateConfiguredLicense('flk_rejected_key');
-    expect(getSetting(SETTING_LICENSE_KEY)).toBeUndefined();
+    expect(await getSetting(SETTING_LICENSE_KEY)).toBeUndefined();
     expect(warn.mock.calls.some(c => String(c[0]).includes('rejected'))).toBe(true);
   });
 
@@ -374,21 +369,21 @@ describe('declarative config license', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('ECONNREFUSED'));
     await activateConfiguredLicense('flk_offline_key');
-    expect(getSetting(SETTING_LICENSE_KEY)).toBeUndefined();
+    expect(await getSetting(SETTING_LICENSE_KEY)).toBeUndefined();
     expect(warn.mock.calls.some(c => String(c[0]).includes('could not reach'))).toBe(true);
   });
 
   it('skips activation entirely when the stored key already matches', async () => {
-    setSetting(SETTING_LICENSE_KEY, 'flk_already_stored');
+    await setSetting(SETTING_LICENSE_KEY, 'flk_already_stored');
     const fetchMock = vi.spyOn(globalThis, 'fetch');
     await activateConfiguredLicense('flk_already_stored');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('re-activates when the configured key differs from the stored one (rotation)', async () => {
-    setSetting(SETTING_LICENSE_KEY, 'flk_old_key_1');
+    await setSetting(SETTING_LICENSE_KEY, 'flk_old_key_1');
     mockLicenseService();
     await activateConfiguredLicense('flk_new_key_2');
-    expect(getSetting(SETTING_LICENSE_KEY)).toBe('flk_new_key_2');
+    expect(await getSetting(SETTING_LICENSE_KEY)).toBe('flk_new_key_2');
   });
 });

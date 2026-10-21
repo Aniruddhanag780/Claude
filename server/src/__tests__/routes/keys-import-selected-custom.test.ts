@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #687, second half. #717 taught POST /api/keys/import about custom endpoints,
 // but the dashboard never calls that route — the Add-key dialog does
@@ -43,24 +44,22 @@ async function previewFile(app: Express, filename: string, content: string) {
   return { status: res.status, body: json as any };
 }
 
-function customRows() {
-  return getDb()
-    .prepare("SELECT id, platform, label, base_url FROM api_keys WHERE platform = 'custom' ORDER BY id")
-    .all() as Array<{ id: number; platform: string; label: string; base_url: string | null }>;
+async function customRows() {
+  return await getDb().all("SELECT id, platform, label, base_url FROM api_keys WHERE platform = 'custom' ORDER BY id") as Array<{ id: number; platform: string; label: string; base_url: string | null }>;
 }
 
 describe('POST /api/keys/import-selected — custom endpoints (#687)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
+  beforeEach(async () => {
+    await getDb().run('DELETE FROM api_keys');
   });
 
   it('restores a custom endpoint when the row carries its base URL', async () => {
@@ -76,7 +75,7 @@ describe('POST /api/keys/import-selected — custom endpoints (#687)', () => {
     expect(status).toBe(200);
     expect(body.imported).toBe(1);
     expect(body.errors).toEqual([]);
-    expect(customRows()).toEqual([
+    expect(await customRows()).toEqual([
       expect.objectContaining({ platform: 'custom', base_url: 'https://relay.example.com/v1' }),
     ]);
   });
@@ -89,7 +88,7 @@ describe('POST /api/keys/import-selected — custom endpoints (#687)', () => {
     expect(status).toBe(200);
     expect(body.imported).toBe(0);
     expect(body.errors[0].error).toContain('base URL');
-    expect(customRows()).toHaveLength(0);
+    expect(await customRows()).toHaveLength(0);
   });
 
   it('applies the SSRF guard the manual add path uses (#440)', async () => {
@@ -105,7 +104,7 @@ describe('POST /api/keys/import-selected — custom endpoints (#687)', () => {
     expect(status).toBe(200);
     expect(body.imported).toBe(0);
     expect(body.errors[0].error).toContain('baseUrl rejected');
-    expect(customRows()).toHaveLength(0);
+    expect(await customRows()).toHaveLength(0);
   });
 
   it('keeps auth-less local servers on the no-key sentinel', async () => {
@@ -119,7 +118,7 @@ describe('POST /api/keys/import-selected — custom endpoints (#687)', () => {
     });
 
     expect(body.imported).toBe(1);
-    expect(customRows()).toHaveLength(1);
+    expect(await customRows()).toHaveLength(1);
   });
 
   it('pools re-imports of the same endpoint instead of duplicating the row (#619)', async () => {
@@ -134,16 +133,16 @@ describe('POST /api/keys/import-selected — custom endpoints (#687)', () => {
 
     // Importing the same backup twice is an ordinary thing to do; it must not
     // leave two rows pointing at one endpoint.
-    expect(customRows()).toHaveLength(1);
+    expect(await customRows()).toHaveLength(1);
   });
 
   it('carries baseUrl from /preview so the dialog can pass it back', async () => {
     const db = getDb();
     const { encrypted, iv, authTag } = encrypt('sk-relay-123');
-    db.prepare(`
+    await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
       VALUES ('custom', 'My Relay', ?, ?, ?, 'unknown', 1, ?)
-    `).run(encrypted, iv, authTag, 'https://relay.example.com/v1');
+    `, [encrypted, iv, authTag, 'https://relay.example.com/v1']);
 
     const exportFile = JSON.stringify({
       version: 1,

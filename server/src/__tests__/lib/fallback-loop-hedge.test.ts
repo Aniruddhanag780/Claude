@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { runFallbackLoop, newFallbackState, type FallbackState } from '../../lib/fallback-loop.js';
 import { isHedgeAbortError, newHedgeAbortError, isClientAbortError, isRetryableError } from '../../lib/error-classify.js';
 import { acquireLease, releaseLease, resetLeases } from '../../services/ratelimit.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 /**
  * Fallback-v2 hedging: when the wall-clock retry budget expires MID-FLIGHT,
@@ -61,8 +62,8 @@ function stalledDispatch(hedgeAbort: AbortController) {
 }
 
 describe('fallback loop time-budget hedging', () => {
-  beforeEach(() => {
-    initDb(':memory:');
+  beforeEach(async () => {
+    await initTestDb();
     resetLeases();
     vi.spyOn(console, 'log').mockImplementation(() => {});
   });
@@ -151,7 +152,7 @@ describe('fallback loop time-budget hedging', () => {
     // The two 429s each produced their normal failure bookkeeping (a cooldown
     // row and a skip entry); the hedge abort must NOT add a third of either —
     // the budget expiring is not a provider-health signal.
-    const cooldowns = getDb().prepare('SELECT COUNT(*) AS n FROM rate_limit_cooldowns').get() as { n: number };
+    const cooldowns = (await getDb().get('SELECT COUNT(*) AS n FROM rate_limit_cooldowns')) as { n: number };
     expect(cooldowns.n).toBe(2);
     expect(state.skipKeys.size).toBe(2);
     expect(state.skipModels.size).toBe(0);
@@ -197,7 +198,7 @@ describe('fallback loop time-budget hedging', () => {
     // on top of the two fast 429s', so the next request routes past it. This is
     // the exact assertion that inverts for the shared-budget case above, where
     // the same three attempts produce only two of each.
-    const cooldowns = getDb().prepare('SELECT COUNT(*) AS n FROM rate_limit_cooldowns').get() as { n: number };
+    const cooldowns = (await getDb().get('SELECT COUNT(*) AS n FROM rate_limit_cooldowns')) as { n: number };
     expect(cooldowns.n).toBe(3);
     expect(state.skipKeys.size).toBe(3);
     expect(h.logFailure).toHaveBeenCalledTimes(3);

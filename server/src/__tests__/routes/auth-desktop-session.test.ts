@@ -2,8 +2,9 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import http from 'node:http';
 import express, { type Express } from 'express';
 import { authRouter } from '../../routes/auth.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { validateSession, userCount } from '../../services/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #1399: the desktop app's dashboard opened in a normal browser tab must sign
 // in without a form. POST /api/auth/desktop-session mints the install's session,
@@ -44,14 +45,14 @@ async function call(a: Express, method: 'GET' | 'POST', path: string, headers: R
 }
 
 describe('POST /api/auth/desktop-session (#1399)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM sessions').run();
-    getDb().prepare('DELETE FROM users').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM sessions'));
+    (await getDb().run('DELETE FROM users'));
     process.env.FREEAPI_DESKTOP = '1';
   });
 
@@ -60,14 +61,14 @@ describe('POST /api/auth/desktop-session (#1399)', () => {
   });
 
   it('mints a working session for a local browser tab and creates the hidden account on first run', async () => {
-    expect(userCount()).toBe(0);
+    expect(await userCount()).toBe(0);
     const status = await call(app(), 'GET', '/api/auth/status');
     expect(status.body).toMatchObject({ authenticated: false, desktop: true });
 
     const res = await call(app(), 'POST', '/api/auth/desktop-session', { 'sec-fetch-site': 'same-origin', origin: 'http://127.0.0.1:31415' });
     expect(res.status).toBe(200);
-    expect(validateSession(res.body.token)?.email).toBe('desktop@localhost');
-    expect(userCount()).toBe(1);
+    expect((await validateSession(res.body.token))?.email).toBe('desktop@localhost');
+    expect(await userCount()).toBe(1);
   });
 
   it('accepts localhost and [::1] host names', async () => {
@@ -101,6 +102,6 @@ describe('POST /api/auth/desktop-session (#1399)', () => {
   it('refuses another site firing a request at localhost', async () => {
     expect((await call(app(), 'POST', '/api/auth/desktop-session', { 'sec-fetch-site': 'cross-site' })).status).toBe(403);
     expect((await call(app(), 'POST', '/api/auth/desktop-session', { origin: 'https://evil.example' })).status).toBe(403);
-    expect(userCount()).toBe(0);
+    expect(await userCount()).toBe(0);
   });
 });

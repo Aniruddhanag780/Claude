@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { initDb } from '../../db/index.js';
 import { encrypt, decrypt, maskKey } from '../../lib/crypto.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 describe('Crypto', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   it('should encrypt and decrypt a key round-trip', () => {

@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import type { Scheduler } from '../../lib/scheduler.js';
+import { initTestDb } from '../helpers/test-db.js';
 
-const { initDb, getDb } = await import('../../db/index.js');
+const { getDb } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const {
   checkAllKeys,
@@ -21,13 +22,12 @@ const {
 
 let nextId = 20000;
 
-function seedKey(platform: string, opts: { lastCheckedAt?: string; status?: string } = {}): number {
+async function seedKey(platform: string, opts: { lastCheckedAt?: string; status?: string } = {}): number {
   const id = ++nextId;
   const enc = encrypt(`pacing-${id}`);
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, enabled, status, last_checked_at)
-    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-  `).run(id, platform, `pacing-${id}`, enc.encrypted, enc.iv, enc.authTag, opts.status ?? 'healthy', opts.lastCheckedAt ?? null);
+    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?) RETURNING id`, [id, platform, `pacing-${id}`, enc.encrypted, enc.iv, enc.authTag, opts.status ?? 'healthy', opts.lastCheckedAt ?? null]));
   return id;
 }
 
@@ -40,13 +40,13 @@ function fakeClock() {
   };
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
-beforeEach(() => {
-  getDb().prepare('DELETE FROM api_keys').run();
+beforeEach(async () => {
+  (await getDb().run('DELETE FROM api_keys'));
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -55,9 +55,9 @@ beforeEach(() => {
 describe('health pass ordering', () => {
   it('interleaves platforms instead of probing one provider back to back', async () => {
     // Inserted provider-clustered, exactly as the old raw-DB-order pass read them.
-    const groq = [seedKey('groq'), seedKey('groq'), seedKey('groq')];
-    const cf = [seedKey('cloudflare'), seedKey('cloudflare')];
-    const mistral = [seedKey('mistral')];
+    const groq = [await seedKey('groq'), await seedKey('groq'), await seedKey('groq')];
+    const cf = [await seedKey('cloudflare'), await seedKey('cloudflare')];
+    const mistral = [await seedKey('mistral')];
 
     const clock = fakeClock();
     const platformOf = new Map<number, string>([
@@ -78,7 +78,7 @@ describe('health pass ordering', () => {
   });
 
   it('spaces consecutive probes of the same provider', async () => {
-    const ids = [seedKey('groq'), seedKey('groq'), seedKey('groq'), seedKey('cloudflare')];
+    const ids = [await seedKey('groq'), await seedKey('groq'), await seedKey('groq'), await seedKey('cloudflare')];
     const clock = fakeClock();
     const spacingMs = 1000;
     const startedAt = new Map<number, number>();
@@ -101,7 +101,7 @@ describe('health pass ordering', () => {
   });
 
   it('keeps the whole pass inside its time budget even for a big single-provider fleet', async () => {
-    for (let i = 0; i < 400; i++) seedKey('groq');
+    for (let i = 0; i < 400; i++) await seedKey('groq');
 
     const clock = fakeClock();
     await checkAllKeys({
@@ -118,11 +118,11 @@ describe('health pass ordering', () => {
 
 describe('recently-validated keys', () => {
   it('skips keys checked inside the recency window', async () => {
-    const fresh = seedKey('groq');
-    getDb().prepare("UPDATE api_keys SET last_checked_at = datetime('now') WHERE id = ?").run(fresh);
-    const stale = seedKey('groq');
-    getDb().prepare("UPDATE api_keys SET last_checked_at = datetime('now', '-30 minutes') WHERE id = ?").run(stale);
-    const never = seedKey('groq');
+    const fresh = await seedKey('groq');
+    (await getDb().run("UPDATE api_keys SET last_checked_at = to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [fresh]));
+    const stale = await seedKey('groq');
+    (await getDb().run("UPDATE api_keys SET last_checked_at = to_char((now() at time zone 'utc') - interval '30 minute', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [stale]));
+    const never = await seedKey('groq');
 
     const clock = fakeClock();
     const checked: number[] = [];
@@ -139,8 +139,8 @@ describe('recently-validated keys', () => {
   });
 
   it('never skips a key sitting at status=error', async () => {
-    const errored = seedKey('groq', { status: 'error' });
-    getDb().prepare("UPDATE api_keys SET last_checked_at = datetime('now') WHERE id = ?").run(errored);
+    const errored = await seedKey('groq', { status: 'error' });
+    (await getDb().run("UPDATE api_keys SET last_checked_at = to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?", [errored]));
 
     const clock = fakeClock();
     const checked: number[] = [];
@@ -153,9 +153,9 @@ describe('recently-validated keys', () => {
   });
 
   it('force ignores both the recency skip and the spacing (manual / post-wake pass)', async () => {
-    const a = seedKey('groq');
-    const b = seedKey('groq');
-    getDb().prepare("UPDATE api_keys SET last_checked_at = datetime('now')").run();
+    const a = await seedKey('groq');
+    const b = await seedKey('groq');
+    (await getDb().run("UPDATE api_keys SET last_checked_at = to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS')"));
 
     const clock = fakeClock();
     const checked: number[] = [];

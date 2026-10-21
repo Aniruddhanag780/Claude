@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { routeRequest, setRoutingStrategy } from '../../services/router.js';
 import * as ratelimit from '../../services/ratelimit.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Mock ratelimit to control quota availability
 vi.mock('../../services/ratelimit.js', async () => {
@@ -40,37 +41,37 @@ function restoreEnv() {
 }
 
 describe('Routing Key Exhaustion', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.DEV_MODE = 'true';
     process.env.NODE_ENV = 'test';
-    initDb(':memory:');
+    await initTestDb();
     // This suite asserts deterministic key/model fallback mechanics, which are
     // strategy-independent — pin the legacy priority order so the bandit's
     // score-based reordering (now the default) doesn't pick seeded catalog
     // models that share the 'google' platform.
-    setRoutingStrategy('priority');
+    await setRoutingStrategy('priority');
     const db = getDb();
     
     // Clear seeded DB data to isolate this test's routing logic
-    db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
-    db.prepare("DELETE FROM fallback_config").run();
-    db.prepare("DELETE FROM profile_models").run();
-    db.prepare("DELETE FROM models").run();
+    (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
+    (await db.run("DELETE FROM fallback_config"));
+    (await db.run("DELETE FROM profile_models"));
+    (await db.run("DELETE FROM models"));
 
     // Setup: 2 models (Pro and Flash)
     // Pro is higher priority (priority 1), Flash is lower (priority 2)
-    db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('google', 'gemini-1.5-pro', 'Pro', 1, 1, 1)").run();
-    db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('google', 'gemini-1.5-flash', 'Flash', 2, 2, 1)").run();
+    (await db.run("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('google', 'gemini-1.5-pro', 'Pro', 1, 1, 1) RETURNING id"));
+    (await db.run("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('google', 'gemini-1.5-flash', 'Flash', 2, 2, 1) RETURNING id"));
     
-    const proId = db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'").get().id;
-    const flashId = db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-flash'").get().id;
+    const proId = ((await db.get("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'"))).id;
+    const flashId = ((await db.get("SELECT id FROM models WHERE model_id = 'gemini-1.5-flash'"))).id;
     
-    db.prepare("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)").run(proId);
-    db.prepare("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 2, 1)").run(flashId);
+    (await db.run("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1) RETURNING id", [proId]));
+    (await db.run("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 2, 1) RETURNING id", [flashId]));
     
     // Setup: 2 keys for Google
-    db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('google', 'Key A', 'enc', 'iv', 'tag', 'healthy', 1)").run();
-    db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('google', 'Key B', 'enc', 'iv', 'tag', 'healthy', 1)").run();
+    (await db.run("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('google', 'Key A', 'enc', 'iv', 'tag', 'healthy', 1) RETURNING id"));
+    (await db.run("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('google', 'Key B', 'enc', 'iv', 'tag', 'healthy', 1) RETURNING id"));
 
     vi.clearAllMocks();
   });
@@ -79,9 +80,9 @@ describe('Routing Key Exhaustion', () => {
     restoreEnv();
   });
 
-  it('should skip exhausted Key B and use functional Key A for the same high-priority model', () => {
+  it('should skip exhausted Key B and use functional Key A for the same high-priority model', async () => {
     const db = getDb();
-    const keys = db.prepare("SELECT id, label FROM api_keys").all();
+    const keys = (await db.all("SELECT id, label FROM api_keys"));
     const keyA = keys.find(k => k.label === 'Key A');
     const keyB = keys.find(k => k.label === 'Key B');
 
@@ -96,7 +97,7 @@ describe('Routing Key Exhaustion', () => {
     (ratelimit.canUseTokens as any).mockReturnValue(true);
 
     // Act: Route request
-    const result = routeRequest(100);
+    const result = await routeRequest(100);
 
     // Assert: It should have picked the Pro model despite Key B being exhausted
     expect(result.modelId).toBe('gemini-1.5-pro');
@@ -106,10 +107,10 @@ describe('Routing Key Exhaustion', () => {
 
   it('should throw 429 when every key on every model is exhausted', () => {
     (ratelimit.canMakeRequest as any).mockReturnValue(false);
-    expect(() => routeRequest(100)).toThrow(/All models exhausted/);
+    expect(async () => await routeRequest(100)).toThrow(/All models exhausted/);
   });
 
-  it('should fall back to Flash when Pro is exhausted but Flash has quota', () => {
+  it('should fall back to Flash when Pro is exhausted but Flash has quota', async () => {
     (ratelimit.canMakeRequest as any).mockImplementation((_platform: string, modelId: string) => {
       if (modelId === 'gemini-1.5-pro') return false;
       if (modelId === 'gemini-1.5-flash') return true;
@@ -117,7 +118,7 @@ describe('Routing Key Exhaustion', () => {
     });
     (ratelimit.canUseTokens as any).mockReturnValue(true);
 
-    const result = routeRequest(100);
+    const result = await routeRequest(100);
     expect(result.modelId).toBe('gemini-1.5-flash');
   });
 
@@ -125,37 +126,37 @@ describe('Routing Key Exhaustion', () => {
   // of the request instead of burning one fallback attempt per key on the same
   // dead route. (PR #111, credits @barbotkonv.)
   describe('skipModels (model-level 404 skip)', () => {
-    it('skips every key of a skipped model and routes to the next model', () => {
+    it('skips every key of a skipped model and routes to the next model', async () => {
       const db = getDb();
-      const proId = db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'").get().id;
+      const proId = ((await db.get("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'"))).id;
 
       // Both keys have quota — without skipModels, Pro would be chosen.
       (ratelimit.canMakeRequest as any).mockReturnValue(true);
       (ratelimit.canUseTokens as any).mockReturnValue(true);
 
-      const result = routeRequest(100, undefined, undefined, false, false, new Set([proId]));
+      const result = await routeRequest(100, undefined, undefined, false, false, new Set([proId]));
       expect(result.modelId).toBe('gemini-1.5-flash');
     });
 
-    it('throws when every model is in skipModels', () => {
+    it('throws when every model is in skipModels', async () => {
       const db = getDb();
-      const ids = db.prepare('SELECT id FROM models WHERE enabled = 1').all().map((r: any) => r.id);
+      const ids = ((await db.all('SELECT id FROM models WHERE enabled = 1'))).map((r: any) => r.id);
 
       (ratelimit.canMakeRequest as any).mockReturnValue(true);
       (ratelimit.canUseTokens as any).mockReturnValue(true);
 
-      expect(() => routeRequest(100, undefined, undefined, false, false, new Set(ids))).toThrow();
+      expect(async () => await routeRequest(100, undefined, undefined, false, false, new Set(ids))).toThrow();
     });
 
-    it('overrides a sticky/preferred model that has been skipped', () => {
+    it('overrides a sticky/preferred model that has been skipped', async () => {
       const db = getDb();
-      const proId = db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'").get().id;
+      const proId = ((await db.get("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'"))).id;
 
       (ratelimit.canMakeRequest as any).mockReturnValue(true);
       (ratelimit.canUseTokens as any).mockReturnValue(true);
 
       // Sticky session prefers Pro, but Pro 404ed earlier in this request.
-      const result = routeRequest(100, undefined, proId, false, false, new Set([proId]));
+      const result = await routeRequest(100, undefined, proId, false, false, new Set([proId]));
       expect(result.modelId).toBe('gemini-1.5-flash');
     });
   });

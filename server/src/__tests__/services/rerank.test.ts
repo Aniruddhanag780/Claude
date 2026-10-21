@@ -36,6 +36,6 @@ describe('runRerank', () => {
 
   it('rejects an out-of-range index and reports chain exhaustion', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(ok([{ index: 9, relevance_score: 1 }]));
-    await expect(runRerank(undefined, 'q', ['a'])).rejects.toBeInstanceOf(RerankError);
+    await expect(await runRerank(undefined, 'q', ['a'])).rejects.toBeInstanceOf(RerankError);
   });
 });

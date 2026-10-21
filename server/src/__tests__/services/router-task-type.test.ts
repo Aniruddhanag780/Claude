@@ -2,9 +2,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   routeRequest, setRoutingStrategy, refreshStatsCache,
 } from '../../services/router.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { addToActiveChain } from '../helpers/chain.js';
 import * as ratelimit from '../../services/ratelimit.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 vi.mock('../../services/ratelimit.js', async () => {
   const actual = await vi.importActual('../../services/ratelimit.js');
@@ -26,46 +27,43 @@ const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 
 // Same seed shape as router-bandit.test.ts, plus a configurable speed_rank so
 // the two fixture models differ on BOTH axes (intelligence and speed).
-function addModel(opts: {
+async function addModel(opts: {
   platform: string; modelId: string; name: string;
   intelligenceRank: number; speedRank: number; sizeLabel: string; budget: string; priority: number;
 }): number {
   const db = getDb();
-  db.prepare(`
+  (await db.run(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, monthly_token_budget, enabled, supports_vision, supports_tools)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, 1)
-  `).run(opts.platform, opts.modelId, opts.name, opts.intelligenceRank, opts.speedRank, opts.sizeLabel, opts.budget);
-  const id = (db.prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
-    .get(opts.platform, opts.modelId) as { id: number }).id;
-  db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, opts.priority);
-  addToActiveChain(id, opts.priority);
-  db.prepare(`
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, 1) RETURNING id`, [opts.platform, opts.modelId, opts.name, opts.intelligenceRank, opts.speedRank, opts.sizeLabel, opts.budget]));
+  const id = ((await db.get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [opts.platform, opts.modelId])) as { id: number }).id;
+  (await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1) RETURNING id', [id, opts.priority]));
+  await addToActiveChain(id, opts.priority);
+  (await db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'k', 'enc', 'iv', 'tag', 'healthy', 1)
-  `).run(opts.platform);
+    VALUES (?, 'k', 'enc', 'iv', 'tag', 'healthy', 1) RETURNING id`, [opts.platform]));
   return id;
 }
 
-function addHistory(platform: string, modelId: string, opts: {
+async function addHistory(platform: string, modelId: string, opts: {
   successes: number; failures: number; outTokens?: number; latencyMs?: number; ttfbMs?: number | null;
 }) {
   const db = getDb();
-  const ins = db.prepare(`
-    INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
-    VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?)
-  `);
   for (let i = 0; i < opts.successes; i++) {
-    ins.run(platform, modelId, 'success', opts.outTokens ?? 100, opts.latencyMs ?? 1000, null, opts.ttfbMs ?? null);
+    (await db.run(`
+    INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
+    VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?) RETURNING id`, [platform, modelId, 'success', opts.outTokens ?? 100, opts.latencyMs ?? 1000, null, opts.ttfbMs ?? null]));
   }
   for (let i = 0; i < opts.failures; i++) {
-    ins.run(platform, modelId, 'error', 0, opts.latencyMs ?? 1000, 'boom', opts.ttfbMs ?? null);
+    (await db.run(`
+    INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
+    VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?) RETURNING id`, [platform, modelId, 'error', 0, opts.latencyMs ?? 1000, 'boom', opts.ttfbMs ?? null]));
   }
 }
 
-function pickCounts(runs: number, task?: 'code' | 'chat'): Record<string, number> {
+async function pickCounts(runs: number, task?: 'code' | 'chat'): Record<string, number> {
   const counts: Record<string, number> = {};
   for (let i = 0; i < runs; i++) {
-    const r = routeRequest(100, undefined, undefined, false, false, undefined, undefined, false, undefined, 0, task);
+    const r = await routeRequest(100, undefined, undefined, false, false, undefined, undefined, false, undefined, 0, task);
     counts[r.modelId] = (counts[r.modelId] ?? 0) + 1;
   }
   return counts;
@@ -84,18 +82,18 @@ const TASK_RUNS = 400;
 // intelligenceScore is min-max normalized across the chain, so with two models
 // it is always 1 vs 0, and the speed axis must out-weigh that for the chat
 // bias to flip the pick.
-function seedSmartVsFast() {
-  addModel({ platform: 'google', modelId: 'smart', name: 'Smart', intelligenceRank: 1, speedRank: 9, sizeLabel: 'Large', budget: '~50M', priority: 1 });
-  addModel({ platform: 'groq', modelId: 'fast', name: 'Fast', intelligenceRank: 2, speedRank: 1, sizeLabel: 'Large', budget: '~50M', priority: 2 });
+async function seedSmartVsFast() {
+  await addModel({ platform: 'google', modelId: 'smart', name: 'Smart', intelligenceRank: 1, speedRank: 9, sizeLabel: 'Large', budget: '~50M', priority: 1 });
+  await addModel({ platform: 'groq', modelId: 'fast', name: 'Fast', intelligenceRank: 2, speedRank: 1, sizeLabel: 'Large', budget: '~50M', priority: 2 });
   addHistory('google', 'smart', { successes: 100, failures: 0, outTokens: 1, latencyMs: 60000, ttfbMs: 4999 });
   addHistory('groq', 'fast', { successes: 100, failures: 0, outTokens: 10000, latencyMs: 100, ttfbMs: 10 });
 }
 
 describe('task-type-aware routing', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.DEV_MODE = 'true';
     process.env.NODE_ENV = 'test';
-    initDb(':memory:');
+    await initTestDb();
     getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
     vi.clearAllMocks();
     (ratelimit.canMakeRequest as any).mockReturnValue(true);
@@ -108,29 +106,29 @@ describe('task-type-aware routing', () => {
     if (ORIGINAL_NODE_ENV === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = ORIGINAL_NODE_ENV;
   });
 
-  it('is off by default: no task argument splits the two axes evenly', () => {
+  it('is off by default: no task argument splits the two axes evenly', async () => {
     seedSmartVsFast();
-    setRoutingStrategy('balanced');
-    refreshStatsCache(getDb(), true);
-    const counts = pickCounts(TASK_RUNS);
+    await setRoutingStrategy('balanced');
+    await refreshStatsCache(getDb(), true);
+    const counts = await pickCounts(TASK_RUNS);
     // Balanced weights (0.25/0.25) make A and B comparable; neither axis dominates.
     expect(counts['smart'] ?? 0).toBeGreaterThan(0);
     expect(counts['fast'] ?? 0).toBeGreaterThan(0);
   });
 
-  it('code tasks bias toward the smarter (slower) model', () => {
+  it('code tasks bias toward the smarter (slower) model', async () => {
     seedSmartVsFast();
-    setRoutingStrategy('balanced');
-    refreshStatsCache(getDb(), true);
-    const counts = pickCounts(TASK_RUNS, 'code');
+    await setRoutingStrategy('balanced');
+    await refreshStatsCache(getDb(), true);
+    const counts = await pickCounts(TASK_RUNS, 'code');
     expect(counts['smart'] ?? 0).toBeGreaterThan(counts['fast'] ?? 0);
   });
 
-  it('chat tasks bias toward the faster (weaker) model', () => {
+  it('chat tasks bias toward the faster (weaker) model', async () => {
     seedSmartVsFast();
-    setRoutingStrategy('balanced');
-    refreshStatsCache(getDb(), true);
-    const counts = pickCounts(TASK_RUNS, 'chat');
+    await setRoutingStrategy('balanced');
+    await refreshStatsCache(getDb(), true);
+    const counts = await pickCounts(TASK_RUNS, 'chat');
     expect(counts['fast'] ?? 0).toBeGreaterThan(counts['smart'] ?? 0);
   });
 
@@ -140,18 +138,18 @@ describe('task-type-aware routing', () => {
   // `reliable` and `custom` are the operator's explicit choice of where on the
   // axis to sit, so a per-request header does not get to rewrite them (#1127).
   // The other two exempt strategies are covered exactly in scoring.test.ts.
-  function seedSmartVsFlakyFast() {
-    addModel({ platform: 'google', modelId: 'smart', name: 'Smart', intelligenceRank: 1, speedRank: 9, sizeLabel: 'Large', budget: '~50M', priority: 1 });
-    addModel({ platform: 'groq', modelId: 'fast', name: 'Fast', intelligenceRank: 2, speedRank: 1, sizeLabel: 'Large', budget: '~50M', priority: 2 });
+  async function seedSmartVsFlakyFast() {
+    await addModel({ platform: 'google', modelId: 'smart', name: 'Smart', intelligenceRank: 1, speedRank: 9, sizeLabel: 'Large', budget: '~50M', priority: 1 });
+    await addModel({ platform: 'groq', modelId: 'fast', name: 'Fast', intelligenceRank: 2, speedRank: 1, sizeLabel: 'Large', budget: '~50M', priority: 2 });
     addHistory('google', 'smart', { successes: 100, failures: 0, outTokens: 1, latencyMs: 60000, ttfbMs: 4999 });
     addHistory('groq', 'fast', { successes: 50, failures: 50, outTokens: 10000, latencyMs: 100, ttfbMs: 10 });
   }
 
-  it('leaves the fastest preset alone on a code task', () => {
+  it('leaves the fastest preset alone on a code task', async () => {
     seedSmartVsFlakyFast();
-    setRoutingStrategy('fastest');
-    refreshStatsCache(getDb(), true);
-    const counts = pickCounts(TASK_RUNS, 'code');
+    await setRoutingStrategy('fastest');
+    await refreshStatsCache(getDb(), true);
+    const counts = await pickCounts(TASK_RUNS, 'code');
     expect(counts['fast'] ?? 0).toBeGreaterThan(counts['smart'] ?? 0);
   });
 });

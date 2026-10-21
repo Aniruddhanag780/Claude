@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { modelRetirementSignal } from '../../lib/error-classify.js';
 import {
   noteModelRetirementSignal,
@@ -8,6 +8,7 @@ import {
 } from '../../services/model-retirement.js';
 import { getCatalogModelTombstone, recordCatalogModelTombstone } from '../../services/model-state.js';
 import { applyCatalog } from '../../services/catalog-sync.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #634: NVIDIA retires a model upstream ("has reached its end of life"), and
 // every subsequent request burns a fallback slot on the corpse because nothing
@@ -18,32 +19,29 @@ import { applyCatalog } from '../../services/catalog-sync.js';
 const PLATFORM = 'groq';
 const MODEL_ID = 'eol-test-model';
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
-function seedModel(modelId = MODEL_ID): number {
+async function seedModel(modelId = MODEL_ID): number {
   const db = getDb();
-  db.prepare(`
+  (await db.run(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled, source)
     VALUES (?, ?, 'EOL Test', 50, 50, 1, 'catalog')
     ON CONFLICT(platform, model_id, endpoint_scope) DO UPDATE SET enabled = 1
-  `).run(PLATFORM, modelId);
-  const row = db.prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
-    .get(PLATFORM, modelId) as { id: number };
-  db.prepare(`
+  `, [PLATFORM, modelId]));
+  const row = (await db.get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [PLATFORM, modelId])) as { id: number };
+  (await db.run(`
     INSERT INTO fallback_config (model_db_id, priority, enabled)
     VALUES (?, 999, 1)
     ON CONFLICT(model_db_id) DO UPDATE SET enabled = 1
-  `).run(row.id);
+  `, [row.id]));
   return row.id;
 }
 
-function isRoutable(modelDbId: number): boolean {
-  const row = getDb()
-    .prepare('SELECT enabled FROM fallback_config WHERE model_db_id = ?')
-    .get(modelDbId) as { enabled: number } | undefined;
+async function isRoutable(modelDbId: number): boolean {
+  const row = (await getDb().get('SELECT enabled FROM fallback_config WHERE model_db_id = ?', [modelDbId])) as { enabled: number } | undefined;
   return row?.enabled === 1;
 }
 
@@ -136,72 +134,71 @@ describe('modelRetirementSignal (conservative end-of-life detection — #634)', 
 });
 
 describe('noteModelRetirementSignal (auto-disable with a reason — #634)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     resetModelRetirementObservations();
-    getDb().prepare("DELETE FROM catalog_model_tombstones WHERE model_id LIKE 'eol-test-%'").run();
+    (await getDb().run("DELETE FROM catalog_model_tombstones WHERE model_id LIKE 'eol-test-%'"));
   });
 
-  it('auto-disables the model on a single explicit 410 end-of-life response', () => {
-    const id = seedModel();
-    expect(noteModelRetirementSignal(routeFor(id), NVIDIA_EOL, {})).toBe(true);
-    expect(isRoutable(id)).toBe(false);
+  it('auto-disables the model on a single explicit 410 end-of-life response', async () => {
+    const id = await seedModel();
+    expect(await noteModelRetirementSignal(routeFor(id), NVIDIA_EOL, {})).toBe(true);
+    expect(await isRoutable(id)).toBe(false);
 
-    const tombstone = getCatalogModelTombstone(getDb(), 'chat', PLATFORM, MODEL_ID);
+    const tombstone = await getCatalogModelTombstone(getDb(), 'chat', PLATFORM, MODEL_ID);
     expect(tombstone?.source).toBe('upstream_eol');
     expect(tombstone?.reason).toContain('end of life');
   });
 
-  it('leaves a transient 404 alone no matter how often it repeats', () => {
-    const id = seedModel();
+  it('leaves a transient 404 alone no matter how often it repeats', async () => {
+    const id = await seedModel();
     for (let i = 0; i < 5; i++) {
-      expect(noteModelRetirementSignal(routeFor(id), TRANSIENT_404, {})).toBe(false);
+      expect(await noteModelRetirementSignal(routeFor(id), TRANSIENT_404, {})).toBe(false);
     }
-    expect(isRoutable(id)).toBe(true);
-    expect(getCatalogModelTombstone(getDb(), 'chat', PLATFORM, MODEL_ID)).toBeUndefined();
+    expect(await isRoutable(id)).toBe(true);
+    expect(await getCatalogModelTombstone(getDb(), 'chat', PLATFORM, MODEL_ID)).toBeUndefined();
   });
 
-  it('requires corroboration from distinct requests before disabling on a probable 404', () => {
-    const id = seedModel();
+  it('requires corroboration from distinct requests before disabling on a probable 404', async () => {
+    const id = await seedModel();
     const err = Object.assign(new Error('API error 404: this model is no longer available'), { status: 404 });
 
     expect(RETIREMENT_CONFIRMATIONS_REQUIRED).toBeGreaterThanOrEqual(2);
-    expect(noteModelRetirementSignal(routeFor(id), err, {})).toBe(false);
-    expect(isRoutable(id)).toBe(true);
-    expect(noteModelRetirementSignal(routeFor(id), err, {})).toBe(true);
-    expect(isRoutable(id)).toBe(false);
+    expect(await noteModelRetirementSignal(routeFor(id), err, {})).toBe(false);
+    expect(await isRoutable(id)).toBe(true);
+    expect(await noteModelRetirementSignal(routeFor(id), err, {})).toBe(true);
+    expect(await isRoutable(id)).toBe(false);
   });
 
-  it('does not let one flaky request corroborate itself across sibling keys', () => {
-    const id = seedModel();
+  it('does not let one flaky request corroborate itself across sibling keys', async () => {
+    const id = await seedModel();
     const err = Object.assign(new Error('API error 404: this model is no longer available'), { status: 404 });
     const oneRequest = {};
 
     for (let i = 0; i < 4; i++) {
-      expect(noteModelRetirementSignal(routeFor(id), err, oneRequest)).toBe(false);
+      expect(await noteModelRetirementSignal(routeFor(id), err, oneRequest)).toBe(false);
     }
-    expect(isRoutable(id)).toBe(true);
+    expect(await isRoutable(id)).toBe(true);
   });
 
-  it('never touches user-added models (they are not catalog state)', () => {
+  it('never touches user-added models (they are not catalog state)', async () => {
     const db = getDb();
-    db.prepare(`
+    (await db.run(`
       INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled, source)
       VALUES ('custom', 'eol-test-custom', 'Custom EOL', 50, 50, 1, 'user')
       ON CONFLICT(platform, model_id, endpoint_scope) DO UPDATE SET enabled = 1
-    `).run();
-    const row = db.prepare("SELECT id FROM models WHERE platform = 'custom' AND model_id = 'eol-test-custom'")
-      .get() as { id: number };
-    db.prepare(`
+    `));
+    const row = (await db.get("SELECT id FROM models WHERE platform = 'custom' AND model_id = 'eol-test-custom'")) as { id: number };
+    (await db.run(`
       INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 998, 1)
       ON CONFLICT(model_db_id) DO UPDATE SET enabled = 1
-    `).run(row.id);
+    `, [row.id]));
 
-    expect(noteModelRetirementSignal(
+    expect(await noteModelRetirementSignal(
       { modelDbId: row.id, platform: 'custom', modelId: 'eol-test-custom' },
       NVIDIA_EOL,
       {},
     )).toBe(false);
-    expect(isRoutable(row.id)).toBe(true);
+    expect(await isRoutable(row.id)).toBe(true);
   });
 });
 
@@ -229,25 +226,23 @@ describe('catalog sync vs. upstream retirement (#634)', () => {
     } as unknown as Parameters<typeof applyCatalog>[1];
   }
 
-  it('re-enables an auto-retired model when a later catalog still lists it', () => {
+  it('re-enables an auto-retired model when a later catalog still lists it', async () => {
     resetModelRetirementObservations();
-    const id = seedModel('eol-test-relisted');
-    noteModelRetirementSignal(routeFor(id, 'eol-test-relisted'), NVIDIA_EOL, {});
-    expect(isRoutable(id)).toBe(false);
+    const id = await seedModel('eol-test-relisted');
+    await noteModelRetirementSignal(routeFor(id, 'eol-test-relisted'), NVIDIA_EOL, {});
+    expect(await isRoutable(id)).toBe(false);
 
-    applyCatalog(getDb(), catalogWith('eol-test-relisted', true));
+    await applyCatalog(getDb(), catalogWith('eol-test-relisted', true));
 
-    expect(isRoutable(id)).toBe(true);
-    expect(getCatalogModelTombstone(getDb(), 'chat', PLATFORM, 'eol-test-relisted')).toBeUndefined();
-    expect(getDb().prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
-      .get(PLATFORM, 'eol-test-relisted')).toBeDefined();
+    expect(await isRoutable(id)).toBe(true);
+    expect(await getCatalogModelTombstone(getDb(), 'chat', PLATFORM, 'eol-test-relisted')).toBeUndefined();
+    expect((await getDb().get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [PLATFORM, 'eol-test-relisted']))).toBeDefined();
   });
 
-  it('still deletes models the USER tombstoned (unchanged behavior)', () => {
-    seedModel('eol-test-user-deleted');
-    recordCatalogModelTombstone(getDb(), 'chat', PLATFORM, 'eol-test-user-deleted');
-    applyCatalog(getDb(), catalogWith('eol-test-user-deleted', true));
-    expect(getDb().prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
-      .get(PLATFORM, 'eol-test-user-deleted')).toBeUndefined();
+  it('still deletes models the USER tombstoned (unchanged behavior)', async () => {
+    await seedModel('eol-test-user-deleted');
+    await recordCatalogModelTombstone(getDb(), 'chat', PLATFORM, 'eol-test-user-deleted');
+    await applyCatalog(getDb(), catalogWith('eol-test-user-deleted', true));
+    expect((await getDb().get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [PLATFORM, 'eol-test-user-deleted']))).toBeUndefined();
   });
 });

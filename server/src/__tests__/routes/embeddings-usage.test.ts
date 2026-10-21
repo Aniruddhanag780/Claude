@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // GET /api/embeddings/usage backs the month-to-date card on the Embeddings tab.
 // The response gained `platform`, `quotaLabel` and the two totals; the three
@@ -24,26 +25,25 @@ async function get(app: Express, path: string) {
   return { status: res.status, body: data };
 }
 
-function seedFamily(family: string, platform: string, modelId: string, priority: number, quota: string, enabled = 1) {
-  getDb().prepare(`
+async function seedFamily(family: string, platform: string, modelId: string, priority: number, quota: string, enabled = 1) {
+  (await getDb().run(`
     INSERT INTO embedding_models (family, platform, model_id, display_name, dimensions, priority, enabled, quota_label)
-    VALUES (?, ?, ?, ?, 1024, ?, ?, ?)
-  `).run(family, platform, modelId, modelId, priority, enabled, quota);
+    VALUES (?, ?, ?, ?, 1024, ?, ?, ?) RETURNING id`, [family, platform, modelId, modelId, priority, enabled, quota]));
 }
 
 describe('GET /api/embeddings/usage', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    getDb().prepare('DELETE FROM embedding_models').run();
+    await initTestDb();
+    (await getDb().run('DELETE FROM embedding_models'));
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   it('keeps the original per-family fields', async () => {
-    seedFamily('bge-m3', 'cloudflare', '@cf/baai/bge-m3', 1, '10K neurons/day (shared)');
+    await seedFamily('bge-m3', 'cloudflare', '@cf/baai/bge-m3', 1, '10K neurons/day (shared)');
 
     const { status, body } = await get(app, '/api/embeddings/usage');
     expect(status).toBe(200);
@@ -56,8 +56,8 @@ describe('GET /api/embeddings/usage', () => {
 
   it('reports the highest-priority enabled provider for the legend', async () => {
     // Priority 2 is seeded first on purpose: order must come from priority.
-    seedFamily('bge-m3', 'huggingface', 'BAAI/bge-m3', 2, '$0.10/mo credits');
-    seedFamily('bge-m3', 'cloudflare', '@cf/baai/bge-m3', 1, '10K neurons/day (shared)');
+    await seedFamily('bge-m3', 'huggingface', 'BAAI/bge-m3', 2, '$0.10/mo credits');
+    await seedFamily('bge-m3', 'cloudflare', '@cf/baai/bge-m3', 1, '10K neurons/day (shared)');
 
     const { body } = await get(app, '/api/embeddings/usage');
     const f = body.families.find((x: any) => x.family === 'bge-m3');
@@ -66,14 +66,13 @@ describe('GET /api/embeddings/usage', () => {
   });
 
   it('sums tokens this month and totals across families', async () => {
-    seedFamily('bge-m3', 'cloudflare', '@cf/baai/bge-m3', 1, '10K neurons/day (shared)');
-    seedFamily('embed-v4.0', 'cohere', 'embed-v4.0', 1, '1K calls/mo');
-    getDb().prepare(`
+    await seedFamily('bge-m3', 'cloudflare', '@cf/baai/bge-m3', 1, '10K neurons/day (shared)');
+    await seedFamily('embed-v4.0', 'cohere', 'embed-v4.0', 1, '1K calls/mo');
+    (await getDb().run(`
       INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, created_at, request_type)
-      VALUES ('cloudflare', '@cf/baai/bge-m3', 'success', 120, 0, 10, datetime('now'), 'embedding'),
-             ('cloudflare', '@cf/baai/bge-m3', 'success', 80, 0, 10, datetime('now'), 'embedding'),
-             ('cohere', 'embed-v4.0', 'success', 50, 0, 10, datetime('now'), 'embedding')
-    `).run();
+      VALUES ('cloudflare', '@cf/baai/bge-m3', 'success', 120, 0, 10, to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'), 'embedding'),
+             ('cloudflare', '@cf/baai/bge-m3', 'success', 80, 0, 10, to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'), 'embedding'),
+             ('cohere', 'embed-v4.0', 'success', 50, 0, 10, to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'), 'embedding') RETURNING id`));
 
     const { body } = await get(app, '/api/embeddings/usage');
     expect(body.totalTokensMonth).toBe(250);
@@ -84,18 +83,17 @@ describe('GET /api/embeddings/usage', () => {
   });
 
   it('ignores chat traffic on the same platform and model id', async () => {
-    seedFamily('bge-m3', 'cloudflare', '@cf/baai/bge-m3', 1, '10K neurons/day (shared)');
-    getDb().prepare(`
+    await seedFamily('bge-m3', 'cloudflare', '@cf/baai/bge-m3', 1, '10K neurons/day (shared)');
+    (await getDb().run(`
       INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, created_at, request_type)
-      VALUES ('cloudflare', '@cf/baai/bge-m3', 'success', 999, 0, 10, datetime('now'), 'chat')
-    `).run();
+      VALUES ('cloudflare', '@cf/baai/bge-m3', 'success', 999, 0, 10, to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'), 'chat') RETURNING id`));
 
     const { body } = await get(app, '/api/embeddings/usage');
     expect(body.totalTokensMonth).toBe(0);
   });
 
   it('exposes no budget field — quota labels are not token budgets', async () => {
-    seedFamily('bge-m3', 'cloudflare', '@cf/baai/bge-m3', 1, '10K neurons/day (shared)');
+    await seedFamily('bge-m3', 'cloudflare', '@cf/baai/bge-m3', 1, '10K neurons/day (shared)');
 
     const { body } = await get(app, '/api/embeddings/usage');
     expect(body).not.toHaveProperty('totalBudget');

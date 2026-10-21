@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { clearAllCooldowns } from '../../services/ratelimit.js';
 import {
@@ -14,29 +14,27 @@ import {
 import { SEARCH_PLATFORMS as SHARED_SEARCH_PLATFORMS } from '../../../../shared/types.js';
 import { SEARCH_PLATFORMS } from '../../lib/search-platforms.js';
 import { seedSearchEngines } from '../helpers/search-engines.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const realFetch = globalThis.fetch;
 
-function addKey(platform: string, raw = `${platform}-test-key`): number {
+async function addKey(platform: string, raw = `${platform}-test-key`): number {
   const { encrypted, iv, authTag } = encrypt(raw);
-  const row = getDb().prepare(`
+  const row = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'test', ?, ?, ?, 'healthy', 1)
-  `).run(platform, encrypted, iv, authTag);
+    VALUES (?, 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, encrypted, iv, authTag]));
   return Number(row.lastInsertRowid);
 }
 
-function addCustomRelay(baseUrl: string, engineId = 'my-relay'): number {
+async function addCustomRelay(baseUrl: string, engineId = 'my-relay'): number {
   const { encrypted, iv, authTag } = encrypt('relay-key');
-  const key = getDb().prepare(`
+  const key = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
-    VALUES ('custom', 'relay', ?, ?, ?, 'healthy', 1, ?)
-  `).run(encrypted, iv, authTag, baseUrl);
+    VALUES ('custom', 'relay', ?, ?, ?, 'healthy', 1, ?) RETURNING id`, [encrypted, iv, authTag, baseUrl]));
   const keyId = Number(key.lastInsertRowid);
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, key_id)
-    VALUES ('custom', ?, ?, 'search', 99, 1, 'custom endpoint', ?)
-  `).run(engineId, engineId, keyId);
+    VALUES ('custom', ?, ?, 'search', 99, 1, 'custom endpoint', ?) RETURNING id`, [engineId, engineId, keyId]));
   return keyId;
 }
 
@@ -53,8 +51,8 @@ function mockFetch(handler: (url: string, init: RequestInit) => Response | Promi
 const calls = (fn: ReturnType<typeof mockFetch>) => fn.mock.calls as unknown as Call[];
 const bodyOf = (call: Call) => JSON.parse(call[1].body as string);
 
-function logRows() {
-  return getDb().prepare('SELECT engine_id, platform, status, result_count FROM search_requests ORDER BY id').all() as
+async function logRows() {
+  return (await getDb().all('SELECT engine_id, platform, status, result_count FROM search_requests ORDER BY id')) as
     Array<{ engine_id: string; platform: string; status: string; result_count: number }>;
 }
 
@@ -65,11 +63,11 @@ describe('search platforms', () => {
 });
 
 describe('search service', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    seedSearchEngines();
-    clearAllCooldowns(Number.MAX_SAFE_INTEGER);
+    await initTestDb();
+    await seedSearchEngines();
+    await clearAllCooldowns(Number.MAX_SAFE_INTEGER);
   });
 
   afterEach(() => {
@@ -77,17 +75,17 @@ describe('search service', () => {
     vi.restoreAllMocks();
   });
 
-  it('lists the catalog engines in priority order', () => {
-    expect(listSearchEngines().map(e => e.engineId)).toEqual(['tavily-search', 'exa-search', 'firecrawl-search', 'linkup-search']);
-    expect(searchAvailable()).toBe(false);
+  it('lists the catalog engines in priority order', async () => {
+    expect((await listSearchEngines()).map(e => e.engineId)).toEqual(['tavily-search', 'exa-search', 'firecrawl-search', 'linkup-search']);
+    expect(await searchAvailable()).toBe(false);
   });
 
   it('answers 503 no_search_keys when no engine has a key', async () => {
-    await expect(runSearch('q')).rejects.toMatchObject({ status: 503, code: 'no_search_keys' });
+    await expect(await runSearch('q')).rejects.toMatchObject({ status: 503, code: 'no_search_keys' });
   });
 
   it('skips engines without keys and maps Exa hits (text → content, rank scores)', async () => {
-    addKey('exa');
+    await addKey('exa');
     const fn = mockFetch(() => json({
       results: [
         { title: 'A', url: 'https://a', text: 'alpha' },
@@ -105,11 +103,11 @@ describe('search service', () => {
       { title: 'A', url: 'https://a', content: 'alpha', score: 1 },
       { title: 'B', url: 'https://b', content: 'beta', score: 0.5 },
     ]);
-    expect(logRows()).toEqual([{ engine_id: 'exa-search', platform: 'exa', status: 'ok', result_count: 2 }]);
+    expect(await logRows()).toEqual([{ engine_id: 'exa-search', platform: 'exa', status: 'ok', result_count: 2 }]);
   });
 
   it('passes Tavily topic/answer through and keeps its scores', async () => {
-    addKey('tavily');
+    await addKey('tavily');
     const fn = mockFetch(() => json({ answer: '42', results: [{ title: 'T', url: 'https://t', content: 'c', score: 0.83 }] }));
     const out = await runSearch('q', { includeAnswer: true, topic: 'general' });
     expect(calls(fn)[0][0]).toBe('https://api.tavily.com/search');
@@ -119,14 +117,14 @@ describe('search service', () => {
   });
 
   it('maps Firecrawl news hits and Linkup sourced answers', async () => {
-    addKey('firecrawl');
+    await addKey('firecrawl');
     let fn = mockFetch(() => json({ success: true, data: { news: [{ title: 'N', url: 'https://n', snippet: 'fresh' }] } }));
     let out = await runSearch('q', { topic: 'news' });
     expect(bodyOf(calls(fn)[0])).toMatchObject({ query: 'q', limit: 5, sources: ['news'] });
     expect(out.results).toEqual([{ title: 'N', url: 'https://n', content: 'fresh', score: 1 }]);
 
-    updateSearchEngine(listSearchEngines().find(e => e.engineId === 'firecrawl-search')!.id, { enabled: false });
-    addKey('linkup');
+    await updateSearchEngine((await listSearchEngines()).find(e => e.engineId === 'firecrawl-search')!.id, { enabled: false });
+    await addKey('linkup');
     fn = mockFetch(() => json({ answer: 'yes', sources: [{ name: 'S', url: 'https://s', snippet: 'src' }] }));
     out = await runSearch('q', { includeAnswer: true });
     expect(calls(fn)[0][0]).toBe('https://api.linkup.so/v1/search');
@@ -135,11 +133,10 @@ describe('search service', () => {
   });
 
   describe('Parallel (keyless)', () => {
-    function seedParallel(): void {
-      getDb().prepare(`
+    async function seedParallel(): void {
+      (await getDb().run(`
         INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
-        VALUES ('parallel', 'parallel-search', 'Parallel Search', 'search', 4, 1, 'Free, no key needed', '{}')
-      `).run();
+        VALUES ('parallel', 'parallel-search', 'Parallel Search', 'search', 4, 1, 'Free, no key needed', '{}') RETURNING id`));
     }
     const mcpReply = (payload: unknown) => ({
       jsonrpc: '2.0',
@@ -153,9 +150,9 @@ describe('search service', () => {
     ] };
 
     it('searches anonymously over MCP with the stored sentinel and maps excerpts', async () => {
-      seedParallel();
-      addKey('parallel', 'no-key');
-      expect(searchAvailable()).toBe(true);
+      await seedParallel();
+      await addKey('parallel', 'no-key');
+      expect(await searchAvailable()).toBe(true);
       const fn = mockFetch(() => json(mcpReply(hits)));
       const out = await runSearch('node version');
       const [url, init] = calls(fn)[0];
@@ -172,8 +169,8 @@ describe('search service', () => {
     });
 
     it('reads an MCP reply sent as an event stream', async () => {
-      seedParallel();
-      addKey('parallel', 'no-key');
+      await seedParallel();
+      await addKey('parallel', 'no-key');
       mockFetch(() => new Response(`event: message\ndata: ${JSON.stringify(mcpReply(hits))}\n\n`, {
         status: 200,
         headers: { 'content-type': 'text/event-stream' },
@@ -183,8 +180,8 @@ describe('search service', () => {
     });
 
     it('uses the REST API with x-api-key when a real key is stored', async () => {
-      seedParallel();
-      addKey('parallel', 'real-parallel-key');
+      await seedParallel();
+      await addKey('parallel', 'real-parallel-key');
       const fn = mockFetch(() => json(hits));
       const out = await runSearch('q', { maxResults: 1 });
       const [url, init] = calls(fn)[0];
@@ -195,18 +192,18 @@ describe('search service', () => {
     });
 
     it('turns an MCP rate-limit tool error into a retryable 429', async () => {
-      seedParallel();
-      addKey('parallel', 'no-key');
+      await seedParallel();
+      await addKey('parallel', 'no-key');
       mockFetch(() => json({ jsonrpc: '2.0', id: 1, result: { isError: true, content: [{ type: 'text', text: 'Rate limit exceeded for free tier' }] } }));
-      await expect(runSearch('q')).rejects.toMatchObject({ status: 429 });
-      expect(logRows()).toEqual([expect.objectContaining({ platform: 'parallel', status: 'error' })]);
+      await expect(await runSearch('q')).rejects.toMatchObject({ status: 429 });
+      expect(await logRows()).toEqual([expect.objectContaining({ platform: 'parallel', status: 'error' })]);
     });
 
     it('fails over to the next engine when the MCP call errors', async () => {
-      seedParallel();
-      addKey('parallel', 'no-key');
-      addKey('tavily');
-      updateSearchEngine(listSearchEngines().find(e => e.engineId === 'parallel-search')!.id, { priority: 0 });
+      await seedParallel();
+      await addKey('parallel', 'no-key');
+      await addKey('tavily');
+      await updateSearchEngine((await listSearchEngines()).find(e => e.engineId === 'parallel-search')!.id, { priority: 0 });
       mockFetch(url => url.startsWith('https://search.parallel.ai')
         ? json({ jsonrpc: '2.0', id: 1, error: { code: -32603, message: 'internal error' } })
         : json({ results: [{ title: 'T', url: 'https://t', content: 'c' }] }));
@@ -216,20 +213,20 @@ describe('search service', () => {
   });
 
   it('tries a custom relay before the catalog engines', async () => {
-    addKey('tavily');
-    addCustomRelay('https://relay.example/v1');
+    await addKey('tavily');
+    await addCustomRelay('https://relay.example/v1');
     const fn = mockFetch(url => url.startsWith('https://relay.example')
       ? json({ error: 'down' }, 500)
       : json({ results: [{ title: 'T', url: 'https://t', content: 'c', score: 1 }] }));
     const out = await runSearch('q');
     expect(calls(fn).map(c => c[0])).toEqual(['https://relay.example/v1/search', 'https://api.tavily.com/search']);
     expect(out.provider).toBe('tavily');
-    expect(logRows().map(r => `${r.platform}:${r.status}`)).toEqual(['custom:error', 'tavily:ok']);
+    expect(await logRows().map(r => `${r.platform}:${r.status}`)).toEqual(['custom:error', 'tavily:ok']);
   });
 
   it('cools a rate-limited key down and fails over to the next engine', async () => {
-    addKey('tavily');
-    addKey('exa');
+    await addKey('tavily');
+    await addKey('exa');
     const fn = mockFetch(url => url.includes('tavily')
       ? json({ detail: 'slow down' }, 429, { 'retry-after': '120' })
       : json({ results: [{ title: 'E', url: 'https://e', text: 'x' }] }));
@@ -240,8 +237,8 @@ describe('search service', () => {
   });
 
   it('tries every key of an engine before moving on, and benches spent credits', async () => {
-    addKey('tavily', 'spent');
-    addKey('tavily', 'fresh');
+    await addKey('tavily', 'spent');
+    await addKey('tavily', 'fresh');
     const fn = mockFetch((_url, init) => new Headers(init.headers).get('Authorization') === 'Bearer spent'
       ? json({ detail: 'plan limit' }, 432)
       : json({ results: [{ title: 'T', url: 'https://t', content: 'c' }] }));
@@ -255,76 +252,75 @@ describe('search service', () => {
   });
 
   it('returns 429 with the soonest Retry-After when every engine is rate limited', async () => {
-    addKey('tavily');
-    addKey('exa');
+    await addKey('tavily');
+    await addKey('exa');
     mockFetch(url => json({}, 429, { 'retry-after': url.includes('exa') ? '30' : '90' }));
-    const err = await runSearch('q').catch(e => e) as SearchError;
+    const err = await (await runSearch('q')).catch(e => e) as SearchError;
     expect(err).toBeInstanceOf(SearchError);
     expect(err.status).toBe(429);
     expect(err.retryAfterMs).toBe(30_000);
   });
 
   it('reads a back-off stated in the error body when there is no header', async () => {
-    addKey('tavily');
+    await addKey('tavily');
     // Tavily states its cap in prose; Exa in a RetryInfo-shaped field. With no
     // Retry-After header, the chain used to fall back to the 60s heuristic.
     mockFetch(() => new Response('too many requests, try again in 15 seconds', { status: 429 }));
-    const err = await runSearch('q').catch(e => e) as SearchError;
+    const err = await (await runSearch('q')).catch(e => e) as SearchError;
     expect(err).toBeInstanceOf(SearchError);
     expect(err.status).toBe(429);
     expect(err.retryAfterMs).toBe(15_000);
   });
 
   it('reports a provider 401 as a 502, never as the caller’s auth failure', async () => {
-    addKey('tavily');
+    await addKey('tavily');
     mockFetch(() => json({ detail: 'bad key' }, 401));
-    await expect(runSearch('q')).rejects.toMatchObject({ status: 502 });
+    await expect(await runSearch('q')).rejects.toMatchObject({ status: 502 });
     // The rejected key is benched, so the next search is a retryable 429.
-    await expect(runSearch('q')).rejects.toMatchObject({ status: 429, code: 'search_keys_cooling_down' });
+    await expect(await runSearch('q')).rejects.toMatchObject({ status: 429, code: 'search_keys_cooling_down' });
   });
 
   it('pins an engine by id and rejects unknown or disabled ones', async () => {
-    addKey('tavily');
-    addKey('exa');
+    await addKey('tavily');
+    await addKey('exa');
     const fn = mockFetch(() => json({ results: [{ title: 'E', url: 'https://e', text: 'x' }] }));
     expect((await runSearch('q', { engine: 'exa-search' })).engine).toBe('exa-search');
     expect(calls(fn)).toHaveLength(1);
-    await expect(runSearch('q', { engine: 'nope' })).rejects.toMatchObject({ status: 400 });
-    updateSearchEngine(listSearchEngines().find(e => e.engineId === 'exa-search')!.id, { enabled: false });
-    await expect(runSearch('q', { engine: 'exa-search' })).rejects.toMatchObject({ status: 400 });
+    await expect(await runSearch('q', { engine: 'nope' })).rejects.toMatchObject({ status: 400 });
+    await updateSearchEngine((await listSearchEngines()).find(e => e.engineId === 'exa-search')!.id, { enabled: false });
+    await expect(await runSearch('q', { engine: 'exa-search' })).rejects.toMatchObject({ status: 400 });
   });
 
   it('reorders engines locally and lists key and usage counts', async () => {
-    addKey('linkup');
-    const linkup = listSearchEngines().find(e => e.engineId === 'linkup-search')!;
-    expect(updateSearchEngine(linkup.id, { priority: 0 })).toBe(true);
-    const order = listSearchEngines();
+    await addKey('linkup');
+    const linkup = (await listSearchEngines()).find(e => e.engineId === 'linkup-search')!;
+    expect(await updateSearchEngine(linkup.id, { priority: 0 })).toBe(true);
+    const order = await listSearchEngines();
     expect(order.map(e => e.engineId)).toEqual(['linkup-search', 'tavily-search', 'exa-search', 'firecrawl-search']);
     expect(order.map(e => e.priority)).toEqual([0, 1, 2, 3]);
     expect(order[0]).toMatchObject({ keyCount: 1, healthyKeyCount: 1, searchesThisMonth: 0, isCustom: false });
 
     mockFetch(() => json({ results: [{ type: 'text', name: 'L', url: 'https://l', content: 'c' }] }));
     await runSearch('q');
-    expect(listSearchEngines()[0].searchesThisMonth).toBe(1);
-    expect(updateSearchEngine(999_999, { enabled: false })).toBe(false);
+    expect(await listSearchEngines()[0].searchesThisMonth).toBe(1);
+    expect(await updateSearchEngine(999_999, { enabled: false })).toBe(false);
   });
 
-  it('derives freeFrom 30 days after premiumSince', () => {
-    getDb().prepare(`UPDATE media_models SET meta_json = ? WHERE model_id = 'exa-search'`)
-      .run(JSON.stringify({ premiumSince: '2026-10-13T00:00:00.000Z' }));
-    const exa = listSearchEngines().find(e => e.engineId === 'exa-search')!;
+  it('derives freeFrom 30 days after premiumSince', async () => {
+    (await getDb().run(`UPDATE media_models SET meta_json = ? WHERE model_id = 'exa-search'`, [JSON.stringify({ premiumSince: '2026-10-13T00:00:00.000Z' })]));
+    const exa = (await listSearchEngines()).find(e => e.engineId === 'exa-search')!;
     expect(exa.freeFrom).toBe('2026-11-12T00:00:00.000Z');
   });
 
   it('summarises searches per engine and per day', async () => {
-    addKey('tavily');
-    addKey('exa');
+    await addKey('tavily');
+    await addKey('exa');
     mockFetch(url => url.includes('tavily')
       ? json({}, 500)
       : json({ results: [{ title: 'E', url: 'https://e', text: 'x' }] }));
     await runSearch('a');
     await runSearch('b');
-    const stats = searchAnalytics('7d');
+    const stats = await searchAnalytics('7d');
     expect(stats.total).toBe(2);
     expect(stats.today).toBe(2);
     expect(stats.successRate).toBe(50);

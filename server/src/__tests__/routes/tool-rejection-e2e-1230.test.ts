@@ -3,12 +3,13 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { setRoutingStrategy, setExploreEnabled } from '../../services/router.js';
 import { resetToolCapability } from '../../lib/tool-capability.js';
 import { clearCooldownsForKey } from '../../services/ratelimit.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { addToActiveChain } from '../helpers/chain.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #1230 end to end, against two REAL local relays. `bad` answers every request
 // that carries `tools` with a 400 (but serves plain chat); `good` serves
@@ -72,34 +73,34 @@ describe('a relay that rejects tool calls stops costing every tool request a hop
   // sticky-session pin nor the short transient bench on `bad` can explain where
   // a request lands: only the chain order and the tool deferral can.
   let turn = 0;
-  const chat = (withTools: boolean) => {
-    for (const k of getDb().prepare('SELECT id FROM api_keys').all() as { id: number }[]) clearCooldownsForKey(k.id);
+  const chat = async (withTools: boolean) => {
+    for (const k of (await getDb().all('SELECT id FROM api_keys')) as { id: number }[]) await clearCooldownsForKey(k.id);
     return call('/v1/chat/completions', {
       model: 'auto',
       messages: [{ role: 'user', content: `question ${++turn}: what time is it?` }],
       ...(withTools ? { tools: TOOLS } : {}),
-    }, getUnifiedApiKey());
+    }, await getUnifiedApiKey());
   };
 
   beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     resetToolCapability();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
     bad = await startRelay(true);
     good = await startRelay(false);
     // Only the two relays are routable: no other platform has a key.
     expect((await call('/api/keys/custom', { baseUrl: bad.url, model: 'bad-model', apiKey: 'k1', label: 'Bad relay' }, dashToken)).status).toBe(201);
     expect((await call('/api/keys/custom', { baseUrl: good.url, model: 'good-model', apiKey: 'k2', label: 'Good relay' }, dashToken)).status).toBe(201);
-    setRoutingStrategy('priority');
-    setExploreEnabled(false);
-    const id = (m: string) => (getDb().prepare("SELECT id FROM models WHERE platform = 'custom' AND model_id = ?").get(m) as { id: number }).id;
-    getDb().prepare('UPDATE fallback_config SET priority = priority + 1000').run();
-    getDb().prepare('UPDATE profile_models SET priority = priority + 1000').run();
+    await setRoutingStrategy('priority');
+    await setExploreEnabled(false);
+    const id = async (m: string) => ((await getDb().get("SELECT id FROM models WHERE platform = 'custom' AND model_id = ?", [m])) as { id: number }).id;
+    (await getDb().run('UPDATE fallback_config SET priority = priority + 1000'));
+    (await getDb().run('UPDATE profile_models SET priority = priority + 1000'));
     for (const [m, p] of [['bad-model', 1], ['good-model', 2]] as const) {
-      getDb().prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?').run(p, id(m));
-      addToActiveChain(id(m), p);
+      (await getDb().run('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?', [p, await id(m)]));
+      await addToActiveChain(await id(m), p);
     }
   });
 

@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 import { clearReasoningMemory } from '../../routes/proxy.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -28,24 +29,24 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, body: json, headers: res.headers, raw: data };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 describe('Proxy tool-calling support', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
 
     clearReasoningMemory();
 
@@ -115,7 +116,7 @@ describe('Proxy tool-calling support', () => {
         },
       }],
       tool_choice: 'required',
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(providerBody.tools).toHaveLength(1);
@@ -175,7 +176,7 @@ describe('Proxy tool-calling support', () => {
           content: '{"temp_c":30}',
         },
       ],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(providerBody.messages[1].role).toBe('assistant');
@@ -218,7 +219,7 @@ describe('Proxy tool-calling support', () => {
         },
         { role: 'user', content: 'continue' },
       ],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(providerBody.messages[1].role).toBe('assistant');
@@ -257,7 +258,7 @@ describe('Proxy tool-calling support', () => {
       return origFetch(url, init);
     });
 
-    const sessHeaders = { ...authHeaders(), 'x-session-id': 'sess-797' };
+    const sessHeaders = { ...await authHeaders(), 'x-session-id': 'sess-797' };
 
     // Turn 1: thinking model returns reasoning_content → proxy records it.
     const first = await request(app, 'POST', '/v1/chat/completions', {
@@ -308,7 +309,7 @@ describe('Proxy tool-calling support', () => {
     ];
 
     const { status } = await request(app, 'POST', '/v1/chat/completions', { messages: sent },
-      { ...authHeaders(), 'x-session-id': 'sess-797-plain' });
+      { ...await authHeaders(), 'x-session-id': 'sess-797-plain' });
 
     expect(status).toBe(200);
     // Byte-identical: no restore, no empty-string filler, no reordering.
@@ -349,7 +350,7 @@ describe('Proxy tool-calling support', () => {
       return origFetch(url, init);
     });
 
-    const sessHeaders = { ...authHeaders(), 'x-session-id': 'sess-797-failover' };
+    const sessHeaders = { ...await authHeaders(), 'x-session-id': 'sess-797-failover' };
 
     const first = await request(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'think then answer' }],

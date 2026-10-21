@@ -10,8 +10,9 @@ vi.mock('../../services/router.js', async (importOriginal) => {
 
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { setStickyModel } from '../../routes/proxy.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 function fakeRoute(provider: any) {
   return { provider, modelId: 'fake-model', modelDbId: 9999, apiKey: 'k', keyId: 1, platform: 'fake', displayName: 'Fake Model' };
@@ -35,11 +36,11 @@ describe('POST /v1/responses (#96)', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
   it('rejects requests without a valid unified key (401)', async () => {
@@ -184,7 +185,7 @@ describe('POST /v1/responses (#96)', () => {
 
   it('rejects an image request with 422 no_vision_model when no vision model is enabled', async () => {
     mockRouteRequest.mockClear();
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_vision = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 0 WHERE supports_vision = 1'));
     try {
       const { status, text } = await post(app, '/v1/responses', {
         input: [{
@@ -196,7 +197,7 @@ describe('POST /v1/responses (#96)', () => {
       expect(JSON.parse(text).error.code).toBe('no_vision_model');
       expect(mockRouteRequest).not.toHaveBeenCalled();
     } finally {
-      getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_vision = 1').run();
+      (await getDb().run('UPDATE models SET enabled = 1 WHERE supports_vision = 1'));
     }
   });
 
@@ -282,7 +283,7 @@ describe('POST /v1/responses (#96)', () => {
     const { status, text } = await post(app, '/v1/responses', { input: 'hi', stream: true }, key);
     expect(status).toBe(200);
     expect(text).toContain('event: response.completed');
-    const rows = getDb().prepare("SELECT status, latency_ms, ttfb_ms FROM requests ORDER BY id DESC LIMIT 1").all() as any[];
+    const rows = (await getDb().all("SELECT status, latency_ms, ttfb_ms FROM requests ORDER BY id DESC LIMIT 1")) as any[];
     expect(rows[0].status).toBe('success');
     expect(rows[0].ttfb_ms).not.toBeNull();
     // ttfb must be the reasoning-head moment (well before the text token that
@@ -483,38 +484,36 @@ describe('POST /v1/responses model routing priority (#579)', () => {
 
   // Unique model ids make each model its own unify group, so an explicit
   // request resolves to exactly one row and the chain assertion is unambiguous.
-  function addModel(modelId: string, priority: number, enabled = true): number {
+  async function addModel(modelId: string, priority: number, enabled = true): number {
     const db = getDb();
-    const inserted = db.prepare(`
+    const inserted = (await db.run(`
       INSERT INTO models (
         platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
         rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget,
         context_window, enabled, supports_vision, supports_tools
       )
-      VALUES ('groq', ?, ?, ?, ?, 'Small', NULL, NULL, NULL, NULL, '~1M', 128000, ?, 0, 1)
-    `).run(modelId, `Responses Priority ${modelId}`, priority, priority, enabled ? 1 : 0);
+      VALUES ('groq', ?, ?, ?, ?, 'Small', NULL, NULL, NULL, NULL, '~1M', 128000, ?, 0, 1) RETURNING id`, [modelId, `Responses Priority ${modelId}`, priority, priority, enabled ? 1 : 0]));
     const id = Number(inserted.lastInsertRowid);
-    db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, priority);
-    const profile = db.prepare("SELECT value FROM settings WHERE key = 'active_profile_id'").get() as { value: string } | undefined;
+    (await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1) RETURNING id', [id, priority]));
+    const profile = (await db.get("SELECT value FROM settings WHERE key = 'active_profile_id'")) as { value: string } | undefined;
     if (profile) {
-      db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1)')
-        .run(Number(profile.value), id, priority);
+      (await db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1) RETURNING id', [Number(profile.value), id, priority]));
     }
     return id;
   }
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
     const db = getDb();
-    db.prepare('DELETE FROM profile_models').run();
-    db.prepare('DELETE FROM fallback_config').run();
-    db.prepare('DELETE FROM models').run();
-    pinnedId = addModel('pinned-responses-model', 1);
-    stickyId = addModel('sticky-responses-model', 2);
-    disabledId = addModel('disabled-responses-model', 3, false);
+    (await db.run('DELETE FROM profile_models'));
+    (await db.run('DELETE FROM fallback_config'));
+    (await db.run('DELETE FROM models'));
+    pinnedId = await addModel('pinned-responses-model', 1);
+    stickyId = await addModel('sticky-responses-model', 2);
+    disabledId = await addModel('disabled-responses-model', 3, false);
   });
 
   beforeEach(() => {

@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { decrypt } from '../../lib/crypto.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const realFetch = globalThis.fetch;
 
@@ -61,11 +62,11 @@ function embeddingResponse(dimensions: number) {
 describe('custom provider modalities', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   afterEach(() => {
@@ -90,12 +91,12 @@ describe('custom provider modalities', () => {
     expect(body.baseUrl).toBe('http://127.0.0.1:8181/v1');
     expect(String(fetchMock.mock.calls[0][0])).toBe('http://127.0.0.1:8181/v1/embeddings');
 
-    const row = getDb().prepare(`
+    const row = (await getDb().get(`
       SELECT em.family, em.model_id, em.display_name, em.dimensions, k.base_url, k.encrypted_key, k.iv, k.auth_tag
         FROM embedding_models em
         JOIN api_keys k ON k.id = em.key_id
        WHERE em.platform = 'custom' AND em.model_id = 'local-embed'
-    `).get() as any;
+    `)) as any;
     expect(row.family).toBe('local-family');
     expect(row.display_name).toBe('Local Embed');
     expect(row.dimensions).toBe(3);
@@ -143,16 +144,16 @@ describe('custom provider modalities', () => {
     expect(audio.status).toBe(201);
     expect(audio.body.keyId).toBe(image.body.keyId);
 
-    const keys = getDb().prepare("SELECT * FROM api_keys WHERE platform = 'custom' AND base_url = 'http://127.0.0.1:8383/v1'").all() as any[];
+    const keys = (await getDb().all("SELECT * FROM api_keys WHERE platform = 'custom' AND base_url = 'http://127.0.0.1:8383/v1'")) as any[];
     expect(keys).toHaveLength(1);
     expect(decrypt(keys[0].encrypted_key, keys[0].iv, keys[0].auth_tag)).toBe('media-secret');
 
-    const rows = getDb().prepare(`
+    const rows = (await getDb().all(`
       SELECT model_id, modality, key_id
         FROM media_models
        WHERE platform = 'custom'
        ORDER BY model_id
-    `).all() as { model_id: string; modality: string; key_id: number }[];
+    `)) as { model_id: string; modality: string; key_id: number }[];
     expect(rows).toEqual([
       { model_id: 'local-image', modality: 'image', key_id: image.body.keyId },
       { model_id: 'local-tts', modality: 'audio', key_id: image.body.keyId },
@@ -173,11 +174,11 @@ describe('custom provider modalities', () => {
     expect(stt.body.modality).toBe('transcription');
     expect(stt.body.displayName).toBe('Local Whisper');
 
-    const row = getDb().prepare(`
+    const row = (await getDb().get(`
       SELECT model_id, modality, display_name, key_id
         FROM media_models
        WHERE platform = 'custom' AND model_id = 'local-stt'
-    `).get() as any;
+    `)) as any;
     expect(row.modality).toBe('transcription');
     expect(row.display_name).toBe('Local Whisper');
     expect(row.key_id).toBe(stt.body.keyId);
@@ -289,14 +290,14 @@ describe('custom provider modalities', () => {
     expect(media.status).toBe(201);
     expect(media.body.keyId).toBe(embedding.body.keyId);
 
-    getDb().prepare("UPDATE settings SET value = 'local-delete-family' WHERE key = 'embeddings_default_family'").run();
+    (await getDb().run("UPDATE settings SET value = 'local-delete-family' WHERE key = 'embeddings_default_family'"));
 
     const removed = await del(app, `/api/keys/${embedding.body.keyId}`);
     expect(removed.status).toBe(200);
 
-    expect((getDb().prepare("SELECT COUNT(*) AS n FROM embedding_models WHERE platform = 'custom'").get() as { n: number }).n).toBe(0);
-    expect((getDb().prepare("SELECT COUNT(*) AS n FROM media_models WHERE platform = 'custom'").get() as { n: number }).n).toBe(0);
-    const def = getDb().prepare("SELECT value FROM settings WHERE key = 'embeddings_default_family'").get() as { value: string };
+    expect(((await getDb().get("SELECT COUNT(*) AS n FROM embedding_models WHERE platform = 'custom'")) as { n: number }).n).toBe(0);
+    expect(((await getDb().get("SELECT COUNT(*) AS n FROM media_models WHERE platform = 'custom'")) as { n: number }).n).toBe(0);
+    const def = (await getDb().get("SELECT value FROM settings WHERE key = 'embeddings_default_family'")) as { value: string };
     expect(def.value).not.toBe('local-delete-family');
   });
 
@@ -331,9 +332,7 @@ describe('custom provider modalities', () => {
     expect(again.status).toBe(201);
     expect(again.body.displayName).toBe('My Embedder');
 
-    const row = getDb().prepare(
-      "SELECT display_name FROM embedding_models WHERE platform = 'custom' AND model_id = 'named-embed'",
-    ).get() as any;
+    const row = (await getDb().get("SELECT display_name FROM embedding_models WHERE platform = 'custom' AND model_id = 'named-embed'")) as any;
     expect(row.display_name).toBe('My Embedder');
   });
 
@@ -358,9 +357,7 @@ describe('custom provider modalities', () => {
     });
     expect(again.body.displayName).toBe('My Voice');
 
-    const row = getDb().prepare(
-      "SELECT display_name FROM media_models WHERE platform = 'custom' AND model_id = 'named-tts'",
-    ).get() as any;
+    const row = (await getDb().get("SELECT display_name FROM media_models WHERE platform = 'custom' AND model_id = 'named-tts'")) as any;
     expect(row.display_name).toBe('My Voice');
   });
 
@@ -383,11 +380,11 @@ describe('custom provider modalities', () => {
 
     expect(status).toBe(201);
     // Only the chat model lands in the chat table.
-    const chatIds = (getDb().prepare("SELECT model_id FROM models WHERE platform = 'custom'").all() as any[])
+    const chatIds = ((await getDb().all("SELECT model_id FROM models WHERE platform = 'custom'")) as any[])
       .map(r => r.model_id).sort();
     expect(chatIds).toEqual(['glm-chat-mini']);
     // Media ids land in media_models with the inferred modality.
-    const mediaRows = (getDb().prepare("SELECT model_id, modality FROM media_models WHERE platform = 'custom'").all() as any[])
+    const mediaRows = ((await getDb().all("SELECT model_id, modality FROM media_models WHERE platform = 'custom'")) as any[])
       .map(r => `${r.modality}:${r.model_id}`).sort();
     expect(mediaRows).toEqual([
       'audio:CosyVoice2-0.5B',
@@ -395,7 +392,7 @@ describe('custom provider modalities', () => {
       'transcription:whisper-large-v3',
     ]);
     // The embedding id is probed and lands in embedding_models.
-    const embedRow = getDb().prepare("SELECT dimensions FROM embedding_models WHERE platform = 'custom' AND model_id = 'nomic-embed-mini'").get() as any;
+    const embedRow = (await getDb().get("SELECT dimensions FROM embedding_models WHERE platform = 'custom' AND model_id = 'nomic-embed-mini'")) as any;
     expect(embedRow?.dimensions).toBe(4);
     // Video has no custom serving path: reported, never registered.
     expect(body.videoSkipped).toEqual(['Wan2.2-T2V-A14B']);
@@ -409,8 +406,8 @@ describe('custom provider modalities', () => {
       models: [{ model: 'my-sd-chat-relay', supportsTools: true }],
     });
     expect(status).toBe(201);
-    const row = getDb().prepare("SELECT model_id FROM models WHERE platform = 'custom' AND model_id = 'my-sd-chat-relay'").get();
+    const row = (await getDb().get("SELECT model_id FROM models WHERE platform = 'custom' AND model_id = 'my-sd-chat-relay'"));
     expect(row).toBeTruthy();
-    expect(getDb().prepare("SELECT 1 FROM media_models WHERE model_id = 'my-sd-chat-relay'").get()).toBeUndefined();
+    expect((await getDb().get("SELECT 1 FROM media_models WHERE model_id = 'my-sd-chat-relay'"))).toBeUndefined();
   });
 });

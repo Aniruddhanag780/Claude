@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getSetting, setSetting } from '../../db/index.js';
+import { getSetting, setSetting } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { UNIFIED_MAX_TOKENS_SETTING, UNIFIED_MAX_TOKENS_AUTO } from '../../lib/sampling-params.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(app: Express, method: string, path: string, body: any, token: string) {
   const server = app.listen(0, '127.0.0.1');
@@ -27,11 +28,11 @@ describe('/api/settings/output-limit', () => {
   let app: Express;
   let token: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    token = mintDashboardToken();
+    token = await mintDashboardToken();
   });
 
   it("reports 'off' before anything is configured", async () => {
@@ -44,7 +45,7 @@ describe('/api/settings/output-limit', () => {
     const put = await request(app, 'PUT', '/api/settings/output-limit', { mode: 'auto' }, token);
     expect(put.status).toBe(200);
     expect(put.body).toEqual({ mode: 'auto', effectiveCap: UNIFIED_MAX_TOKENS_AUTO, autoValue: UNIFIED_MAX_TOKENS_AUTO });
-    expect(getSetting(UNIFIED_MAX_TOKENS_SETTING)).toBe('auto');
+    expect(await getSetting(UNIFIED_MAX_TOKENS_SETTING)).toBe('auto');
 
     const get = await request(app, 'GET', '/api/settings/output-limit', undefined, token);
     expect(get.body).toEqual(put.body);
@@ -89,12 +90,12 @@ describe('/api/settings/output-limit', () => {
       expect(status).toBe(400);
       expect(body.error.type).toBe('invalid_request_error');
       expect(body.error.message).toMatch(/Invalid output limit/);
-      expect(getSetting(UNIFIED_MAX_TOKENS_SETTING)).toBe('4096');
+      expect(await getSetting(UNIFIED_MAX_TOKENS_SETTING)).toBe('4096');
     });
   }
 
   it('reports a stored value it cannot parse as off, matching how it behaves', async () => {
-    setSetting(UNIFIED_MAX_TOKENS_SETTING, 'banana');
+    await setSetting(UNIFIED_MAX_TOKENS_SETTING, 'banana');
     const { body } = await request(app, 'GET', '/api/settings/output-limit', undefined, token);
     expect(body.mode).toBe('off');
     expect(body.effectiveCap).toBeNull();

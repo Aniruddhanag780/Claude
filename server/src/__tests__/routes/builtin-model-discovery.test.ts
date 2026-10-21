@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { resetBuiltinDiscoveryThrottle } from '../../services/builtin-model-discovery.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #1348: the dashboard's Fetch models action, extended from custom endpoints
 // to built-in providers the signed catalog carries no models for.
@@ -47,24 +48,24 @@ async function addKey(app: Express, platform: string, key = 'sk-test'): Promise<
   return body;
 }
 
-function modelRows(platform: string) {
-  return getDb().prepare('SELECT model_id, source FROM models WHERE platform = ? ORDER BY model_id').all(platform) as
+async function modelRows(platform: string) {
+  return (await getDb().all('SELECT model_id, source FROM models WHERE platform = ? ORDER BY model_id', [platform])) as
     Array<{ model_id: string; source: string }>;
 }
 
 describe('built-in provider model discovery routes (#1348)', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     // The key-save trigger is exercised in its own test; keep the others to
     // the dashboard action so a background pass cannot race them.
     process.env.BUILTIN_MODEL_DISCOVERY = 'manual';
-    initDb(':memory:');
-    getDb().prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+    await initTestDb();
+    (await getDb().run("DELETE FROM settings WHERE key = 'active_profile_id'"));
     resetBuiltinDiscoveryThrottle();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   afterEach(() => {
@@ -75,8 +76,8 @@ describe('built-in provider model discovery routes (#1348)', () => {
 
   it('lists an eligible built-in provider\'s models through its registered base URL', async () => {
     const key = await addKey(app, 'siliconflow', 'sk-silicon');
-    getDb().prepare(`INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, source)
-                     VALUES ('siliconflow', 'already', 'already', 50, 50, 'Medium', 'discovered')`).run();
+    (await getDb().run(`INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, source)
+                     VALUES ('siliconflow', 'already', 'already', 50, 50, 'Medium', 'discovered') RETURNING id`));
     const mock = stubProvider(['already', 'deepseek-ai/DeepSeek-V3']);
 
     const { status, body } = await post(app, DISCOVER, { keyId: key.id });
@@ -119,7 +120,7 @@ describe('built-in provider model discovery routes (#1348)', () => {
     });
     expect(status).toBe(200);
     expect(body).toMatchObject({ platform: 'longcat', created: 1, registered: ['LongCat-Flash-Chat'], skippedNonChat: ['text-embedding-v1'] });
-    expect(modelRows('longcat')).toEqual([{ model_id: 'LongCat-Flash-Chat', source: 'discovered' }]);
+    expect(await modelRows('longcat')).toEqual([{ model_id: 'LongCat-Flash-Chat', source: 'discovered' }]);
 
     // Shows up in the model list as discovered, not catalog.
     const list = await request(app, 'GET', '/api/models');
@@ -129,12 +130,11 @@ describe('built-in provider model discovery routes (#1348)', () => {
   it('refuses registration for ineligible and custom keys', async () => {
     const groq = await addKey(app, 'groq');
     expect((await post(app, REGISTER, { keyId: groq.id, models: ['x'] })).status).toBe(400);
-    const custom = getDb().prepare(`
+    const custom = (await getDb().run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
-      VALUES ('custom', '', 'e', 'i', 't', 'healthy', 1, 'http://127.0.0.1:9/v1')
-    `).run();
+      VALUES ('custom', '', 'e', 'i', 't', 'healthy', 1, 'http://127.0.0.1:9/v1') RETURNING id`));
     expect((await post(app, REGISTER, { keyId: Number(custom.lastInsertRowid), models: ['x'] })).status).toBe(400);
-    expect(modelRows('groq').some(r => r.model_id === 'x')).toBe(false);
+    expect((await modelRows('groq')).some(r => r.model_id === 'x')).toBe(false);
   });
 
   it('flags discoverable key rows for the dashboard', async () => {
@@ -151,7 +151,7 @@ describe('built-in provider model discovery routes (#1348)', () => {
     const key = await addKey(app, 'longcat');
     expect(key.notice).toMatch(/being fetched from longcat's own model list/);
     expect(key.notice).not.toMatch(/Premium/);
-    await vi.waitFor(() => expect(modelRows('longcat')).toEqual([{ model_id: 'LongCat-Flash-Chat', source: 'discovered' }]));
+    await vi.waitFor(async () => expect(await modelRows('longcat')).toEqual([{ model_id: 'LongCat-Flash-Chat', source: 'discovered' }]));
     expect(String(mock.mock.calls[0]![0])).toBe('https://api.longcat.chat/openai/v1/models');
   });
 

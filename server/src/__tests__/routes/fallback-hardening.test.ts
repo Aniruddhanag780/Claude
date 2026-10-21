@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Route-level characterization tests for the fallback hardening pack:
 //   item 3 — a daily-allocation 429 (Cloudflare "used up your daily free
@@ -26,7 +27,7 @@ vi.mock('../../providers/index.js', async (importOriginal) => {
 });
 
 const { createApp } = await import('../../app.js');
-const { initDb, getDb, getUnifiedApiKey } = await import('../../db/index.js');
+const { getDb, getUnifiedApiKey } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const { setRoutingStrategy, getAllPenalties } = await import('../../services/router.js');
 const { msUntilNextUtcMidnight, resetEmptyCompletionStreaks, EMPTY_COMPLETION_STREAK_LIMIT } = await import('../../lib/fallback-loop.js');
@@ -60,44 +61,44 @@ const emptyWithFinish = (finish: string) => ({
   usage: { prompt_tokens: 10, completion_tokens: 0, total_tokens: 10 },
 });
 
-function firstCalledModelDbId(): number {
+async function firstCalledModelDbId(): Promise<number> {
   const modelId = chatCompletion.mock.calls[0][2] as string;
-  const row = getDb().prepare("SELECT id FROM models WHERE platform = 'groq' AND model_id = ?").get(modelId) as { id: number };
+  const row = (await getDb().get("SELECT id FROM models WHERE platform = 'groq' AND model_id = ?", [modelId])) as { id: number };
   return row.id;
 }
 
-function cooldownRowFor(modelId: string) {
-  return getDb().prepare(
+async function cooldownRowFor(modelId: string) {
+  return ((await getDb().get(
     "SELECT expires_at_ms FROM rate_limit_cooldowns WHERE platform = 'groq' AND model_id = ?",
-  ).get(modelId) as { expires_at_ms: number } | undefined;
+    [modelId],
+  ))) as { expires_at_ms: number } | undefined;
 }
 
 describe('fallback hardening (items 3, 4, 5, 6)', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
     key = getUnifiedApiKey();
 
     const db = getDb();
     setRoutingStrategy('priority');
     const { encrypted, iv, authTag } = encrypt('hardening-test-key');
-    db.prepare(`
+    (await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('groq', 'hardening', ?, ?, ?, 'healthy', 1)
-    `).run(encrypted, iv, authTag);
+      VALUES ('groq', 'hardening', ?, ?, ?, 'healthy', 1) RETURNING id`, [encrypted, iv, authTag]));
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     chatCompletion.mockReset();
     streamChatCompletion.mockReset();
     const db = getDb();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
-    db.prepare('DELETE FROM rate_limit_usage').run();
-    db.prepare('DELETE FROM requests').run();
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
+    (await db.run('DELETE FROM rate_limit_usage'));
+    (await db.run('DELETE FROM requests'));
     resetEmptyCompletionStreaks();
   });
 
@@ -120,7 +121,7 @@ describe('fallback hardening (items 3, 4, 5, 6)', () => {
 
     expect(status).toBe(200); // failed over
     const firstModel = chatCompletion.mock.calls[0][2] as string;
-    const row = cooldownRowFor(firstModel);
+    const row = await cooldownRowFor(firstModel);
     expect(row).toBeDefined();
     // Benched to (roughly) the next UTC midnight, far beyond the 90s transient.
     const expected = before + msUntilNextUtcMidnight(before);
@@ -141,8 +142,9 @@ describe('fallback hardening (items 3, 4, 5, 6)', () => {
     expect(chatCompletion).toHaveBeenCalledTimes(2); // still failed over
     const firstModel = chatCompletion.mock.calls[0][2] as string;
     // The truncated turn is NOT a provider-health signal: no bench, no penalty.
-    expect(cooldownRowFor(firstModel)).toBeUndefined();
-    expect(getAllPenalties().some(p => p.modelDbId === firstCalledModelDbId())).toBe(false);
+    expect(await cooldownRowFor(firstModel)).toBeUndefined();
+    const firstId = await firstCalledModelDbId();
+    expect(getAllPenalties().some(p => p.modelDbId === firstId)).toBe(false);
   });
 
   it('item 4 control: an empty completion with finish_reason stop still benches as before', async () => {
@@ -156,7 +158,7 @@ describe('fallback hardening (items 3, 4, 5, 6)', () => {
 
     expect(status).toBe(200);
     const firstModel = chatCompletion.mock.calls[0][2] as string;
-    expect(cooldownRowFor(firstModel)).toBeDefined(); // genuine dead turn: benched
+    expect(await cooldownRowFor(firstModel)).toBeDefined(); // genuine dead turn: benched
   });
 
   it('item 4 (stream): a zero-text stream ending in finish_reason length skips the bench', async () => {
@@ -180,7 +182,7 @@ describe('fallback hardening (items 3, 4, 5, 6)', () => {
     expect(raw).toContain('streamed answer');
     expect(streamChatCompletion).toHaveBeenCalledTimes(2);
     const firstModel = streamChatCompletion.mock.calls[0][2] as string;
-    expect(cooldownRowFor(firstModel)).toBeUndefined();
+    expect(await cooldownRowFor(firstModel)).toBeUndefined();
   });
 
   it('item 4 bound (#751): consecutive empty-length completions bench the model+key at the streak limit', async () => {
@@ -199,11 +201,11 @@ describe('fallback hardening (items 3, 4, 5, 6)', () => {
       expect(status).toBe(200); // every request still failed over and served
       firstModel = chatCompletion.mock.calls[0][2] as string;
       if (i < EMPTY_COMPLETION_STREAK_LIMIT) {
-        expect(cooldownRowFor(firstModel)).toBeUndefined(); // still exempt
+        expect(await cooldownRowFor(firstModel)).toBeUndefined(); // still exempt
       }
     }
     // The limit-th consecutive empty completion finally benches it.
-    expect(cooldownRowFor(firstModel)).toBeDefined();
+    expect(await cooldownRowFor(firstModel)).toBeDefined();
   });
 
   it('item 5: the wall-clock budget allows one failover hop, then stops with the rich exhaustion error', async () => {
@@ -234,12 +236,11 @@ describe('fallback hardening (items 3, 4, 5, 6)', () => {
     }, key);
 
     expect(status).toBe(200);
-    const row = getDb().prepare("SELECT input_tokens, output_tokens FROM requests WHERE status = 'success' ORDER BY id DESC LIMIT 1")
-      .get() as { input_tokens: number; output_tokens: number };
+    const row = (await getDb().get("SELECT input_tokens, output_tokens FROM requests WHERE status = 'success' ORDER BY id DESC LIMIT 1")) as { input_tokens: number; output_tokens: number };
     expect(row.input_tokens).toBeGreaterThan(0);   // was 0 pre-fix
     expect(row.output_tokens).toBeGreaterThan(0);  // was 0 pre-fix
     // The rate-limit token ledger is fed too (was recordTokens(…, 0)).
-    const usage = getDb().prepare("SELECT COALESCE(SUM(tokens), 0) AS t FROM rate_limit_usage WHERE kind = 'tokens'").get() as { t: number };
+    const usage = (await getDb().get("SELECT COALESCE(SUM(tokens), 0) AS t FROM rate_limit_usage WHERE kind = 'tokens'")) as { t: number };
     expect(usage.t).toBeGreaterThan(0);
   });
 
@@ -251,8 +252,7 @@ describe('fallback hardening (items 3, 4, 5, 6)', () => {
     }, key);
 
     expect(status).toBe(200);
-    const row = getDb().prepare("SELECT input_tokens, output_tokens FROM requests WHERE status = 'success' ORDER BY id DESC LIMIT 1")
-      .get() as { input_tokens: number; output_tokens: number };
+    const row = (await getDb().get("SELECT input_tokens, output_tokens FROM requests WHERE status = 'success' ORDER BY id DESC LIMIT 1")) as { input_tokens: number; output_tokens: number };
     expect(row.input_tokens).toBeGreaterThan(0);
     expect(row.output_tokens).toBeGreaterThan(0);
   });
@@ -265,7 +265,7 @@ describe('fallback hardening (items 3, 4, 5, 6)', () => {
     }, key);
 
     expect(status).toBe(200);
-    const usage = getDb().prepare("SELECT COALESCE(SUM(tokens), 0) AS t FROM rate_limit_usage WHERE kind = 'tokens'").get() as { t: number };
+    const usage = (await getDb().get("SELECT COALESCE(SUM(tokens), 0) AS t FROM rate_limit_usage WHERE kind = 'tokens'")) as { t: number };
     expect(usage.t).toBeGreaterThan(0); // was recordTokens(…, usage?.total_tokens ?? 0)
   });
 });

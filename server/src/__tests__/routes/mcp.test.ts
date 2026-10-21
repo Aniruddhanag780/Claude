@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
+import { getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let app: Express;
 
@@ -14,7 +15,7 @@ async function rpc(message: unknown, opts: { auth?: boolean } = {}) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(opts.auth === false ? {} : { Authorization: `Bearer ${getUnifiedApiKey()}` }),
+      ...(opts.auth === false ? {} : { Authorization: `Bearer ${await getUnifiedApiKey()}` }),
     },
     body: JSON.stringify(message),
   });
@@ -31,12 +32,12 @@ function toolResultJson(body: any): any {
 }
 
 describe('MCP server (/mcp, stateless Streamable HTTP)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
     // MCP is opt-in since #925 — these tests exercise the tool surface itself.
-    setSetting('enable_mcp', '1');
+    await setSetting('enable_mcp', '1');
   });
 
   it('rejects requests without the unified key', async () => {
@@ -112,12 +113,12 @@ describe('MCP server (/mcp, stateless Streamable HTTP)', () => {
     // UTC date as the since-boundary — exactly the rows the bug dropped.
     const boundaryDayRow = new Date(Date.now() - 23 * 3600_000);
     const sqlite = (d: Date) => d.toISOString().slice(0, 19).replace('T', ' ');
-    db.prepare(`INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, created_at)
-                VALUES ('groq', 'test-model', 'success', 100, 50, ?)`).run(sqlite(boundaryDayRow));
+    (await db.run(`INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, created_at)
+                VALUES ('groq', 'test-model', 'success', 100, 50, ?) RETURNING id`, [sqlite(boundaryDayRow)]));
     const hour = sqlite(boundaryDayRow).slice(0, 13) + ':00:00';
-    db.prepare(`INSERT INTO request_hourly (hour, total_requests, success_count, input_tokens, output_tokens)
+    (await db.run(`INSERT INTO request_hourly (hour, total_requests, success_count, input_tokens, output_tokens)
                 VALUES (?, 1, 1, 100, 50)
-                ON CONFLICT(hour) DO UPDATE SET total_requests = total_requests + 1`).run(hour);
+                ON CONFLICT(hour) DO UPDATE SET total_requests = request_hourly.total_requests + 1`, [hour]));
 
     const { body } = await rpc({
       jsonrpc: '2.0', id: 12, method: 'tools/call',
@@ -234,10 +235,9 @@ describe('MCP server (/mcp, stateless Streamable HTTP)', () => {
   it('runs ask_freellmapi through the OpenAI-compatible route and returns routing/token metadata', async () => {
     const db = getDb();
     const encrypted = encrypt('test-provider-key');
-    const inserted = db.prepare(`
+    const inserted = (await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('groq', 'mcp-chatgpt-test', ?, ?, ?, 'healthy', 1)
-    `).run(encrypted.encrypted, encrypted.iv, encrypted.authTag);
+      VALUES ('groq', 'mcp-chatgpt-test', ?, ?, ?, 'healthy', 1) RETURNING id`, [encrypted.encrypted, encrypted.iv, encrypted.authTag]));
 
     const originalFetch = global.fetch;
     vi.spyOn(global, 'fetch').mockImplementation(async (input, init) => {
@@ -283,7 +283,7 @@ describe('MCP server (/mcp, stateless Streamable HTTP)', () => {
       expect(data.execution_id).toBeTruthy();
     } finally {
       vi.restoreAllMocks();
-      db.prepare('DELETE FROM api_keys WHERE id = ?').run(inserted.lastInsertRowid);
+      (await db.run('DELETE FROM api_keys WHERE id = ?', [inserted.lastInsertRowid]));
     }
   });
 

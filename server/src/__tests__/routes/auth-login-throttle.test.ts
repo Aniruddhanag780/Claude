@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { createUser } from '../../services/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Two independent guards are supposed to stand in front of POST
 // /api/auth/login: the per-email lockout in routes/auth.ts and the per-IP
@@ -31,15 +32,15 @@ async function login(email: string, password: string) {
 }
 
 describe('login brute-force throttling', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM sessions').run();
-    getDb().prepare('DELETE FROM users').run();
+  beforeEach(async () => {
+    await getDb().run('DELETE FROM sessions');
+    await getDb().run('DELETE FROM users');
     createUser(EMAIL, PASSWORD);
   });
 

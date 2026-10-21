@@ -6,7 +6,8 @@ import {
   resetModelWeightOverrides,
   warnOnRoutingOverrideDrift,
 } from '../../services/model-weight-overrides.js';
-import { initDb, getDb, setSetting } from '../../db/index.js';
+import { getDb, setSetting } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const ORIGINAL_ENV = process.env.MODEL_ROUTING_OVERRIDES;
 
@@ -86,47 +87,47 @@ describe('model weight overrides', () => {
     const warnings: string[] = [];
     const logger = { warn: (m: string) => { warnings.push(m); } };
 
-    beforeEach(() => {
+    beforeEach(async () => {
       warnings.length = 0;
       process.env.ENCRYPTION_KEY = '0'.repeat(64);
-      initDb(':memory:');
+      await initTestDb();
     });
 
-    it('says nothing when the variable is unset or empty', () => {
+    it('says nothing when the variable is unset or empty', async () => {
       delete process.env.MODEL_ROUTING_OVERRIDES;
-      expect(warnOnRoutingOverrideDrift(logger)).toBeNull();
+      expect(await warnOnRoutingOverrideDrift(logger)).toBeNull();
       process.env.MODEL_ROUTING_OVERRIDES = '   ';
-      expect(warnOnRoutingOverrideDrift(logger)).toBeNull();
+      expect(await warnOnRoutingOverrideDrift(logger)).toBeNull();
       expect(warnings).toEqual([]);
     });
 
-    it('reports unparsable JSON instead of ignoring it silently', () => {
+    it('reports unparsable JSON instead of ignoring it silently', async () => {
       process.env.MODEL_ROUTING_OVERRIDES = '{"gpt-4o": 0.2,}';
-      const drift = warnOnRoutingOverrideDrift(logger)!;
+      const drift = await warnOnRoutingOverrideDrift(logger)!;
       expect(drift.malformed).toBe(true);
       expect(warnings.join()).toContain('not valid JSON');
     });
 
-    it('reports a non-object value', () => {
+    it('reports a non-object value', async () => {
       process.env.MODEL_ROUTING_OVERRIDES = '["gpt-4o"]';
-      const drift = warnOnRoutingOverrideDrift(logger)!;
+      const drift = await warnOnRoutingOverrideDrift(logger)!;
       expect(drift.malformed).toBe(true);
       expect(warnings.join()).toContain('must be a JSON object');
     });
 
-    it('names entries dropped for an out-of-range or non-numeric multiplier', () => {
-      const real = (getDb().prepare('SELECT model_id FROM models LIMIT 1').get() as { model_id: string }).model_id;
+    it('names entries dropped for an out-of-range or non-numeric multiplier', async () => {
+      const real = ((await getDb().get('SELECT model_id FROM models LIMIT 1')) as { model_id: string }).model_id;
       process.env.MODEL_ROUTING_OVERRIDES = JSON.stringify({ [real]: 5, ['x-' + real]: 'fast' });
-      const drift = warnOnRoutingOverrideDrift(logger)!;
+      const drift = await warnOnRoutingOverrideDrift(logger)!;
       expect(drift.rejectedValues).toContain(real);
       expect(drift.rejectedValues).toContain('x-' + real);
       expect(warnings.join()).toContain('not a finite multiplier');
     });
 
-    it('names an override that matches no model in the catalog', () => {
-      setSetting('catalog_last_sync_ms', String(Date.now()));
+    it('names an override that matches no model in the catalog', async () => {
+      await setSetting('catalog_last_sync_ms', String(Date.now()));
       process.env.MODEL_ROUTING_OVERRIDES = '{"gpt-4o-typo-not-real": 0.2}';
-      const drift = warnOnRoutingOverrideDrift(logger)!;
+      const drift = await warnOnRoutingOverrideDrift(logger)!;
       expect(drift.unknownModels).toEqual(['gpt-4o-typo-not-real']);
       expect(warnings.join()).toContain("not a model id in this install's catalog");
     });
@@ -136,28 +137,28 @@ describe('model weight overrides', () => {
     // ~460. Without this gate every override naming one of the ~350 unseeded
     // models is reported as bogus on exactly the boot someone is watching, and
     // a warning that cries wolf first time out gets ignored forever after.
-    it('stays silent about unknown models until the catalog has synced once', () => {
+    it('stays silent about unknown models until the catalog has synced once', async () => {
       // No catalog_last_sync_ms: a fresh install that has never synced.
       process.env.MODEL_ROUTING_OVERRIDES = '{"a-real-model-not-yet-synced": 0.2}';
-      const drift = warnOnRoutingOverrideDrift(logger)!;
+      const drift = await warnOnRoutingOverrideDrift(logger)!;
       expect(drift.unknownModels).toEqual([]);
       expect(warnings).toEqual([]);
     });
 
-    it('still reports malformed JSON before the catalog has synced', () => {
+    it('still reports malformed JSON before the catalog has synced', async () => {
       // The value halves need no catalog, so the gate must not silence them.
       process.env.MODEL_ROUTING_OVERRIDES = '{"gpt-4o": 0.2,}';
-      expect(warnOnRoutingOverrideDrift(logger)!.malformed).toBe(true);
+      expect(await warnOnRoutingOverrideDrift(logger)!.malformed).toBe(true);
       warnings.length = 0;
       process.env.MODEL_ROUTING_OVERRIDES = '{"gpt-4o": 5}';
-      expect(warnOnRoutingOverrideDrift(logger)!.rejectedValues).toEqual(['gpt-4o']);
+      expect(await warnOnRoutingOverrideDrift(logger)!.rejectedValues).toEqual(['gpt-4o']);
       expect(warnings.join()).toContain('not a finite multiplier');
     });
 
-    it('stays quiet for a well-formed override naming a real model', () => {
-      const real = (getDb().prepare('SELECT model_id FROM models LIMIT 1').get() as { model_id: string }).model_id;
+    it('stays quiet for a well-formed override naming a real model', async () => {
+      const real = ((await getDb().get('SELECT model_id FROM models LIMIT 1')) as { model_id: string }).model_id;
       process.env.MODEL_ROUTING_OVERRIDES = JSON.stringify({ [real]: 0.2 });
-      const drift = warnOnRoutingOverrideDrift(logger)!;
+      const drift = await warnOnRoutingOverrideDrift(logger)!;
       expect(drift).toEqual({ malformed: false, rejectedValues: [], unknownModels: [] });
       expect(warnings).toEqual([]);
     });

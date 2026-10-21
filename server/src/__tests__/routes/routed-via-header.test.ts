@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #619: relays hand out model ids that are not header-safe — Chinese names,
 // bracketed variant suffixes, spaces. Splicing one straight into X-Routed-Via
@@ -31,8 +32,8 @@ async function request(app: Express, method: string, path: string, body?: unknow
   return { status: res.status, headers: res.headers, text, body: json };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 /** The header must be a valid RFC 7230 field value AND still name the route. */
@@ -89,20 +90,20 @@ describe('X-Routed-Via with a header-hostile model id (#619)', () => {
 
   beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    getDb().prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+    await initTestDb();
+    (await getDb().run("DELETE FROM settings WHERE key = 'active_profile_id'"));
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')").run();
-    db.prepare("DELETE FROM models WHERE platform = 'custom'").run();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
-    db.prepare('DELETE FROM rate_limit_usage').run();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
+    (await db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')"));
+    (await db.run("DELETE FROM models WHERE platform = 'custom'"));
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
+    (await db.run('DELETE FROM rate_limit_usage'));
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
 
     const reg = await request(app, 'POST', '/api/keys/custom', {
       baseUrl: BASE_URL,
@@ -119,7 +120,7 @@ describe('X-Routed-Via with a header-hostile model id (#619)', () => {
     const { status, headers, body } = await request(app, 'POST', '/v1/chat/completions', {
       model: HOSTILE_MODEL,
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(body.choices[0].message.content).toBe('hello');
@@ -131,7 +132,7 @@ describe('X-Routed-Via with a header-hostile model id (#619)', () => {
       model: HOSTILE_MODEL,
       messages: [{ role: 'user', content: 'hi' }],
       stream: true,
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(text).toContain('data: [DONE]');
@@ -142,7 +143,7 @@ describe('X-Routed-Via with a header-hostile model id (#619)', () => {
     const plain = await request(app, 'POST', '/v1/completions', {
       model: HOSTILE_MODEL,
       prompt: 'hi',
-    }, authHeaders());
+    }, await authHeaders());
     expect(plain.status).toBe(200);
     expectRoutedVia(plain.headers);
 
@@ -150,7 +151,7 @@ describe('X-Routed-Via with a header-hostile model id (#619)', () => {
       model: HOSTILE_MODEL,
       prompt: 'hi',
       stream: true,
-    }, authHeaders());
+    }, await authHeaders());
     expect(streamed.status).toBe(200);
     expectRoutedVia(streamed.headers);
   });
@@ -159,7 +160,7 @@ describe('X-Routed-Via with a header-hostile model id (#619)', () => {
     const plain = await request(app, 'POST', '/v1/responses', {
       model: HOSTILE_MODEL,
       input: 'hi',
-    }, authHeaders());
+    }, await authHeaders());
     expect(plain.status).toBe(200);
     expectRoutedVia(plain.headers);
 
@@ -167,13 +168,13 @@ describe('X-Routed-Via with a header-hostile model id (#619)', () => {
       model: HOSTILE_MODEL,
       input: 'hi',
       stream: true,
-    }, authHeaders());
+    }, await authHeaders());
     expect(streamed.status).toBe(200);
     expectRoutedVia(streamed.headers);
   });
 
   it('answers /v1/messages, streaming and not', async () => {
-    const anthropicAuth = { 'x-api-key': getUnifiedApiKey(), 'anthropic-version': '2023-06-01' };
+    const anthropicAuth = { 'x-api-key': await getUnifiedApiKey(), 'anthropic-version': '2023-06-01' };
 
     const plain = await request(app, 'POST', '/v1/messages', {
       model: HOSTILE_MODEL,
@@ -197,7 +198,7 @@ describe('X-Routed-Via with a header-hostile model id (#619)', () => {
     const { status, headers } = await request(
       app,
       'POST',
-      `/v1beta/models/gemini-2.5-flash:generateContent?key=${getUnifiedApiKey()}`,
+      `/v1beta/models/gemini-2.5-flash:generateContent?key=${await getUnifiedApiKey()}`,
       { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] },
     );
     expect(status).toBe(200);

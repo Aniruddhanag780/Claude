@@ -19,7 +19,8 @@ vi.mock('../../services/router.js', async (importOriginal) => {
 
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 function fakeRoute(provider: any) {
   return {
@@ -79,16 +80,16 @@ describe('/v1/messages shared-loop convergence', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     mockRouteRequest.mockReset();
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
   });
 
   it('exhaustion returns a 400 invalid_request_error when every provider rejected the request (drift #3)', async () => {

@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -27,8 +28,8 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, body: json };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 // requested_model logging: a pinned request records the model id the client
@@ -38,24 +39,24 @@ describe('requested_model analytics logging', () => {
   let app: Express;
   let groqModelId: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
     // Any enabled groq model from the seeded catalog will do as the pin target.
-    groqModelId = (getDb().prepare(`
+    groqModelId = ((await getDb().get(`
       SELECT m.model_id FROM models m
       JOIN fallback_config fc ON fc.model_db_id = m.id
       WHERE m.platform = 'groq' AND m.enabled = 1
       ORDER BY fc.priority LIMIT 1
-    `).get() as { model_id: string }).model_id;
+    `)) as { model_id: string }).model_id;
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
 
     const addKey = await request(app, 'POST', '/api/keys', {
       platform: 'groq',
@@ -89,13 +90,13 @@ describe('requested_model analytics logging', () => {
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       model: groqModelId,
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).toBe(200);
     // Provider metadata is not forwarded blindly: Reka returns "default" for
     // concrete models, and any compatible provider may do the same (#568).
     expect(body.model).toBe(groqModelId);
 
-    const row = getDb().prepare('SELECT model_id, requested_model FROM requests ORDER BY id DESC LIMIT 1').get() as any;
+    const row = (await getDb().get('SELECT model_id, requested_model FROM requests ORDER BY id DESC LIMIT 1')) as any;
     expect(row.requested_model).toBe(groqModelId);
     expect(row.model_id).toBe(groqModelId); // pin honored
   });
@@ -104,10 +105,10 @@ describe('requested_model analytics logging', () => {
     const { status } = await request(app, 'POST', '/v1/chat/completions', {
       ...(model ? { model } : {}),
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).toBe(200);
 
-    const row = getDb().prepare('SELECT requested_model FROM requests ORDER BY id DESC LIMIT 1').get() as any;
+    const row = (await getDb().get('SELECT requested_model FROM requests ORDER BY id DESC LIMIT 1')) as any;
     expect(row.requested_model).toBeNull();
   });
 });

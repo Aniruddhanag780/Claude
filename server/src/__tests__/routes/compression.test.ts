@@ -1,9 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getDb, getUnifiedApiKey, initDb, setSetting } from '../../db/index.js';
+import { getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { clearCompressionStats } from '../../services/compression/stats.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let app: Express;
 let dashboardToken = '';
@@ -38,17 +39,17 @@ async function request(
 }
 
 describe('compression routes and chat integration', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    dashboardToken = mintDashboardToken();
+    await initTestDb();
+    dashboardToken = await mintDashboardToken();
     app = createApp();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     clearCompressionStats();
-    getDb().prepare('DELETE FROM api_keys').run();
-    setSetting('compression', JSON.stringify({
+    (await getDb().run('DELETE FROM api_keys'));
+    await setSetting('compression', JSON.stringify({
       mode: 'lossless',
       engines: {
         dedup: { enabled: true, minBlockChars: 80, minBlockLines: 3 },
@@ -120,7 +121,7 @@ describe('compression routes and chat integration', () => {
     const response = await request('POST', '/v1/chat/completions', {
       model: 'auto',
       messages: [{ role: 'user', content: 'hello   \n\n\n\nworld' }],
-    }, { Authorization: `Bearer ${getUnifiedApiKey()}` });
+    }, { Authorization: `Bearer ${await getUnifiedApiKey()}` });
     expect(response.status).toBe(200);
     expect(forwarded[0].messages[0].content).toBe('hello\n\nworld');
     expect(response.headers.get('x-freellm-compress')).toMatch(/^lossless; saved~=\d+$/);
@@ -130,7 +131,7 @@ describe('compression routes and chat integration', () => {
       max_tokens: 32,
       messages: [{ role: 'user', content: 'anthropic   \n\n\n\nmessage' }],
     }, {
-      'x-api-key': getUnifiedApiKey(),
+      'x-api-key': await getUnifiedApiKey(),
       'anthropic-version': '2023-06-01',
     });
     expect(anthropic.status).toBe(200);
@@ -141,7 +142,7 @@ describe('compression routes and chat integration', () => {
       model: 'auto',
       input: 'responses   \n\n\n\nmessage',
       max_output_tokens: 32,
-    }, { Authorization: `Bearer ${getUnifiedApiKey()}` });
+    }, { Authorization: `Bearer ${await getUnifiedApiKey()}` });
     expect(responses.status).toBe(200);
     expect(forwarded[2].messages[0].content).toBe('responses\n\nmessage');
     expect(responses.headers.get('x-freellm-compress')).toMatch(/^lossless; saved~=\d+$/);
@@ -151,7 +152,7 @@ describe('compression routes and chat integration', () => {
   });
 
   it('honors per-request lowering and the operator off master switch', async () => {
-    setSetting('compression', JSON.stringify({
+    await setSetting('compression', JSON.stringify({
       mode: 'off',
       engines: {},
       trustProjectFilters: false,

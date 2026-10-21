@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { setUnifyEnabled, setUnifyOverrides } from '../../services/model-groups.js';
 import { setRoutingStrategy } from '../../services/router.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -26,30 +27,28 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, body: json, headers: res.headers };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 // Insert a catalog row + fallback_config entry, returning its model_db_id.
-function addModel(platform: string, modelId: string, displayName: string, priority: number): number {
+async function addModel(platform: string, modelId: string, displayName: string, priority: number): number {
   const db = getDb();
-  const info = db.prepare(`
+  const info = (await db.run(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
                         rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, supports_vision)
-    VALUES (?, ?, ?, 5, 5, 'Large', 100, NULL, NULL, NULL, '~10M', 131072, 1, 0)
-  `).run(platform, modelId, displayName);
+    VALUES (?, ?, ?, 5, 5, 'Large', 100, NULL, NULL, NULL, '~10M', 131072, 1, 0) RETURNING id`, [platform, modelId, displayName]));
   const id = Number(info.lastInsertRowid);
-  db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, priority);
+  (await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1) RETURNING id', [id, priority]));
   return id;
 }
 
-function addKey(platform: string): void {
+async function addKey(platform: string): void {
   const db = getDb();
   const { encrypted, iv, authTag } = encrypt(`test-key-${platform}`);
-  db.prepare(`
+  (await db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, ?, ?, ?, ?, 'healthy', 1)
-  `).run(platform, `${platform}-key`, encrypted, iv, authTag);
+    VALUES (?, ?, ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, `${platform}-key`, encrypted, iv, authTag]));
 }
 
 // A mocked upstream chat completion response (OpenAI-compatible shape).
@@ -67,28 +66,28 @@ function completion(model: string, content: string) {
 describe('Model unification (group the same model across providers)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     const db = getDb();
     // fallback_config FK-references models(id), so clear it before the rows.
-    db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE model_id IN ('tum-groq', 'tum-cerebras'))").run();
-    db.prepare("DELETE FROM models WHERE model_id IN ('tum-groq', 'tum-cerebras')").run();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
-    db.prepare('DELETE FROM rate_limit_usage').run();
-    setUnifyEnabled(true);
-    setUnifyOverrides({ merges: [], splits: [] });
-    setRoutingStrategy('priority');
-    addModel('groq', 'tum-groq', 'Test Unify Model', 1);
-    addModel('cerebras', 'tum-cerebras', 'Test Unify Model', 2);
-    addKey('groq');
-    addKey('cerebras');
+    (await db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE model_id IN ('tum-groq', 'tum-cerebras'))"));
+    (await db.run("DELETE FROM models WHERE model_id IN ('tum-groq', 'tum-cerebras')"));
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
+    (await db.run('DELETE FROM rate_limit_usage'));
+    await setUnifyEnabled(true);
+    await setUnifyOverrides({ merges: [], splits: [] });
+    await setRoutingStrategy('priority');
+    await addModel('groq', 'tum-groq', 'Test Unify Model', 1);
+    await addModel('cerebras', 'tum-cerebras', 'Test Unify Model', 2);
+    await addKey('groq');
+    await addKey('cerebras');
   });
 
   afterEach(() => {
@@ -96,7 +95,7 @@ describe('Model unification (group the same model across providers)', () => {
   });
 
   it('GET /v1/models collapses the two providers into one canonical entry', async () => {
-    const { status, body } = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+    const { status, body } = await request(app, 'GET', '/v1/models', undefined, await authHeaders());
     expect(status).toBe(200);
     const ours = body.data.filter((m: any) => m.name === 'Test Unify Model');
     expect(ours).toHaveLength(1);
@@ -118,7 +117,7 @@ describe('Model unification (group the same model across providers)', () => {
     const { status, body, headers } = await request(app, 'POST', '/v1/chat/completions', {
       model: 'test-unify-model',
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(body.choices[0].message.content).toContain('cerebras');
@@ -128,11 +127,11 @@ describe('Model unification (group the same model across providers)', () => {
   it('a group-pinned non-streaming session sticks to the last successful provider next turn (#341 sticky-key)', async () => {
     const db = getDb();
     const realFetch = global.fetch;
-    const sess = { ...authHeaders(), 'x-session-id': 'sticky-test-1' };
-    const groqId = db.prepare("SELECT id FROM models WHERE model_id = 'tum-groq'").get() as { id: number };
-    const cerebrasId = db.prepare("SELECT id FROM models WHERE model_id = 'tum-cerebras'").get() as { id: number };
-    const setPriority = (modelDbId: number, p: number) =>
-      db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?').run(p, modelDbId);
+    const sess = { ...await authHeaders(), 'x-session-id': 'sticky-test-1' };
+    const groqId = (await db.get("SELECT id FROM models WHERE model_id = 'tum-groq'")) as { id: number };
+    const cerebrasId = (await db.get("SELECT id FROM models WHERE model_id = 'tum-cerebras'")) as { id: number };
+    const setPriority = async (modelDbId: number, p: number) =>
+      (await db.run('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?', [p, modelDbId]));
     // Both providers stay healthy throughout, so the only thing that can move the
     // route between turns is stickiness — never a cooldown.
     vi.spyOn(global, 'fetch').mockImplementation(async (url: any, init?: any) => {
@@ -144,8 +143,8 @@ describe('Model unification (group the same model across providers)', () => {
 
     // Turn 1: make Cerebras priority 1 so it wins outright (no failover), recording
     // it as the sticky provider for this pinned-model session.
-    setPriority(cerebrasId.id, 1);
-    setPriority(groqId.id, 2);
+    await setPriority(cerebrasId.id, 1);
+    await setPriority(groqId.id, 2);
     const turn1 = await request(app, 'POST', '/v1/chat/completions', {
       model: 'test-unify-model', messages: [{ role: 'user', content: 'first' }],
     }, sess);
@@ -153,8 +152,8 @@ describe('Model unification (group the same model across providers)', () => {
     expect(turn1.headers.get('x-routed-via')).toContain('cerebras');
 
     // Flip priority so plain routing would now prefer Groq — sticky must override.
-    setPriority(groqId.id, 1);
-    setPriority(cerebrasId.id, 2);
+    await setPriority(groqId.id, 1);
+    await setPriority(cerebrasId.id, 2);
 
     // Turn 2: same session, now a multi-turn conversation (getStickyModel only
     // engages once the session has an assistant turn). Pure priority would pick
@@ -187,7 +186,7 @@ describe('Model unification (group the same model across providers)', () => {
     const { status, headers } = await request(app, 'POST', '/v1/chat/completions', {
       model: 'tum-groq',
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(headers.get('x-routed-via')).toContain('cerebras');
@@ -206,7 +205,7 @@ describe('Model unification (group the same model across providers)', () => {
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       model: 'test-unify-model',
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(429);
     expect(body.choices).toBeUndefined(); // no answer from any model
@@ -226,7 +225,7 @@ describe('Model unification (group the same model across providers)', () => {
     const pinned = await request(app, 'POST', '/v1/chat/completions', {
       model: 'cerebras:tum-cerebras',
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(pinned.status).toBe(200);
     expect(pinned.headers.get('x-routed-via')).toContain('cerebras');
 
@@ -235,7 +234,7 @@ describe('Model unification (group the same model across providers)', () => {
     const down = await request(app, 'POST', '/v1/chat/completions', {
       model: 'groq:tum-groq',
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(down.status).toBe(429);
     expect(down.headers.get('x-routed-via') ?? '').not.toContain('cerebras');
 
@@ -243,7 +242,7 @@ describe('Model unification (group the same model across providers)', () => {
     const unknown = await request(app, 'POST', '/v1/chat/completions', {
       model: 'nope:tum-groq',
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(unknown.status).toBe(404);
   });
 
@@ -255,22 +254,22 @@ describe('Model unification (group the same model across providers)', () => {
     expect(put.body.overrides.splits).toEqual([{ member: 'groq:tum-groq' }]);
 
     // The split copy is advertised as its own logical model now.
-    const { body } = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+    const { body } = await request(app, 'GET', '/v1/models', undefined, await authHeaders());
     const ours = body.data.filter((m: any) => m.name === 'Test Unify Model');
     expect(ours).toHaveLength(2);
 
     // Removing the split (the UI's undo) collapses them again.
     const undo = await request(app, 'PUT', '/api/settings/unify', { overrides: { merges: [], splits: [] } });
     expect(undo.status).toBe(200);
-    const after = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+    const after = await request(app, 'GET', '/v1/models', undefined, await authHeaders());
     expect(after.body.data.filter((m: any) => m.name === 'Test Unify Model')).toHaveLength(1);
   });
 
   it('unification is always on: the toggle was removed, so /v1/models stays collapsed even after setUnifyEnabled(false)', async () => {
     // The unify on/off switch was removed from the product; isUnifyEnabled() now
     // always returns true, so writing the old setting has no effect.
-    setUnifyEnabled(false);
-    const { status, body } = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+    await setUnifyEnabled(false);
+    const { status, body } = await request(app, 'GET', '/v1/models', undefined, await authHeaders());
     expect(status).toBe(200);
     const ours = body.data.filter((m: any) => m.name === 'Test Unify Model');
     expect(ours).toHaveLength(1);

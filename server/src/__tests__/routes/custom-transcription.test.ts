@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { clearCooldownsForKey } from '../../services/ratelimit.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // End-to-end cover for a user-registered speech-to-text endpoint: POST
 // /api/media/custom writes the media_models row AND the api_keys row that
@@ -61,7 +62,7 @@ async function postTranscription(app: Express, fields: Record<string, string>) {
   for (const [k, v] of Object.entries(fields)) form.append(k, v);
   const res = await realFetch(`http://127.0.0.1:${port}/v1/audio/transcriptions`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${getUnifiedApiKey()}` },
+    headers: { Authorization: `Bearer ${await getUnifiedApiKey()}` },
     body: form,
   });
   const raw = await res.text();
@@ -90,14 +91,14 @@ function jsonResponse(body: unknown, status = 200) {
 describe('custom speech-to-text endpoint, end to end', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     // Cooldowns live in a module-level map that outlives the per-test :memory:
     // DB; key ids restart at 1 in every test, so stale entries must be purged.
-    for (let id = 1; id <= 10; id++) clearCooldownsForKey(id);
+    for (let id = 1; id <= 10; id++) await clearCooldownsForKey(id);
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   afterEach(() => {
@@ -146,9 +147,7 @@ describe('custom speech-to-text endpoint, end to end', () => {
     expect(Buffer.from(await file.arrayBuffer()).equals(AUDIO)).toBe(true);
 
     // The request is logged under the transcription modality like any other.
-    const row = getDb()
-      .prepare("SELECT platform, model_id, status, request_type FROM requests ORDER BY id DESC LIMIT 1")
-      .get() as any;
+    const row = (await getDb().get("SELECT platform, model_id, status, request_type FROM requests ORDER BY id DESC LIMIT 1")) as any;
     expect(row).toMatchObject({ platform: 'custom', request_type: 'transcription', status: 'success' });
   });
 

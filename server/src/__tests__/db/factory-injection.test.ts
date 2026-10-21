@@ -17,11 +17,11 @@ function makeStubDb(): Db {
 }
 
 describe('connectDb — factory injection', () => {
-  it('calls the injected factory instead of opening a filesystem path', () => {
+  it('calls the injected factory instead of opening a filesystem path', async () => {
     const stub = makeStubDb();
     const factory: DbFactory = vi.fn().mockReturnValue(stub);
 
-    const result = connectDb('/fake/non-existent/path.db', { factory, ensureDir: false });
+    const result = await connectDb('/fake/non-existent/path.db', { factory, ensureDir: false });
 
     expect(factory).toHaveBeenCalledWith('/fake/non-existent/path.db');
     expect(result).toBe(stub);
@@ -32,6 +32,6 @@ describe('connectDb — factory injection', () => {
     const factory: DbFactory = () => stub;
 
     // ensureDir: false skips mkdirSync so the fake path never hits the filesystem.
-    expect(() => connectDb('/definitely/does/not/exist/db.sqlite', { factory, ensureDir: false })).not.toThrow();
+    expect(async () => await connectDb('/definitely/does/not/exist/db.sqlite', { factory, ensureDir: false })).not.toThrow();
   });
 });

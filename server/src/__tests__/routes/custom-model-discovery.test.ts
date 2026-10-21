@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { setCooldown, isOnCooldown } from '../../services/ratelimit.js';
 import { PROBE_MAX_TOKENS } from '../../services/model-discovery.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #488: a relay's model list changes weekly, so the endpoint's own /models
 // route is the source of truth for what the USER's key can reach. This is
@@ -49,28 +50,27 @@ function stubRelay(payload: unknown, status = 200) {
   return mock;
 }
 
-function customKeyIds(baseUrl = ENDPOINT): number[] {
-  return (getDb().prepare("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ? ORDER BY id")
-    .all(baseUrl) as { id: number }[]).map(r => r.id);
+async function customKeyIds(baseUrl = ENDPOINT): number[] {
+  return ((await getDb().all("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = ? ORDER BY id", [baseUrl])) as { id: number }[]).map(r => r.id);
 }
 
-function chatModel(modelId: string) {
-  return getDb().prepare(`
+async function chatModel(modelId: string) {
+  return (await getDb().get(`
     SELECT id, key_id, intelligence_rank, speed_rank, size_label, source
       FROM models WHERE platform = 'custom' AND model_id = ?
-  `).get(modelId) as
+  `, [modelId])) as
     { id: number; key_id: number | null; intelligence_rank: number; speed_rank: number; size_label: string; source: string } | undefined;
 }
 
 describe('custom endpoint model discovery (#488)', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    getDb().prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+    await initTestDb();
+    (await getDb().run("DELETE FROM settings WHERE key = 'active_profile_id'"));
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   afterEach(() => {
@@ -95,7 +95,7 @@ describe('custom endpoint model discovery (#488)', () => {
 
     expect(status).toBe(200);
     expect(body.baseUrl).toBe(ENDPOINT);
-    expect(body.keyId).toBe(customKeyIds()[0]);
+    expect(body.keyId).toBe((await customKeyIds())[0]);
     expect(body.models).toEqual([
       { id: 'relay-a', ownedBy: 'acme', registered: true },
       { id: 'relay-b', ownedBy: 'acme', registered: false },
@@ -111,7 +111,7 @@ describe('custom endpoint model discovery (#488)', () => {
 
   it('accepts a key id instead of a base url', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'relay-secret' });
-    const keyId = customKeyIds()[0]!;
+    const keyId = (await customKeyIds())[0]!;
     stubRelay({ data: [{ id: 'relay-b' }] });
 
     const { status, body } = await post(app, DISCOVER, { keyId });
@@ -126,7 +126,7 @@ describe('custom endpoint model discovery (#488)', () => {
     expect(status).toBe(200);
     expect(body.keyId).toBeNull();
     expect(body.models).toEqual([{ id: 'relay-b', ownedBy: null, registered: false }]);
-    expect(customKeyIds()).toHaveLength(0); // discovery never writes
+    expect(await customKeyIds()).toHaveLength(0); // discovery never writes
   });
 
   it('parses a non-standard relay envelope', async () => {
@@ -175,12 +175,12 @@ describe('custom endpoint model discovery (#488)', () => {
 describe('bulk registration of discovered models (#488)', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    getDb().prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+    await initTestDb();
+    (await getDb().run("DELETE FROM settings WHERE key = 'active_profile_id'"));
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   afterEach(() => {
@@ -193,7 +193,7 @@ describe('bulk registration of discovered models (#488)', () => {
     // A second credential for the same endpoint (#640/#619): models bind to the
     // endpoint, and the pool rotates underneath that binding.
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'second-secret' });
-    const [firstKeyId, secondKeyId] = customKeyIds();
+    const [firstKeyId, secondKeyId] = await customKeyIds();
 
     const { status, body } = await post(app, '/api/keys/custom', {
       keyId: secondKeyId,
@@ -210,18 +210,17 @@ describe('bulk registration of discovered models (#488)', () => {
     expect(body.alreadyRegistered).toBe(1);
 
     // relay-a keeps its original binding; the new ones bind to the submitted key.
-    expect(chatModel('relay-a')!.key_id).toBe(firstKeyId);
-    expect(chatModel('relay-b')!.key_id).toBe(secondKeyId);
-    expect(chatModel('relay-c')!.key_id).toBe(secondKeyId);
-    expect(chatModel('relay-b')!.source).toBe('user');
+    expect(await chatModel('relay-a')!.key_id).toBe(firstKeyId);
+    expect(await chatModel('relay-b')!.key_id).toBe(secondKeyId);
+    expect(await chatModel('relay-c')!.key_id).toBe(secondKeyId);
+    expect(await chatModel('relay-b')!.source).toBe('user');
   });
 
   it('does not duplicate a model that is already registered', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'first-secret' });
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, models: ['relay-a', 'relay-a', 'relay-b'] });
 
-    const rows = getDb().prepare("SELECT model_id FROM models WHERE platform = 'custom' ORDER BY model_id")
-      .all() as { model_id: string }[];
+    const rows = (await getDb().all("SELECT model_id FROM models WHERE platform = 'custom' ORDER BY model_id")) as { model_id: string }[];
     expect(rows.map(r => r.model_id)).toEqual(['relay-a', 'relay-b']);
   });
 
@@ -234,7 +233,7 @@ describe('bulk registration of discovered models (#488)', () => {
   it('rejects a baseUrl that contradicts the submitted keyId', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'first-secret' });
     const { status } = await post(app, '/api/keys/custom', {
-      keyId: customKeyIds()[0], baseUrl: 'http://127.0.0.1:18098/v1', models: ['relay-b'],
+      keyId: (await customKeyIds())[0], baseUrl: 'http://127.0.0.1:18098/v1', models: ['relay-b'],
     });
     expect(status).toBe(400);
   });
@@ -243,28 +242,28 @@ describe('bulk registration of discovered models (#488)', () => {
 describe('median seeding for custom models (#488)', () => {
   let app: Express;
 
-  function seedCatalog() {
+  async function seedCatalog(): Promise<void> {
     const db = getDb();
-    db.prepare('DELETE FROM fallback_config').run();
-    db.prepare('DELETE FROM models').run();
-    const insert = db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
-                          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, enabled)
-      VALUES ('groq', ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, '', 1)
-    `);
+    (await db.run('DELETE FROM fallback_config'));
+    (await db.run('DELETE FROM models'));
     const rows: Array<[string, number, number]> = [
       ['Small', 40, 4], ['Medium', 20, 3], ['Large', 10, 2], ['Frontier', 2, 1], ['Frontier', 1, 5],
     ];
-    rows.forEach(([label, intel, speed], i) => insert.run(`cat-${i}`, `Cat ${i}`, intel, speed, label));
+    for (const [i, [label, intel, speed]] of rows.entries()) {
+      (await db.run(`
+      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
+                          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, enabled)
+      VALUES ('groq', ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, '', 1) RETURNING id`, [`cat-${i}`, `Cat ${i}`, intel, speed, label]));
+    }
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    getDb().prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
-    seedCatalog();
+    await initTestDb();
+    (await getDb().run("DELETE FROM settings WHERE key = 'active_profile_id'"));
+    await seedCatalog();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   afterEach(() => {
@@ -275,7 +274,7 @@ describe('median seeding for custom models (#488)', () => {
   it('seeds a bulk-registered custom model at the catalog median', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, models: ['relay-a', 'relay-b'], apiKey: 'k' });
     for (const id of ['relay-a', 'relay-b']) {
-      const row = chatModel(id)!;
+      const row = await chatModel(id)!;
       expect(row.size_label).toBe('Large');
       expect(row.intelligence_rank).toBe(10);
       expect(row.speed_rank).toBe(3);
@@ -284,7 +283,7 @@ describe('median seeding for custom models (#488)', () => {
 
   it('seeds a singly-added custom model the same way', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-solo', apiKey: 'k' });
-    const row = chatModel('relay-solo')!;
+    const row = await chatModel('relay-solo')!;
     expect(row.size_label).toBe('Large');
     expect(row.intelligence_rank).toBe(10);
     expect(row.speed_rank).toBe(3);
@@ -292,20 +291,19 @@ describe('median seeding for custom models (#488)', () => {
 
   it('never overwrites ranks the operator has since tuned', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'k' });
-    const modelDbId = chatModel('relay-a')!.id;
-    getDb().prepare('UPDATE models SET intelligence_rank = 1, speed_rank = 1, size_label = ? WHERE id = ?')
-      .run('Frontier', modelDbId);
+    const modelDbId = await chatModel('relay-a')!.id;
+    (await getDb().run('UPDATE models SET intelligence_rank = 1, speed_rank = 1, size_label = ? WHERE id = ?', ['Frontier', modelDbId]));
 
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, models: ['relay-a', 'relay-b'], apiKey: 'k' });
 
-    const kept = chatModel('relay-a')!;
+    const kept = await chatModel('relay-a')!;
     expect([kept.intelligence_rank, kept.speed_rank, kept.size_label]).toEqual([1, 1, 'Frontier']);
-    expect(chatModel('relay-b')!.size_label).toBe('Large');
+    expect(await chatModel('relay-b')!.size_label).toBe('Large');
   });
 
   it('probe fires one chat request at the REGISTERED model and records a success sample (#685 follow-up)', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'relay-secret' });
-    const keyId = customKeyIds()[0]!;
+    const keyId = (await customKeyIds())[0]!;
     setCooldown('custom', 'relay-a', keyId, 60_000);
 
     // A registered model means the probe already knows what to hit: one POST
@@ -343,15 +341,13 @@ describe('median seeding for custom models (#488)', () => {
 
     // The successful probe wrote a request row the stats cache can fold in,
     // token counts included.
-    const row = getDb().prepare(
-      "SELECT status, input_tokens, output_tokens, latency_ms FROM requests WHERE platform = 'custom' AND model_id = 'relay-a' ORDER BY id DESC LIMIT 1",
-    ).get() as { status: string; input_tokens: number; output_tokens: number; latency_ms: number };
+    const row = (await getDb().get("SELECT status, input_tokens, output_tokens, latency_ms FROM requests WHERE platform = 'custom' AND model_id = 'relay-a' ORDER BY id DESC LIMIT 1")) as { status: string; input_tokens: number; output_tokens: number; latency_ms: number };
     expect(row.status).toBe('success');
     expect(row.input_tokens).toBe(3);
     expect(row.output_tokens).toBe(1);
 
     // A real completion outranks a health ping: the cooldown is lifted.
-    expect(isOnCooldown('custom', 'relay-a', keyId)).toBe(false);
+    expect(await isOnCooldown('custom', 'relay-a', keyId)).toBe(false);
   });
 
   // #903: relays that enforce `max_tokens > 2` rejected the old probe with a
@@ -361,7 +357,7 @@ describe('median seeding for custom models (#488)', () => {
     expect(PROBE_MAX_TOKENS).toBeGreaterThan(2);
 
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'relay-secret' });
-    const keyId = customKeyIds()[0]!;
+    const keyId = (await customKeyIds())[0]!;
 
     const mock = vi.fn(async (url: string, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(String(init.body)) as { max_tokens?: number } : {};
@@ -387,9 +383,9 @@ describe('median seeding for custom models (#488)', () => {
 
   it('probe falls back to discovery when the endpoint has no registered model (#685 follow-up)', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'relay-secret' });
-    const keyId = customKeyIds()[0]!;
-    getDb().prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')").run();
-    getDb().prepare("DELETE FROM models WHERE platform = 'custom'").run();
+    const keyId = (await customKeyIds())[0]!;
+    (await getDb().run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')"));
+    (await getDb().run("DELETE FROM models WHERE platform = 'custom'"));
 
     const mock = vi.fn(async (url: string) => {
       if (String(url).endsWith('/models')) {
@@ -417,7 +413,7 @@ describe('median seeding for custom models (#488)', () => {
 
   it('probe failure surfaces the reason, records no sample and keeps the cooldown (#685 follow-up)', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'relay-secret' });
-    const keyId = customKeyIds()[0]!;
+    const keyId = (await customKeyIds())[0]!;
     setCooldown('custom', 'relay-a', keyId, 60_000);
 
     const mock = vi.fn(async (url: string) => {
@@ -432,14 +428,14 @@ describe('median seeding for custom models (#488)', () => {
 
     expect(status).toBe(502);
     expect(String(body.error.message)).toContain('upstream exploded');
-    const count = (getDb().prepare("SELECT COUNT(*) AS c FROM requests WHERE platform = 'custom'").get() as { c: number }).c;
+    const count = ((await getDb().get("SELECT COUNT(*) AS c FROM requests WHERE platform = 'custom'")) as { c: number }).c;
     expect(count).toBe(0);
-    expect(isOnCooldown('custom', 'relay-a', keyId)).toBe(true);
+    expect(await isOnCooldown('custom', 'relay-a', keyId)).toBe(true);
   });
 
   it('probe reports reasoning=true when the reasoning probe answer is correct (#874)', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'relay-secret' });
-    const keyId = customKeyIds()[0]!;
+    const keyId = (await customKeyIds())[0]!;
 
     // Ping (max_tokens 1) → reasoning probe (max_tokens 16) → tool probe (tools).
     const mock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -473,9 +469,9 @@ describe('median seeding for custom models (#488)', () => {
 
   it('probe reports toolCalls and writes supports_tools back to the model row (#874)', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'relay-secret' });
-    const keyId = customKeyIds()[0]!;
+    const keyId = (await customKeyIds())[0]!;
     // Start from an explicit "no tool support" flag so the write-back is provable.
-    getDb().prepare("UPDATE models SET supports_tools = 0 WHERE platform = 'custom' AND model_id = 'relay-a'").run();
+    (await getDb().run("UPDATE models SET supports_tools = 0 WHERE platform = 'custom' AND model_id = 'relay-a'"));
 
     const mock = vi.fn(async (url: string, init?: RequestInit) => {
       if (String(url).endsWith('/models')) {
@@ -502,14 +498,14 @@ describe('median seeding for custom models (#488)', () => {
 
     expect(status).toBe(200);
     expect(body.toolCalls).toBe(true);
-    const row = getDb().prepare("SELECT supports_tools FROM models WHERE platform = 'custom' AND model_id = 'relay-a'").get() as { supports_tools: number };
+    const row = (await getDb().get("SELECT supports_tools FROM models WHERE platform = 'custom' AND model_id = 'relay-a'")) as { supports_tools: number };
     expect(row.supports_tools).toBe(1);
   });
 
   it('probe without tool-call evidence leaves supports_tools untouched (#874)', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'relay-secret' });
-    const keyId = customKeyIds()[0]!;
-    getDb().prepare("UPDATE models SET supports_tools = 0 WHERE platform = 'custom' AND model_id = 'relay-a'").run();
+    const keyId = (await customKeyIds())[0]!;
+    (await getDb().run("UPDATE models SET supports_tools = 0 WHERE platform = 'custom' AND model_id = 'relay-a'"));
 
     // All three probes answer plain text with finish_reason 'stop' — no tool
     // evidence anywhere, so supports_tools must stay 0 (only positive writes).
@@ -527,13 +523,13 @@ describe('median seeding for custom models (#488)', () => {
 
     expect(status).toBe(200);
     expect(body.toolCalls).toBe(false);
-    const row = getDb().prepare("SELECT supports_tools FROM models WHERE platform = 'custom' AND model_id = 'relay-a'").get() as { supports_tools: number };
+    const row = (await getDb().get("SELECT supports_tools FROM models WHERE platform = 'custom' AND model_id = 'relay-a'")) as { supports_tools: number };
     expect(row.supports_tools).toBe(0);
   });
 
   it('reports the ping round trip as latency, not the sum of the capability probes (#874)', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'relay-secret' });
-    const keyId = customKeyIds()[0]!;
+    const keyId = (await customKeyIds())[0]!;
 
     // The ping answers instantly; both capability probes are deliberately slow.
     // `latencyMs` measures the endpoint's per-request speed and feeds the
@@ -561,7 +557,7 @@ describe('median seeding for custom models (#488)', () => {
     expect(mock.mock.calls.filter(([u]) => String(u).endsWith('/chat/completions'))).toHaveLength(3);
     expect(body.latencyMs).toBeLessThan(SLOW_PROBE_MS);
     // The recorded sample carries the same ping-only number.
-    const sample = getDb().prepare("SELECT latency_ms FROM requests WHERE platform = 'custom'").get() as { latency_ms: number };
+    const sample = (await getDb().get("SELECT latency_ms FROM requests WHERE platform = 'custom'")) as { latency_ms: number };
     expect(sample.latency_ms).toBeLessThan(SLOW_PROBE_MS);
   });
 
@@ -572,9 +568,9 @@ describe('median seeding for custom models (#488)', () => {
     const OTHER_ENDPOINT = 'http://127.0.0.1:18098/v1';
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'shared-model', apiKey: 'relay-secret' });
     await post(app, '/api/keys/custom', { baseUrl: OTHER_ENDPOINT, model: 'shared-model', apiKey: 'other-secret' });
-    const probedKeyId = customKeyIds(ENDPOINT)[0]!;
-    const otherKeyId = customKeyIds(OTHER_ENDPOINT)[0]!;
-    getDb().prepare("UPDATE models SET supports_tools = 0 WHERE platform = 'custom' AND model_id = 'shared-model'").run();
+    const probedKeyId = await customKeyIds(ENDPOINT)[0]!;
+    const otherKeyId = await customKeyIds(OTHER_ENDPOINT)[0]!;
+    (await getDb().run("UPDATE models SET supports_tools = 0 WHERE platform = 'custom' AND model_id = 'shared-model'"));
 
     const mock = vi.fn(async (url: string, init?: RequestInit) => {
       if (String(url).endsWith('/models')) {
@@ -596,16 +592,14 @@ describe('median seeding for custom models (#488)', () => {
 
     expect(status).toBe(200);
     expect(body.toolCalls).toBe(true);
-    const flagFor = (keyId: number) => (getDb().prepare(
-      "SELECT supports_tools FROM models WHERE platform = 'custom' AND model_id = 'shared-model' AND key_id = ?",
-    ).get(keyId) as { supports_tools: number }).supports_tools;
-    expect(flagFor(probedKeyId)).toBe(1);
-    expect(flagFor(otherKeyId)).toBe(0);
+    const flagFor = async (keyId: number) => ((await getDb().get("SELECT supports_tools FROM models WHERE platform = 'custom' AND model_id = 'shared-model' AND key_id = ?", [keyId])) as { supports_tools: number }).supports_tools;
+    expect(await flagFor(probedKeyId)).toBe(1);
+    expect(await flagFor(otherKeyId)).toBe(0);
   });
 
   it('leaves capability flags absent (unknown) when the capability probes fail (#874)', async () => {
     await post(app, '/api/keys/custom', { baseUrl: ENDPOINT, model: 'relay-a', apiKey: 'relay-secret' });
-    const keyId = customKeyIds()[0]!;
+    const keyId = (await customKeyIds())[0]!;
 
     // The ping succeeds, both capability probes blow up. "Unknown" is not the
     // same claim as "no": the response must OMIT the flags so the UI can say so.
@@ -631,7 +625,7 @@ describe('median seeding for custom models (#488)', () => {
     expect(body.modelId).toBe('relay-a');
     expect(body).not.toHaveProperty('reasoning');
     expect(body).not.toHaveProperty('toolCalls');
-    const count = (getDb().prepare("SELECT COUNT(*) AS c FROM requests WHERE platform = 'custom'").get() as { c: number }).c;
+    const count = ((await getDb().get("SELECT COUNT(*) AS c FROM requests WHERE platform = 'custom'")) as { c: number }).c;
     expect(count).toBe(1);
   });
 });

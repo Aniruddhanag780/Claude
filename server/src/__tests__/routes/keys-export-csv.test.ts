@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // FIX 3: CSV export must neutralize formula-injection in free-text labels. A
 // label like `=HYPERLINK(...)` would run as a formula when the file is opened
@@ -39,15 +40,15 @@ async function exportCsvText(app: Express): Promise<{ status: number; text: stri
 describe('Keys CSV export — formula injection guard (FIX 3)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
+  beforeEach(async () => {
+    await getDb().run('DELETE FROM api_keys');
   });
 
   it('prefixes formula-leading labels with a single quote', async () => {
@@ -75,7 +76,7 @@ describe('Keys CSV export — formula injection guard (FIX 3)', () => {
       ['-2+3', "'-"],
       ['@SUM(A1)', "'@"],
     ] as const) {
-      getDb().prepare('DELETE FROM api_keys').run();
+      await getDb().run('DELETE FROM api_keys');
       await post(app, '/api/keys', { platform: 'groq', key: 'gsk_realkey_123456', label });
       const { text } = await exportCsvText(app);
       const dataLine = text.trim().split('\n')[1]!;

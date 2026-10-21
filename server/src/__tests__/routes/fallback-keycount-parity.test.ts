@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -27,22 +28,22 @@ describe('fallback key-count filter parity (#456)', () => {
   let app: Express;
   let modelId: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
 
     const db = getDb();
     // One usable (healthy) groq key and one that must NOT add capacity (invalid).
     const good = encrypt('good'); const bad = encrypt('bad');
-    db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('groq','good',?,?,?,'healthy',1)").run(good.encrypted, good.iv, good.authTag);
-    db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('groq','bad',?,?,?,'invalid',1)").run(bad.encrypted, bad.iv, bad.authTag);
+    (await db.run("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('groq','good',?,?,?,'healthy',1) RETURNING id", [good.encrypted, good.iv, good.authTag]));
+    (await db.run("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('groq','bad',?,?,?,'invalid',1) RETURNING id", [bad.encrypted, bad.iv, bad.authTag]));
 
-    const m = db.prepare("SELECT model_id FROM models WHERE platform = 'groq' ORDER BY id LIMIT 1").get() as { model_id: string };
+    const m = (await db.get("SELECT model_id FROM models WHERE platform = 'groq' ORDER BY id LIMIT 1")) as { model_id: string };
     modelId = m.model_id;
     // Non-zero parseable budget so the key multiplier is observable.
-    db.prepare("UPDATE models SET monthly_token_budget = '~1M' WHERE platform = 'groq' AND model_id = ?").run(modelId);
+    (await db.run("UPDATE models SET monthly_token_budget = '~1M' WHERE platform = 'groq' AND model_id = ?", [modelId]));
   });
 
   it('GET / counts only enabled healthy/unknown keys (invalid excluded)', async () => {

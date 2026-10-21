@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function post(app: Express, path: string, body: any, key: string) {
   const server = app.listen(0, '127.0.0.1');
@@ -33,21 +34,21 @@ describe('Vision-aware routing (#118, #125)', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
-  it('seeds supports_vision: true for vision models, false for text-only', () => {
+  it('seeds supports_vision: true for vision models, false for text-only', async () => {
     const db = getDb();
-    const vision = db.prepare("SELECT supports_vision FROM models WHERE model_id = 'gemini-2.5-flash'").get() as { supports_vision: number };
+    const vision = (await db.get("SELECT supports_vision FROM models WHERE model_id = 'gemini-2.5-flash'")) as { supports_vision: number };
     expect(vision.supports_vision).toBe(1);
 
     // The known vision set is flagged; plenty of text-only models remain at 0.
-    const visionCount = (db.prepare('SELECT COUNT(*) c FROM models WHERE supports_vision = 1').get() as { c: number }).c;
-    const textCount = (db.prepare('SELECT COUNT(*) c FROM models WHERE supports_vision = 0').get() as { c: number }).c;
+    const visionCount = ((await db.get('SELECT COUNT(*) c FROM models WHERE supports_vision = 1')) as { c: number }).c;
+    const textCount = ((await db.get('SELECT COUNT(*) c FROM models WHERE supports_vision = 0')) as { c: number }).c;
     expect(visionCount).toBeGreaterThanOrEqual(4);
     expect(textCount).toBeGreaterThan(0);
   });
@@ -63,7 +64,7 @@ describe('Vision-aware routing (#118, #125)', () => {
 
   it('rejects an image request with a clear 422 when no vision model is enabled', async () => {
     // Disable every vision-capable model in the chain.
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_vision = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 0 WHERE supports_vision = 1'));
 
     const { status, body } = await post(app, '/v1/chat/completions', IMAGE_MESSAGE, key);
     expect(status).toBe(422);
@@ -71,19 +72,19 @@ describe('Vision-aware routing (#118, #125)', () => {
     expect(body.error.type).toBe('invalid_request_error');
 
     // Restore so we don't leak state to other expectations.
-    getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_vision = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 1 WHERE supports_vision = 1'));
   });
 
   it('does not apply the vision gate to a text-only request', async () => {
     // Disable all vision models; a plain text request must still route normally
     // (it 429s on exhaustion here, but never the 422 vision error).
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_vision = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 0 WHERE supports_vision = 1'));
     const { status, body } = await post(app, '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
     }, key);
     expect(status).not.toBe(422);
     expect(body?.error?.code).not.toBe('no_vision_model');
-    getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_vision = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 1 WHERE supports_vision = 1'));
   });
 
   it('lets a fusion image request through routing (no 422 fusion_no_vision)', async () => {

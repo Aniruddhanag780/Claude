@@ -7,7 +7,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vite
 // successful probe. Plus the provenance classification the whole feature keys
 // off (cooldownDecisionForError / setCooldown source tagging).
 
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import {
   setCooldown,
   isOnCooldown,
@@ -22,6 +22,7 @@ import {
 import { cooldownDecisionForError } from '../../lib/fallback-loop.js';
 import type { RouteResult } from '../../services/router.js';
 import type { KeyProbeOutcome } from '../../services/health.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const MINUTE = 60_000;
 
@@ -46,24 +47,24 @@ const probeReturning = (outcome: KeyProbeOutcome) => vi.fn(async (_keyId: number
 // which keeps the "seed pass then probe pass" choreography deterministic.
 const noJitter = () => 0;
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   resetCooldownProbeState();
-  getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+  (await getDb().run('DELETE FROM rate_limit_cooldowns'));
 });
 
 describe('probe eligibility', () => {
-  it('only heuristic cooldowns are visible to the prober', () => {
+  it('only heuristic cooldowns are visible to the prober', async () => {
     const heuristic = bench('heuristic');
     bench('authoritative');
     bench('credit');
     bench('tier');
 
-    const rows = getProbeableCooldowns();
+    const rows = await getProbeableCooldowns();
     expect(rows).toHaveLength(1);
     expect(rows[0].keyId).toBe(heuristic);
   });
@@ -83,9 +84,9 @@ describe('probe eligibility', () => {
     expect(probe).toHaveBeenCalledTimes(1);
     expect(probe).toHaveBeenCalledWith(heuristic);
     // The provider-stated benches stay exactly where they were.
-    expect(isOnCooldown('probefake', 'model-a', authoritative)).toBe(true);
-    expect(isOnCooldown('probefake', 'model-a', credit)).toBe(true);
-    expect(isOnCooldown('probefake', 'model-a', tier)).toBe(true);
+    expect(await isOnCooldown('probefake', 'model-a', authoritative)).toBe(true);
+    expect(await isOnCooldown('probefake', 'model-a', credit)).toBe(true);
+    expect(await isOnCooldown('probefake', 'model-a', tier)).toBe(true);
   });
 
   it('does not probe before half the bench has elapsed', async () => {
@@ -121,8 +122,8 @@ describe('successful probe', () => {
     const keyId = ++keySeq;
     bench('heuristic', { keyId, modelId: 'model-a' });
     bench('heuristic', { keyId, modelId: 'model-b' });
-    expect(isOnCooldown('probefake', 'model-a', keyId)).toBe(true);
-    expect(isOnCooldown('probefake', 'model-b', keyId)).toBe(true);
+    expect(await isOnCooldown('probefake', 'model-a', keyId)).toBe(true);
+    expect(await isOnCooldown('probefake', 'model-b', keyId)).toBe(true);
 
     const probe = probeReturning('valid');
     const now = Date.now() + 6 * MINUTE;
@@ -132,23 +133,21 @@ describe('successful probe', () => {
     // One validate call is the same evidence for both benched models.
     expect(probe).toHaveBeenCalledTimes(1);
     expect(result.clearedCooldowns).toBe(2);
-    expect(isOnCooldown('probefake', 'model-a', keyId)).toBe(false);
-    expect(isOnCooldown('probefake', 'model-b', keyId)).toBe(false);
-    expect(getProbeableCooldowns(now)).toHaveLength(0);
+    expect(await isOnCooldown('probefake', 'model-a', keyId)).toBe(false);
+    expect(await isOnCooldown('probefake', 'model-b', keyId)).toBe(false);
+    expect(await getProbeableCooldowns(now)).toHaveLength(0);
   });
 });
 
 describe('failed probe', () => {
-  function expiryOf(keyId: number): number {
-    const row = getDb().prepare(
-      "SELECT expires_at_ms FROM rate_limit_cooldowns WHERE key_id = ?",
-    ).get(keyId) as { expires_at_ms: number };
+  async function expiryOf(keyId: number): number {
+    const row = (await getDb().get("SELECT expires_at_ms FROM rate_limit_cooldowns WHERE key_id = ?", [keyId])) as { expires_at_ms: number };
     return row.expires_at_ms;
   }
 
   it('leaves the cooldown exactly as it was — never extends it', async () => {
     const keyId = bench('heuristic', { durationMs: 30 * MINUTE });
-    const expiryBefore = expiryOf(keyId);
+    const expiryBefore = await expiryOf(keyId);
     const probe = probeReturning('invalid');
     const now = Date.now() + 16 * MINUTE;
 
@@ -157,8 +156,8 @@ describe('failed probe', () => {
 
     expect(result.probedKeyIds).toEqual([keyId]);
     expect(result.clearedCooldowns).toBe(0);
-    expect(isOnCooldown('probefake', 'model-a', keyId)).toBe(true);
-    expect(expiryOf(keyId)).toBe(expiryBefore);
+    expect(await isOnCooldown('probefake', 'model-a', keyId)).toBe(true);
+    expect(await expiryOf(keyId)).toBe(expiryBefore);
   });
 
   it('backs off with increasing intervals between probes', async () => {
@@ -185,7 +184,7 @@ describe('failed probe', () => {
     // 4 minutes after probe #2: due again.
     await runCooldownProbePass({ now: t0 + 6 * MINUTE, probe, jitter: noJitter });
     expect(probe).toHaveBeenCalledTimes(3);
-    expect(isOnCooldown('probefake', 'model-a', keyId)).toBe(true);
+    expect(await isOnCooldown('probefake', 'model-a', keyId)).toBe(true);
   });
 
   it('treats an inconclusive transport error like a failure', async () => {
@@ -197,7 +196,7 @@ describe('failed probe', () => {
     const result = await runCooldownProbePass({ now, probe, jitter: noJitter });
 
     expect(result.clearedCooldowns).toBe(0);
-    expect(isOnCooldown('probefake', 'model-a', keyId)).toBe(true);
+    expect(await isOnCooldown('probefake', 'model-a', keyId)).toBe(true);
   });
 });
 
@@ -247,40 +246,40 @@ describe('cooldown provenance (cooldownDecisionForError)', () => {
     };
   }
 
-  it('tags 402 out-of-credits as credit (never probed)', () => {
-    const decision = cooldownDecisionForError(fakeRoute(), new Error('402 Payment Required'));
+  it('tags 402 out-of-credits as credit (never probed)', async () => {
+    const decision = await cooldownDecisionForError(fakeRoute(), new Error('402 Payment Required'));
     expect(decision.source).toBe('credit');
   });
 
-  it('tags 403 model-not-on-tier as tier (never probed)', () => {
+  it('tags 403 model-not-on-tier as tier (never probed)', async () => {
     const err = Object.assign(new Error('forbidden'), { status: 403 });
-    expect(cooldownDecisionForError(fakeRoute(), err).source).toBe('tier');
+    expect((await cooldownDecisionForError(fakeRoute(), err)).source).toBe('tier');
   });
 
-  it('tags a daily-quota bench as authoritative — the expiry is a reset time, not a guess', () => {
+  it('tags a daily-quota bench as authoritative — the expiry is a reset time, not a guess', async () => {
     const err = new Error('You have used up your daily free allocation');
-    const decision = cooldownDecisionForError(fakeRoute(), err);
+    const decision = await cooldownDecisionForError(fakeRoute(), err);
     expect(decision.source).toBe('authoritative');
     expect(decision.durationMs).toBeGreaterThan(0);
   });
 
-  it('tags a plain transient 429 as heuristic (probe-eligible)', () => {
-    const decision = cooldownDecisionForError(fakeRoute(), new Error('429 Too Many Requests'));
+  it('tags a plain transient 429 as heuristic (probe-eligible)', async () => {
+    const decision = await cooldownDecisionForError(fakeRoute(), new Error('429 Too Many Requests'));
     expect(decision.source).toBe('heuristic');
     expect(decision.durationMs).toBe(90_000);
   });
 
-  it('a Retry-After that determined the expiry is authoritative; a shorter one is not', () => {
+  it('a Retry-After that determined the expiry is authoritative; a shorter one is not', async () => {
     // Retry-After beyond our 90s transient bench: the provider's word set the
     // expiry, so probing early could never be justified.
     const longRetry = Object.assign(new Error('429 Too Many Requests'), { retryAfterMs: 10 * MINUTE });
-    const long = cooldownDecisionForError(fakeRoute(), longRetry);
+    const long = await cooldownDecisionForError(fakeRoute(), longRetry);
     expect(long).toEqual({ durationMs: 10 * MINUTE, source: 'authoritative' });
 
     // Retry-After SHORTER than our bench: everything past the provider's own
     // retry time is our pessimism, so early recovery stays on the table.
     const shortRetry = Object.assign(new Error('429 Too Many Requests'), { retryAfterMs: 1_000 });
-    const short = cooldownDecisionForError(fakeRoute(), shortRetry);
+    const short = await cooldownDecisionForError(fakeRoute(), shortRetry);
     expect(short).toEqual({ durationMs: 90_000, source: 'heuristic' });
   });
 });

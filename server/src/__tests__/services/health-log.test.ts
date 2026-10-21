@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Mock the providers module BEFORE importing the service so the test never
 // hits the network. Hoisting is handled by vi.mock at module level.
@@ -23,9 +24,9 @@ const { checkKeyHealth } = await import('../../services/health.js');
 // deliberately no longer demotes the key; the error message is captured up to it.
 const ERROR_RE = /^\[Health\] Key (\d+) \(([^,]+), base=([^)]+)\) transport error: (.+?)(?: — status preserved as '(\w+)')?$/;
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
 describe('checkKeyHealth transport-error log format', () => {
@@ -41,17 +42,15 @@ describe('checkKeyHealth transport-error log format', () => {
     vi.restoreAllMocks();
   });
 
-  function seedKey(platform: string, baseUrl: string | null): number {
+  async function seedKey(platform: string, baseUrl: string | null): number {
     const id = ++lastKeyId;
-    const db = initDb(':memory:');
+    const db = await initTestDb();
     // Use a real encrypt() call so decrypt() in production code succeeds and the
     // mocked validateKey is what throws — exercising the actual transport-error
     // catch path.
     const enc = encrypt('sk-test-fake-api-key-for-health-log-test');
-    db.prepare(
-      `INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, enabled, status, base_url)
-       VALUES (?, ?, ?, ?, ?, ?, 1, 'healthy', ?)`,
-    ).run(id, platform, `test-${platform}-${id}`, enc.encrypted, enc.iv, enc.authTag, baseUrl);
+    await db.run(`INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, enabled, status, base_url)
+       VALUES (?, ?, ?, ?, ?, ?, 1, 'healthy', ?)`, [id, platform, `test-${platform}-${id}`, enc.encrypted, enc.iv, enc.authTag, baseUrl]);
     return id;
   }
 
@@ -61,13 +60,13 @@ describe('checkKeyHealth transport-error log format', () => {
   }
 
   it('emits a single line including platform and base_url', async () => {
-    const id = seedKey('openai-compat', 'https://api.example.com/v1');
+    const id = await seedKey('openai-compat', 'https://api.example.com/v1');
     const status = await checkKeyHealth(id);
     // A transport error is evidence about the network, not the key: the prior
     // status is kept so the key stays routable (selectKeyForModel only accepts
     // 'healthy'/'unknown', so demoting here would silently drop its capacity).
     expect(status).toBe('healthy');
-    const persisted = getDb().prepare('SELECT status FROM api_keys WHERE id = ?').get(id) as { status: string };
+    const persisted = await getDb().get('SELECT status FROM api_keys WHERE id = ?', [id]) as { status: string };
     expect(persisted.status).toBe('healthy');
 
     expect(consoleSpy).toHaveBeenCalledTimes(1);
@@ -78,12 +77,12 @@ describe('checkKeyHealth transport-error log format', () => {
     expect(m[2]).toBe('openai-compat');
     expect(m[3]).toBe('https://api.example.com/v1');
     expect(m[4]).toBe('mocked transport failure');
-    const row = getDb().prepare('SELECT last_health_error FROM api_keys WHERE id = ?').get(id) as { last_health_error: string };
+    const row = await getDb().get('SELECT last_health_error FROM api_keys WHERE id = ?', [id]) as { last_health_error: string };
     expect(row.last_health_error).toBe('mocked transport failure');
   });
 
   it('falls back to base=default when base_url is null', async () => {
-    const id = seedKey('nvidia', null);
+    const id = await seedKey('nvidia', null);
     const status = await checkKeyHealth(id);
     expect(status).toBe('healthy');
 
@@ -95,7 +94,7 @@ describe('checkKeyHealth transport-error log format', () => {
   });
 
   it('preserves the "[Health] Key N (" prefix that the 12h watchdog greps', async () => {
-    const id = seedKey('cloudflare', null);
+    const id = await seedKey('cloudflare', null);
     await checkKeyHealth(id);
     const line = firstLine();
     // The cron regex in scripts/freellmapi-watchdog.sh is anchored on this prefix.

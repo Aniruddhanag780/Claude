@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import type { Express } from 'express';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Item 1 of the fallback hardening: an upstream 401 (invalid provider key) is
 // KEY-fatal, not request-fatal. Live-verified bug: it returned a 502
@@ -35,7 +36,7 @@ vi.mock('../../services/health.js', () => ({
 }));
 
 const { createApp } = await import('../../app.js');
-const { initDb, getDb, getUnifiedApiKey } = await import('../../db/index.js');
+const { getDb, getUnifiedApiKey } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const { setRoutingStrategy, getAllPenalties } = await import('../../services/router.js');
 
@@ -66,26 +67,25 @@ interface Setup { modelDbId: number; modelId: string; keyA: number; keyB: number
 
 // Distinct groq model per test so module-global rate-limit state (cooldowns,
 // round-robin, penalties — keyed by model) can't leak between tests.
-function setup(rank: number): Setup {
+async function setup(rank: number): Setup {
   const db = getDb();
   setRoutingStrategy('priority');
-  db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
-  db.prepare('DELETE FROM api_keys').run();
-  db.prepare('DELETE FROM rate_limit_cooldowns').run();
-  db.prepare('DELETE FROM rate_limit_usage').run();
+  (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
+  (await db.run('DELETE FROM api_keys'));
+  (await db.run('DELETE FROM rate_limit_cooldowns'));
+  (await db.run('DELETE FROM rate_limit_usage'));
 
-  const models = db.prepare("SELECT id, model_id FROM models WHERE platform = 'groq' ORDER BY id").all() as { id: number; model_id: string }[];
+  const models = (await db.all("SELECT id, model_id FROM models WHERE platform = 'groq' ORDER BY id")) as { id: number; model_id: string }[];
   const model = models[rank];
-  db.prepare('UPDATE models SET enabled = 0').run();
-  db.prepare('UPDATE models SET enabled = 1, rpm_limit = NULL, rpd_limit = NULL, tpm_limit = NULL, tpd_limit = NULL WHERE id = ?').run(model.id);
+  (await db.run('UPDATE models SET enabled = 0'));
+  (await db.run('UPDATE models SET enabled = 1, rpm_limit = NULL, rpd_limit = NULL, tpm_limit = NULL, tpd_limit = NULL WHERE id = ?', [model.id]));
 
   const ids: number[] = [];
   for (const label of ['a', 'b']) {
     const { encrypted, iv, authTag } = encrypt(`groq-auth-${rank}-${label}`);
-    const info = db.prepare(`
+    const info = (await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('groq', ?, ?, ?, ?, 'healthy', 1)
-    `).run(`auth-${rank}-${label}`, encrypted, iv, authTag);
+      VALUES ('groq', ?, ?, ?, ?, 'healthy', 1) RETURNING id`, [`auth-${rank}-${label}`, encrypted, iv, authTag]));
     ids.push(Number(info.lastInsertRowid));
   }
   return { modelDbId: model.id, modelId: model.model_id, keyA: ids[0], keyB: ids[1] };
@@ -95,9 +95,9 @@ describe('upstream 401 rotates to the sibling key instead of 502 (item 1)', () =
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
     key = getUnifiedApiKey();
   });
@@ -110,7 +110,7 @@ describe('upstream 401 rotates to the sibling key instead of 502 (item 1)', () =
   });
 
   it('fails over to the healthy sibling key and revalidates the bad one', async () => {
-    const s = setup(0);
+    const s = await setup(0);
     chatCompletion
       .mockRejectedValueOnce(err401())     // first key: invalid
       .mockResolvedValueOnce(GOOD_RESULT); // sibling key: healthy
@@ -130,14 +130,12 @@ describe('upstream 401 rotates to the sibling key instead of 502 (item 1)', () =
     expect(getAllPenalties().some(p => p.modelDbId === s.modelDbId)).toBe(false);
     // The bad key is benched (roughly the health-cycle window) so it leaves
     // rotation even before the revalidation lands.
-    const benched = getDb().prepare(
-      'SELECT expires_at_ms FROM rate_limit_cooldowns WHERE platform = ? AND model_id = ? AND key_id = ?',
-    ).get('groq', s.modelId, mockCheckKeyHealth.mock.calls[0][0]) as { expires_at_ms: number };
+    const benched = (await getDb().get('SELECT expires_at_ms FROM rate_limit_cooldowns WHERE platform = ? AND model_id = ? AND key_id = ?', ['groq', s.modelId, mockCheckKeyHealth.mock.calls[0][0]])) as { expires_at_ms: number };
     expect(benched.expires_at_ms - Date.now()).toBeGreaterThan(3 * 60 * 1000);
   });
 
   it('all-auth exhaustion returns a distinct 502 with the attempt trail (items 1+2)', async () => {
-    setup(1);
+    await setup(1);
     chatCompletion.mockRejectedValue(err401()); // both keys invalid
 
     const { status, body, headers } = await post(app, '/v1/chat/completions', {
@@ -154,7 +152,7 @@ describe('upstream 401 rotates to the sibling key instead of 502 (item 1)', () =
   });
 
   it('anthropic surface: all-auth exhaustion is Anthropic-shaped (api_error)', async () => {
-    setup(2);
+    await setup(2);
     chatCompletion.mockRejectedValue(err401());
 
     const { status, body, headers } = await post(app, '/v1/messages', {
@@ -178,7 +176,7 @@ describe('upstream 401 rotates to the sibling key instead of 502 (item 1)', () =
       new Error('Google API error 400: API key not valid. Please pass a valid API key.'),
       { status: 400 },
     );
-    setup(4);
+    await setup(4);
     chatCompletion
       .mockRejectedValueOnce(googleBadKey())   // first key: dead Google-style key
       .mockResolvedValueOnce(GOOD_RESULT);     // sibling key: healthy
@@ -211,9 +209,9 @@ describe('exhaustion error quality: attempt trail + reset hint + header (item 2)
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
     key = getUnifiedApiKey();
   });
@@ -226,7 +224,7 @@ describe('exhaustion error quality: attempt trail + reset hint + header (item 2)
   });
 
   it('a rate-limit exhaustion body names each attempt and the soonest reset', async () => {
-    const s = setup(3);
+    const s = await setup(3);
     chatCompletion.mockRejectedValue(err429()); // both keys rate-limited
 
     const { status, body, headers } = await post(app, '/v1/chat/completions', {

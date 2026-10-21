@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { getStickyModel, setStickyModel } from '../../routes/proxy.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Stream turn-integrity (#231 audit): the proxy must deliver agent-usable
 // TURNS, not transport bytes. These tests feed crafted upstream SSE bodies
@@ -18,7 +19,7 @@ async function request(app: Express, path: string, body: any, extraHeaders: Reco
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${getUnifiedApiKey()}`,
+      Authorization: `Bearer ${await getUnifiedApiKey()}`,
       ...extraHeaders,
     },
     body: JSON.stringify(body),
@@ -73,19 +74,19 @@ describe('proxy stream turn-integrity', () => {
   let app: Express;
   let dashToken = '';
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
-    db.prepare('DELETE FROM rate_limit_usage').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
+    (await db.run('DELETE FROM rate_limit_usage'));
     // One groq key: the seeded chain has several tool-capable groq models, so
     // failover hops between groq models while staying on this mock.
     const { status } = await request(app, '/api/keys',
@@ -114,7 +115,7 @@ describe('proxy stream turn-integrity', () => {
     expect(fs.some(f => f.error)).toBe(false);
     expect(r.headers.get('x-request-id')).toMatch(/\S+/);
 
-    const rows = getDb().prepare("SELECT status, error FROM requests ORDER BY id").all() as any[];
+    const rows = (await getDb().all("SELECT status, error FROM requests ORDER BY id")) as any[];
     expect(rows[0].status).toBe('error');
     expect(rows[0].error).toMatch(/in-band provider error/);
     expect(rows[1].status).toBe('success');
@@ -195,7 +196,7 @@ describe('proxy stream turn-integrity', () => {
     expect(r.status).toBe(200);
     expect(up.calls()).toBe(2);
     expect(frames(r.text).some(f => f.choices?.[0]?.delta?.content?.includes('Second model'))).toBe(true);
-    const rows = getDb().prepare("SELECT status, error FROM requests ORDER BY id").all() as any[];
+    const rows = (await getDb().all("SELECT status, error FROM requests ORDER BY id")) as any[];
     expect(rows[0].status).toBe('error');
     expect(rows[0].error).toMatch(/stream ended unexpectedly/);
   });
@@ -211,7 +212,7 @@ describe('proxy stream turn-integrity', () => {
     const fs = frames(r.text);
     expect(fs.some(f => f.choices?.[0]?.delta?.content === 'Partial ans')).toBe(true);
     expect(fs.some(f => f.error?.type === 'stream_error')).toBe(true);
-    const rows = getDb().prepare("SELECT status FROM requests ORDER BY id").all() as any[];
+    const rows = (await getDb().all("SELECT status FROM requests ORDER BY id")) as any[];
     expect(rows[0].status).toBe('error'); // truncation is never a success
   });
 
@@ -248,7 +249,7 @@ describe('proxy stream turn-integrity', () => {
     const fs = frames(r.text);
     expect(fs.some(f => f.choices?.[0]?.delta?.content?.includes('prose form'))).toBe(false);
     expect(fs.some(f => f.choices?.[0]?.delta?.content?.includes('Paris'))).toBe(true);
-    const rows = getDb().prepare("SELECT status, error FROM requests ORDER BY id").all() as any[];
+    const rows = (await getDb().all("SELECT status, error FROM requests ORDER BY id")) as any[];
     expect(rows[0].status).toBe('error');
     expect(rows[0].error).toMatch(/ignored response_format/);
     expect(rows[1].status).toBe('success');
@@ -270,7 +271,7 @@ describe('proxy stream turn-integrity', () => {
     const content = fs.map(f => f.choices?.[0]?.delta?.content ?? '').join('');
     expect(content).toContain('"answer"');
     expect(content).not.toContain('```');
-    const rows = getDb().prepare("SELECT status FROM requests ORDER BY id").all() as any[];
+    const rows = (await getDb().all("SELECT status FROM requests ORDER BY id")) as any[];
     expect(rows[0].status).toBe('success');
   });
 
@@ -286,7 +287,7 @@ describe('proxy stream turn-integrity', () => {
     expect(r.status).toBe(200);
     const content = frames(r.text).map(f => f.choices?.[0]?.delta?.content ?? '').join('');
     expect(content).toBe('{"ok":true,"items":[1,2,3]}');
-    const rows = getDb().prepare("SELECT status FROM requests ORDER BY id").all() as any[];
+    const rows = (await getDb().all("SELECT status FROM requests ORDER BY id")) as any[];
     expect(rows[0].status).toBe('success');
   });
 
@@ -353,14 +354,10 @@ describe('proxy stream turn-integrity', () => {
     expect(up.seen[0].streamOptions).toEqual({ include_usage: true });
     expect(frames(r.text).find(f => f.usage)?.usage).toEqual(usage);
 
-    const row = getDb().prepare(
-      "SELECT input_tokens, output_tokens FROM requests WHERE status = 'success' ORDER BY id DESC LIMIT 1",
-    ).get() as { input_tokens: number; output_tokens: number };
+    const row = (await getDb().get("SELECT input_tokens, output_tokens FROM requests WHERE status = 'success' ORDER BY id DESC LIMIT 1")) as { input_tokens: number; output_tokens: number };
     expect(row).toEqual({ input_tokens: 3263, output_tokens: 15 });
 
-    const ledger = getDb().prepare(
-      "SELECT COALESCE(SUM(tokens), 0) AS total FROM rate_limit_usage WHERE kind = 'tokens'",
-    ).get() as { total: number };
+    const ledger = (await getDb().get("SELECT COALESCE(SUM(tokens), 0) AS total FROM rate_limit_usage WHERE kind = 'tokens'")) as { total: number };
     expect(ledger.total).toBe(3278);
   });
 
@@ -397,14 +394,10 @@ describe('proxy stream turn-integrity', () => {
     expect(fs.map(f => f.choices?.[0]?.delta?.content ?? '').join('')).toBe('Hello');
     expect(fs.map(f => f.choices?.[0]?.finish_reason).filter(Boolean)).toEqual(['stop']);
 
-    const row = getDb().prepare(
-      "SELECT input_tokens, output_tokens FROM requests WHERE status = 'success' ORDER BY id DESC LIMIT 1",
-    ).get() as { input_tokens: number; output_tokens: number };
+    const row = (await getDb().get("SELECT input_tokens, output_tokens FROM requests WHERE status = 'success' ORDER BY id DESC LIMIT 1")) as { input_tokens: number; output_tokens: number };
     expect(row).toEqual({ input_tokens: 1111, output_tokens: 22 });
 
-    const ledger = getDb().prepare(
-      "SELECT COALESCE(SUM(tokens), 0) AS total FROM rate_limit_usage WHERE kind = 'tokens'",
-    ).get() as { total: number };
+    const ledger = (await getDb().get("SELECT COALESCE(SUM(tokens), 0) AS total FROM rate_limit_usage WHERE kind = 'tokens'")) as { total: number };
     expect(ledger.total).toBe(1133);
   });
 
@@ -490,7 +483,7 @@ describe('proxy stream turn-integrity', () => {
       stream: true, messages: [{ role: 'user', content: 'ttfb reasoning test' }],
     });
     expect(r.status).toBe(200);
-    const rows = getDb().prepare("SELECT status, latency_ms, ttfb_ms FROM requests ORDER BY id").all() as any[];
+    const rows = (await getDb().all("SELECT status, latency_ms, ttfb_ms FROM requests ORDER BY id")) as any[];
     expect(rows[0].status).toBe('success');
     expect(rows[0].ttfb_ms).not.toBeNull();
     // ttfb must be the reasoning-head moment (well before the text token that
@@ -500,9 +493,9 @@ describe('proxy stream turn-integrity', () => {
 });
 
 describe('sticky session integrity', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   it('keeps affinity from turn 1 to turn 2 (the old single/multi key gap)', () => {

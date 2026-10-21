@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { EMBEDDING_PLATFORMS, runEmbeddings } from '../../services/embeddings.js';
 import { applyCatalog } from '../../services/catalog-sync.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const models = [
   ['nvidia-nemotron-3-embed-8b', 4096],
@@ -12,10 +13,10 @@ const models = [
 ] as const;
 const json = (body: unknown) => new Response(JSON.stringify(body));
 
-function seed(model: string, dimensions: number) {
+async function seed(model: string, dimensions: number) {
   const db = getDb(), secret = encrypt('inferbase-test-key');
-  db.prepare("INSERT INTO api_keys (platform,label,encrypted_key,iv,auth_tag,status,enabled) VALUES ('inferbase','test',?,?,?,'healthy',1)").run(secret.encrypted, secret.iv, secret.authTag);
-  const result = applyCatalog(db, {
+  (await db.run("INSERT INTO api_keys (platform,label,encrypted_key,iv,auth_tag,status,enabled) VALUES ('inferbase','test',?,?,?,'healthy',1) RETURNING id", [secret.encrypted, secret.iv, secret.authTag]));
+  const result = await applyCatalog(db, {
     version: '2099.01.01', generatedAt: new Date().toISOString(), tier: 'live', models: [], quirks: [],
     embeddings: [{ platform: 'inferbase', modelId: model, family: 'inferbase-test', displayName: model,
       dimensions, maxInputTokens: null, priority: 1, enabled: true, quotaLabel: 'Shared free managed allowance' }],
@@ -24,11 +25,11 @@ function seed(model: string, dimensions: number) {
 }
 
 describe('Inferbase catalog-managed embeddings', () => {
-  beforeEach(() => { process.env.ENCRYPTION_KEY = '0'.repeat(64); initDb(':memory:'); });
+  beforeEach(async () => { process.env.ENCRYPTION_KEY = '0'.repeat(64); await initTestDb(); });
   afterEach(() => { vi.restoreAllMocks(); getDb().close(); });
 
   it.each(models)('routes %s with float vectors, input ordering and token usage', async (model, dimensions) => {
-    seed(model, dimensions);
+    await seed(model, dimensions);
     const fetch = vi.spyOn(global, 'fetch').mockResolvedValue(json({ model,
       data: [{ index: 1, embedding: Array(dimensions).fill(0.2) }, { index: 0, embedding: Array(dimensions).fill(0.1) }],
       usage: { prompt_tokens: 10, total_tokens: 10, cost_micros: 0 },
@@ -43,7 +44,7 @@ describe('Inferbase catalog-managed embeddings', () => {
   });
 
   it('forwards and validates an explicit dimension override', async () => {
-    seed('qwen3-embedding-4b', 2560);
+    await seed('qwen3-embedding-4b', 2560);
     const fetch = vi.spyOn(global, 'fetch').mockResolvedValue(json({ model: 'qwen3-embedding-4b',
       data: [{ index: 0, embedding: [0.1, 0.2] }], usage: { total_tokens: 3 },
     }));
@@ -62,36 +63,36 @@ describe('Inferbase catalog-managed embeddings', () => {
     { model: 'test', data: [{ index: 1, embedding: [0.1, 0.2] }] },
     { error: { message: 'quota exhausted' } },
   ])('rejects mismatched identities and invalid vectors instead of corrupting the family', async body => {
-    seed('test', 2);
+    await seed('test', 2);
     vi.spyOn(global, 'fetch').mockResolvedValue(json(body));
-    await expect(runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({ status: 502 });
+    await expect(await runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({ status: 502 });
   });
 
   it('rejects duplicate vector indices', async () => {
-    seed('test', 2);
+    await seed('test', 2);
     vi.spyOn(global, 'fetch').mockResolvedValue(json({ model: 'test', data: [
       { index: 0, embedding: [0.1, 0.2] }, { index: 0, embedding: [0.3, 0.4] },
     ] }));
-    await expect(runEmbeddings('inferbase-test', ['first', 'second'])).rejects.toMatchObject({ status: 502 });
+    await expect(await runEmbeddings('inferbase-test', ['first', 'second'])).rejects.toMatchObject({ status: 502 });
   });
 
   it('preserves upstream rate-limit retry hints', async () => {
-    seed('test', 2);
+    await seed('test', 2);
     vi.spyOn(global, 'fetch').mockResolvedValue(new Response('upstream error', { status: 429, headers: { 'Retry-After': '20' } }));
-    await expect(runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({ status: 429, retryAfterMs: 20_000 });
+    await expect(await runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({ status: 429, retryAfterMs: 20_000 });
   });
 
   it.each([401, 402, 503])('fails closed on upstream HTTP %s without returning vectors', async status => {
-    seed('test', 2);
+    await seed('test', 2);
     vi.spyOn(global, 'fetch').mockResolvedValue(new Response('upstream error', { status }));
     // The existing family router normalizes exhausted non-rate-limit failures
     // to 502, retaining the upstream status in its diagnostic message.
-    await expect(runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({
+    await expect(await runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({
       status: 502, message: expect.stringContaining(`upstream ${status}`),
     });
   });
 
-  it('does not seed catalog models before their signed feed arrives', () => {
-    expect(getDb().prepare("SELECT COUNT(*) AS n FROM embedding_models WHERE platform='inferbase'").get()).toEqual({ n: 0 });
+  it('does not seed catalog models before their signed feed arrives', async () => {
+    expect((await getDb().get("SELECT COUNT(*) AS n FROM embedding_models WHERE platform='inferbase'"))).toEqual({ n: 0 });
   });
 });

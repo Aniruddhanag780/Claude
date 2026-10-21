@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import type { Express } from 'express';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Script the provider per-test: every platform resolves to this fake, so the
 // first chain model gets emptyResult/emptyStream and the failover target gets
@@ -18,7 +19,7 @@ vi.mock('../../providers/index.js', async (importOriginal) => {
 });
 
 const { createApp } = await import('../../app.js');
-const { initDb, getDb, getUnifiedApiKey } = await import('../../db/index.js');
+const { getDb, getUnifiedApiKey } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const { setRoutingStrategy } = await import('../../services/router.js');
 
@@ -57,26 +58,25 @@ describe('Empty-completion failover', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
     key = getUnifiedApiKey();
 
     const db = getDb();
     setRoutingStrategy('priority');
     const { encrypted, iv, authTag } = encrypt('test-key');
-    db.prepare(`
+    (await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('groq', 'test', ?, ?, ?, 'healthy', 1)
-    `).run(encrypted, iv, authTag);
+      VALUES ('groq', 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [encrypted, iv, authTag]));
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     chatCompletion.mockReset();
     streamChatCompletion.mockReset();
     // Clear cooldowns set by previous failovers so each test routes fresh.
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
   });
 
   it('/v1/chat/completions (non-stream): empty completion fails over to the next model', async () => {
@@ -85,7 +85,7 @@ describe('Empty-completion failover', () => {
       .mockResolvedValueOnce(GOOD_RESULT);
 
     const db = getDb();
-    db.prepare('DELETE FROM requests').run();
+    (await db.run('DELETE FROM requests'));
 
     const { status, body, headers } = await post(app, '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hi' }],
@@ -98,7 +98,7 @@ describe('Empty-completion failover', () => {
     // First model must differ from the one that answered.
     expect(chatCompletion.mock.calls[0][2]).not.toBe(chatCompletion.mock.calls[1][2]);
 
-    const rows = db.prepare('SELECT status, error FROM requests ORDER BY id').all() as Array<{ status: string; error: string | null }>;
+    const rows = (await db.all('SELECT status, error FROM requests ORDER BY id')) as Array<{ status: string; error: string | null }>;
     expect(rows.length).toBe(2);
     expect(rows[0].status).toBe('error');
     expect(rows[0].error).toContain('empty completion');

@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { runFallbackLoop, newFallbackState, type FallbackState } from '../../lib/fallback-loop.js';
 import { isClientAbortError, newClientAbortError, isRetryableError } from '../../lib/error-classify.js';
 import { acquireLease, releaseLease, resetLeases, inFlightForKey } from '../../services/ratelimit.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 /**
  * Client-abort semantics in the shared fallback loop (P1 AbortSignal work):
@@ -50,8 +51,8 @@ function hooks(state: FallbackState, overrides: Record<string, unknown>) {
 }
 
 describe('fallback loop on client abort', () => {
-  beforeEach(() => {
-    initDb(':memory:');
+  beforeEach(async () => {
+    await initTestDb();
     resetLeases();
     vi.spyOn(console, 'log').mockImplementation(() => {});
   });
@@ -118,7 +119,7 @@ describe('fallback loop on client abort', () => {
     }));
 
     // No cooldown row: a vanished client is not a provider-health signal.
-    const cooldown = getDb().prepare('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?').get('fake', keyId);
+    const cooldown = await getDb().get('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?', ['fake', keyId]);
     expect(cooldown).toBeUndefined();
     // No per-request skip state either — nothing was "tried and failed".
     expect(state.skipKeys.size).toBe(0);
@@ -133,15 +134,13 @@ describe('fallback loop on client abort', () => {
       dispatch: async () => { throw newClientAbortError(); },
     }));
 
-    const row = getDb().prepare(
-      'SELECT id, platform, model_id, key_id, status, error FROM requests ORDER BY id DESC LIMIT 1',
-    ).get() as any;
+    const row = await getDb().get('SELECT id, platform, model_id, key_id, status, error FROM requests ORDER BY id DESC LIMIT 1') as any;
     expect(row).toMatchObject({ platform: 'fake', model_id: 'fake-model', status: 'canceled' });
     expect(row.error).toContain('client disconnected');
     expect(row.error).toContain('upstream request canceled');
     // The attempt trace persists too, keyed to the canceled row — pure aborts
     // used to leave no parent row and therefore no ladder either.
-    const attempts = getDb().prepare('SELECT outcome FROM request_attempts WHERE request_id = ?').all(row.id) as any[];
+    const attempts = await getDb().all('SELECT outcome FROM request_attempts WHERE request_id = ?', [row.id]) as any[];
     expect(attempts.map(a => a.outcome)).toEqual(['client_abort']);
   });
 

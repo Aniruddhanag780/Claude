@@ -1,30 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import type { Db } from '../../db/types.js';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
+import { initTestDb } from '../helpers/test-db.js';
 import { initEncryptionKey, encrypt, decrypt } from '../../lib/crypto.js';
 import { aclEntries } from '../helpers/acl.js';
 
-// FIX 2: the dev-fallback key is persisted to a file next to the DB, not into
-// the `settings` table it protects. These tests use REAL file-backed DBs
-// (db.memory === false) so the file branch runs; the in-memory settings-table
-// behavior is covered by crypto-init.test.ts.
+// FIX 2: the dev-fallback key is persisted to a fixed local file, not into the
+// `settings` table it protects. PG adaptation: the old "file next to the DB"
+// is now the repo-root `.encryption-key` (see KEY_FILE_PATH in lib/crypto.ts —
+// derived from the module URL, three levels up from server/src/lib). These
+// tests therefore BACK UP whatever key file exists on this machine and restore
+// it afterwards — they must never clobber a developer's real dev key.
+
+const KEY_FILE = path.resolve(process.cwd(), '..', '.encryption-key');
 
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 const ORIGINAL_ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
-const openDbs: Database.Database[] = [];
-const tempDirs: string[] = [];
-
-function fileDb(): { db: Database.Database; keyFile: string } {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'freellmapi-keyfile-'));
-  tempDirs.push(dir);
-  const db = new Database(path.join(dir, 'freeapi.db'));
-  db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
-  openDbs.push(db);
-  return { db, keyFile: path.join(dir, '.encryption-key') };
-}
+let keyFileBackup: { existed: boolean; content?: string };
 
 function restoreEnv() {
   if (ORIGINAL_NODE_ENV === undefined) delete process.env.NODE_ENV;
@@ -33,29 +27,41 @@ function restoreEnv() {
   else process.env.ENCRYPTION_KEY = ORIGINAL_ENCRYPTION_KEY;
 }
 
+let db: Db;
+
 describe('initEncryptionKey — key file (dev fallback)', () => {
-  beforeEach(() => {
+  beforeAll(() => {
+    keyFileBackup = fs.existsSync(KEY_FILE)
+      ? { existed: true, content: fs.readFileSync(KEY_FILE, 'utf8') }
+      : { existed: false };
+  });
+
+  beforeEach(async () => {
     restoreEnv();
     delete process.env.ENCRYPTION_KEY;
     process.env.NODE_ENV = 'test';
+    // Each test starts from "no key file on disk" (like the old fresh temp dir).
+    fs.rmSync(KEY_FILE, { force: true });
+    db = await initTestDb();
   });
 
   afterEach(() => {
-    while (openDbs.length) openDbs.pop()!.close();
-    for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
-    tempDirs.length = 0;
+    fs.rmSync(KEY_FILE, { force: true });
     restoreEnv();
   });
 
-  it('generates a fresh key into a file next to the DB, not the settings table', () => {
-    const { db, keyFile } = fileDb();
+  afterAll(() => {
+    if (keyFileBackup.existed) fs.writeFileSync(KEY_FILE, keyFileBackup.content!, { mode: 0o600 });
+    else fs.rmSync(KEY_FILE, { force: true });
+  });
 
-    initEncryptionKey(db);
+  it('generates a fresh key into the key file, not the settings table', async () => {
+    await initEncryptionKey(db);
 
-    expect(fs.existsSync(keyFile)).toBe(true);
-    expect(fs.readFileSync(keyFile, 'utf8').trim()).toMatch(/^[0-9a-f]{64}$/);
+    expect(fs.existsSync(KEY_FILE)).toBe(true);
+    expect(fs.readFileSync(KEY_FILE, 'utf8').trim()).toMatch(/^[0-9a-f]{64}$/);
     // The key must NOT be stored in the DB it protects.
-    expect(db.prepare("SELECT value FROM settings WHERE key = 'encryption_key'").get()).toBeUndefined();
+    expect((await db.get("SELECT value FROM settings WHERE key = 'encryption_key'"))).toBeUndefined();
     // The generated key actually works.
     const enc = encrypt('hello');
     expect(decrypt(enc.encrypted, enc.iv, enc.authTag)).toBe('hello');
@@ -64,65 +70,62 @@ describe('initEncryptionKey — key file (dev fallback)', () => {
     // actually enforce: POSIX modes on POSIX, the NTFS ACL on Windows, where
     // chmod cannot express this at all.
     if (process.platform !== 'win32') {
-      expect(fs.statSync(keyFile).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(KEY_FILE).mode & 0o777).toBe(0o600);
     } else {
-      expect(aclEntries(keyFile).filter(e => e.includes('(I)'))).toEqual([]);
+      expect(aclEntries(KEY_FILE).filter(e => e.includes('(I)'))).toEqual([]);
     }
   });
 
-  it('reuses an existing key file on the next boot', () => {
-    const { db, keyFile } = fileDb();
-    initEncryptionKey(db);
-    const firstKey = fs.readFileSync(keyFile, 'utf8').trim();
+  it('reuses an existing key file on the next boot', async () => {
+    await initEncryptionKey(db);
+    const firstKey = fs.readFileSync(KEY_FILE, 'utf8').trim();
     const enc = encrypt('provider-secret');
 
     // Second boot (fresh module state simulated by calling init again).
-    initEncryptionKey(db);
-    expect(fs.readFileSync(keyFile, 'utf8').trim()).toBe(firstKey);
+    await initEncryptionKey(db);
+    expect(fs.readFileSync(KEY_FILE, 'utf8').trim()).toBe(firstKey);
     // Ciphertext from the first boot still decrypts under the reused key.
     expect(decrypt(enc.encrypted, enc.iv, enc.authTag)).toBe('provider-secret');
   });
 
-  it('migrates a legacy settings-table key to the file and still decrypts', () => {
+  it('migrates a legacy settings-table key to the file and still decrypts', async () => {
     const K = 'd'.repeat(64);
     // Encrypt a secret under K via the env path (how an old install's data was
     // written), then simulate that install: key in settings, no env, no file.
     process.env.ENCRYPTION_KEY = K;
-    const { db, keyFile } = fileDb();
-    initEncryptionKey(db);
+    await initEncryptionKey(db);
     const secret = 'sk-legacy-secret';
     const ciphertext = encrypt(secret);
 
     delete process.env.ENCRYPTION_KEY;
     process.env.NODE_ENV = 'test';
-    db.prepare("INSERT INTO settings (key, value) VALUES ('encryption_key', ?)").run(K);
-    expect(fs.existsSync(keyFile)).toBe(false);
+    (await db.run("INSERT INTO settings (key, value) VALUES ('encryption_key', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", [K]));
+    expect(fs.existsSync(KEY_FILE)).toBe(false);
 
-    initEncryptionKey(db);
+    await initEncryptionKey(db);
 
     // Key moved to the file, with the same bytes.
-    expect(fs.readFileSync(keyFile, 'utf8').trim()).toBe(K);
+    expect(fs.readFileSync(KEY_FILE, 'utf8').trim()).toBe(K);
     // And removed from the DB.
-    expect(db.prepare("SELECT value FROM settings WHERE key = 'encryption_key'").get()).toBeUndefined();
+    expect((await db.get("SELECT value FROM settings WHERE key = 'encryption_key'"))).toBeUndefined();
     // Existing ciphertext still decrypts seamlessly.
     expect(decrypt(ciphertext.encrypted, ciphertext.iv, ciphertext.authTag)).toBe(secret);
   });
 
-  it('prefers the ENCRYPTION_KEY env over an existing key file', () => {
-    const { db, keyFile } = fileDb();
-    fs.writeFileSync(keyFile, 'a'.repeat(64));
+  it('prefers the ENCRYPTION_KEY env over an existing key file', async () => {
+    fs.writeFileSync(KEY_FILE, 'a'.repeat(64), { mode: 0o600 });
 
     process.env.ENCRYPTION_KEY = 'b'.repeat(64);
-    initEncryptionKey(db);
+    await initEncryptionKey(db);
     const encUnderEnv = encrypt('x');
 
     // The file was not consulted and is left untouched.
-    expect(fs.readFileSync(keyFile, 'utf8').trim()).toBe('a'.repeat(64));
+    expect(fs.readFileSync(KEY_FILE, 'utf8').trim()).toBe('a'.repeat(64));
 
     // Prove env != file: re-init without env now loads the (different) file key,
     // so ciphertext produced under the env key can no longer be decrypted.
     delete process.env.ENCRYPTION_KEY;
-    initEncryptionKey(db);
+    await initEncryptionKey(db);
     expect(() => decrypt(encUnderEnv.encrypted, encUnderEnv.iv, encUnderEnv.authTag)).toThrow();
   });
 });

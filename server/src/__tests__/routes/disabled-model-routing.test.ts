@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { resolveRoutingChain, setRoutingStrategy, getOrderedFusionChain } from '../../services/router.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let app: Express;
 let dashToken = '';
@@ -29,43 +30,40 @@ async function request(method: string, path: string, body?: any, headers: Record
   return { status: res.status, body: json, text };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
-function activeProfileId(): number | null {
-  const row = getDb().prepare("SELECT value FROM settings WHERE key = 'active_profile_id'").get() as { value: string } | undefined;
+async function activeProfileId(): number | null {
+  const row = (await getDb().get("SELECT value FROM settings WHERE key = 'active_profile_id'")) as { value: string } | undefined;
   return row ? Number(row.value) : null;
 }
 
-function addKey(platform: string): void {
+async function addKey(platform: string): void {
   const secret = encrypt(`${platform}-disabled-routing-key`);
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'disabled-routing', ?, ?, ?, 'healthy', 1)
-  `).run(platform, secret.encrypted, secret.iv, secret.authTag);
+    VALUES (?, 'disabled-routing', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, secret.encrypted, secret.iv, secret.authTag]));
 }
 
 // A two-model catalog at fixed priorities: with the 'priority' strategy the
 // routed model is fully deterministic, so "which model served" is a clean
 // assertion. Unique model ids also make each model its own unify group, so an
 // explicit request resolves to exactly one row.
-function addModel(modelId: string, priority: number): number {
+async function addModel(modelId: string, priority: number): number {
   const db = getDb();
-  const inserted = db.prepare(`
+  const inserted = (await db.run(`
     INSERT INTO models (
       platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
       rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget,
       context_window, enabled, supports_vision, supports_tools
     )
-    VALUES ('groq', ?, ?, ?, ?, 'Small', NULL, NULL, NULL, NULL, '~1M', 128000, 1, 0, 1)
-  `).run(modelId, `Disabled Routing ${modelId}`, priority, priority);
+    VALUES ('groq', ?, ?, ?, ?, 'Small', NULL, NULL, NULL, NULL, '~1M', 128000, 1, 0, 1) RETURNING id`, [modelId, `Disabled Routing ${modelId}`, priority, priority]));
   const id = Number(inserted.lastInsertRowid);
-  db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, priority);
-  const profileId = activeProfileId();
+  (await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1) RETURNING id', [id, priority]));
+  const profileId = await activeProfileId();
   if (profileId != null) {
-    db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1)')
-      .run(profileId, id, priority);
+    (await db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1) RETURNING id', [profileId, id, priority]));
   }
   return id;
 }
@@ -90,8 +88,8 @@ function mockUpstream() {
   });
 }
 
-function lastServedModel(): string {
-  const row = getDb().prepare('SELECT model_id FROM requests ORDER BY id DESC LIMIT 1').get() as { model_id: string } | undefined;
+async function lastServedModel(): string {
+  const row = (await getDb().get('SELECT model_id FROM requests ORDER BY id DESC LIMIT 1')) as { model_id: string } | undefined;
   return row?.model_id ?? '';
 }
 
@@ -105,20 +103,20 @@ const FOLLOW_UP = [
 
 let alphaId = 0;
 
-beforeEach(() => {
+beforeEach(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
   app = createApp();
-  dashToken = mintDashboardToken();
-  setRoutingStrategy('priority');
+  dashToken = await mintDashboardToken();
+  await setRoutingStrategy('priority');
   const db = getDb();
-  db.prepare('DELETE FROM api_keys').run();
-  db.prepare('DELETE FROM profile_models').run();
-  db.prepare('DELETE FROM fallback_config').run();
-  db.prepare('DELETE FROM models').run();
-  addKey('groq');
-  alphaId = addModel('alpha-model', 1);
-  addModel('beta-model', 2);
+  (await db.run('DELETE FROM api_keys'));
+  (await db.run('DELETE FROM profile_models'));
+  (await db.run('DELETE FROM fallback_config'));
+  (await db.run('DELETE FROM models'));
+  await addKey('groq');
+  alphaId = await addModel('alpha-model', 1);
+  await addModel('beta-model', 2);
   mockUpstream();
 });
 
@@ -144,50 +142,50 @@ describe('disabled models are never routed (#634)', () => {
       const sessionId = `sess-chat-${_flavor}`;
       const first = await request('POST', '/v1/chat/completions', {
         messages: [{ role: 'user', content: 'hello' }],
-      }, { ...authHeaders(), 'x-session-id': sessionId });
+      }, { ...await authHeaders(), 'x-session-id': sessionId });
       expect(first.status).toBe(200);
-      expect(lastServedModel()).toBe('alpha-model');
+      expect(await lastServedModel()).toBe('alpha-model');
 
       expect((await request('PATCH', `/api/models/${alphaId}`, patch)).status).toBe(200);
 
       const second = await request('POST', '/v1/chat/completions', {
         messages: FOLLOW_UP,
-      }, { ...authHeaders(), 'x-session-id': sessionId });
+      }, { ...await authHeaders(), 'x-session-id': sessionId });
       expect(second.status).toBe(200);
-      expect(lastServedModel()).toBe('beta-model');
+      expect(await lastServedModel()).toBe('beta-model');
     });
 
     it('/v1/responses falls through to auto when the pinned model is chain-disabled mid-session', async () => {
       const first = await request('POST', '/v1/responses', { input: 'hello' }, {
-        ...authHeaders(), 'x-session-id': 'sess-responses',
+        ...await authHeaders(), 'x-session-id': 'sess-responses',
       });
       expect(first.status).toBe(200);
-      expect(lastServedModel()).toBe('alpha-model');
+      expect(await lastServedModel()).toBe('alpha-model');
 
       expect((await request('PATCH', `/api/models/${alphaId}`, { fallbackEnabled: false })).status).toBe(200);
 
       const second = await request('POST', '/v1/responses', { input: FOLLOW_UP }, {
-        ...authHeaders(), 'x-session-id': 'sess-responses',
+        ...await authHeaders(), 'x-session-id': 'sess-responses',
       });
       expect(second.status).toBe(200);
-      expect(lastServedModel()).toBe('beta-model');
+      expect(await lastServedModel()).toBe('beta-model');
     });
 
     it('/v1/messages falls through to auto when the pinned model is chain-disabled mid-session', async () => {
       const first = await request('POST', '/v1/messages', {
         model: 'claude-sonnet-4', max_tokens: 64,
         messages: [{ role: 'user', content: 'hello' }],
-      }, { ...authHeaders(), 'x-session-id': 'sess-messages' });
+      }, { ...await authHeaders(), 'x-session-id': 'sess-messages' });
       expect(first.status).toBe(200);
-      expect(lastServedModel()).toBe('alpha-model');
+      expect(await lastServedModel()).toBe('alpha-model');
 
       expect((await request('PATCH', `/api/models/${alphaId}`, { fallbackEnabled: false })).status).toBe(200);
 
       const second = await request('POST', '/v1/messages', {
         model: 'claude-sonnet-4', max_tokens: 64, messages: FOLLOW_UP,
-      }, { ...authHeaders(), 'x-session-id': 'sess-messages' });
+      }, { ...await authHeaders(), 'x-session-id': 'sess-messages' });
       expect(second.status).toBe(200);
-      expect(lastServedModel()).toBe('beta-model');
+      expect(await lastServedModel()).toBe('beta-model');
     });
   });
 
@@ -197,35 +195,35 @@ describe('disabled models are never routed (#634)', () => {
     it.each([['auto:smart'], ['auto:fast'], ['auto:cheap'], ['auto:reliable']])(
       '%s excludes a chain-disabled model', async (modelString) => {
         expect((await request('PATCH', `/api/models/${alphaId}`, { fallbackEnabled: false })).status).toBe(200);
-        expect(resolveRoutingChain(modelString).chain.map(row => row.model_db_id)).not.toContain(alphaId);
+        expect((await resolveRoutingChain(modelString)).chain.map(row => row.model_db_id)).not.toContain(alphaId);
       },
     );
 
     it('auto:smart still spans models that were never touched in the chain', async () => {
-      const chain = resolveRoutingChain('auto:smart').chain.map(row => row.model_db_id);
+      const chain = (await resolveRoutingChain('auto:smart')).chain.map(row => row.model_db_id);
       expect(chain).toContain(alphaId);
     });
 
     it('auto:smart excludes a catalog-disabled model', async () => {
       expect((await request('PATCH', `/api/models/${alphaId}`, { enabled: false })).status).toBe(200);
-      expect(resolveRoutingChain('auto:smart').chain.map(row => row.model_db_id)).not.toContain(alphaId);
+      expect((await resolveRoutingChain('auto:smart')).chain.map(row => row.model_db_id)).not.toContain(alphaId);
     });
 
     it('the default auto chain drops a model the moment it is disabled', async () => {
       expect((await request('PATCH', `/api/models/${alphaId}`, { enabled: false })).status).toBe(200);
       const { status } = await request('POST', '/v1/chat/completions', {
         model: 'auto', messages: [{ role: 'user', content: 'hi' }],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).toBe(200);
-      expect(lastServedModel()).toBe('beta-model');
+      expect(await lastServedModel()).toBe('beta-model');
     });
   });
 
   describe('fusion panels', () => {
     it('an auto panel drops a model disabled after the panel was last built', async () => {
-      expect(getOrderedFusionChain(100).map(c => c.modelDbId)).toContain(alphaId);
+      expect((await getOrderedFusionChain(100)).map(c => c.modelDbId)).toContain(alphaId);
       expect((await request('PATCH', `/api/models/${alphaId}`, { fallbackEnabled: false })).status).toBe(200);
-      expect(getOrderedFusionChain(100).map(c => c.modelDbId)).not.toContain(alphaId);
+      expect((await getOrderedFusionChain(100)).map(c => c.modelDbId)).not.toContain(alphaId);
     });
 
     it('an explicit panel drops a catalog-disabled member instead of dispatching it', async () => {
@@ -234,7 +232,7 @@ describe('disabled models are never routed (#634)', () => {
         model: 'fusion',
         messages: [{ role: 'user', content: 'hi' }],
         fusion: { models: ['alpha-model', 'beta-model'], expose_panel: true },
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).toBe(200);
       expect(body.x_fusion.panel.map((p: any) => p.model)).toEqual(['beta-model']);
       expect(body.x_fusion.dropped).toContain('alpha-model (unknown or disabled)');
@@ -247,7 +245,7 @@ describe('disabled models are never routed (#634)', () => {
       ['/v1/completions', { model: 'alpha-model', prompt: 'hi' }],
     ])('%s returns model_not_found for a catalog-disabled model', async (path, body) => {
       expect((await request('PATCH', `/api/models/${alphaId}`, { enabled: false })).status).toBe(200);
-      const res = await request('POST', path, body, authHeaders());
+      const res = await request('POST', path, body, await authHeaders());
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('model_not_found');
     });

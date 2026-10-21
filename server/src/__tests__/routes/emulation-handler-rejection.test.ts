@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Fails the first thing `runInboundChat` awaits, so the handler promise
 // rejects AFTER the synchronous part of the Express handler has returned —
@@ -18,7 +19,7 @@ vi.mock('../../lib/image-normalize.js', async (importOriginal) => {
 });
 
 const { createApp } = await import('../../app.js');
-const { getDb, getUnifiedApiKey, initDb, setSetting } = await import('../../db/index.js');
+const { getDb, getUnifiedApiKey, setSetting } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 
 async function request(
@@ -53,19 +54,18 @@ async function request(
 describe('emulation surfaces forward handler rejections to the error handler', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM api_keys'));
     const key = encrypt('gsk_handler_rejection_test');
-    getDb().prepare(`
+    (await getDb().run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('groq', 'rejection-test', ?, ?, ?, 'healthy', 1)
-    `).run(key.encrypted, key.iv, key.authTag);
+      VALUES ('groq', 'rejection-test', ?, ?, ?, 'healthy', 1) RETURNING id`, [key.encrypted, key.iv, key.authTag]));
     failNormalize = true;
   });
 

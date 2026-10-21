@@ -1,35 +1,34 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { resolveFusionCandidate, setRoutingStrategy } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // A fusion unit-test fixture: seed the standard catalog, then add one healthy
 // key per platform so the auto-panel chain has servable members (the seed ships
 // no keys by default). Priority strategy keeps the panel order deterministic.
-function addKey(platform: string): void {
+async function addKey(platform: string): void {
   const { encrypted, iv, authTag } = encrypt(`test-${platform}-key`);
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'fusion-vision-test', ?, ?, ?, 'healthy', 1)
-  `).run(platform, encrypted, iv, authTag);
+    VALUES (?, 'fusion-vision-test', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, encrypted, iv, authTag]));
 }
 
 describe('selectPanel vision filtering', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    setRoutingStrategy('priority');
+    await initTestDb();
+    await setRoutingStrategy('priority');
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
-    const models = db.prepare('SELECT id, intelligence_rank FROM models ORDER BY intelligence_rank ASC').all() as any[];
-    const update = db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?');
-    for (let i = 0; i < models.length; i++) update.run(i + 1, models[i].id);
-    addKey('google');
-    addKey('groq');
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
+    const models = (await db.all('SELECT id, intelligence_rank FROM models ORDER BY intelligence_rank ASC')) as any[];
+    for (let i = 0; i < models.length; i++) (await db.run('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?', [i + 1, models[i].id]));
+    await addKey('google');
+    await addKey('groq');
   });
 
   it('drops explicit panel models without vision support when requireVision', async () => {
@@ -50,25 +49,25 @@ describe('selectPanel vision filtering', () => {
     expect(panel.every((c) => c.supportsVision === 1)).toBe(true);
   });
 
-  it('explicit unified aliases prefer a keyed provider over a keyless duplicate', () => {
+  it('explicit unified aliases prefer a keyed provider over a keyless duplicate', async () => {
     const db = getDb();
-    const insert = db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled)
-      VALUES (?, ?, ?, ?, ?, 1)
-    `);
     // Make the keyless row win the normal deterministic ordering. The fusion
     // resolver must still choose the configured provider for the same logical
     // alias rather than spending a panel slot on a dead relay.
-    insert.run('kilo', 'edge-case-model', 'Edge Case Model (Kilo)', 1, 1);
-    insert.run('nvidia', 'edge-case-model', 'Edge Case Model (NVIDIA)', 2, 2);
-    addKey('nvidia');
+    (await db.run(`
+      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled)
+      VALUES (?, ?, ?, ?, ?, 1) RETURNING id`, ['kilo', 'edge-case-model', 'Edge Case Model (Kilo)', 1, 1]));
+    (await db.run(`
+      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled)
+      VALUES (?, ?, ?, ?, ?, 1) RETURNING id`, ['nvidia', 'edge-case-model', 'Edge Case Model (NVIDIA)', 2, 2]));
+    await addKey('nvidia');
 
     try {
-      const candidate = resolveFusionCandidate('edge-case-model');
+      const candidate = await resolveFusionCandidate('edge-case-model');
       expect(candidate?.platform).toBe('nvidia');
       expect(candidate?.modelId).toBe('edge-case-model');
     } finally {
-      db.prepare("DELETE FROM models WHERE model_id = 'edge-case-model'").run();
+      (await db.run("DELETE FROM models WHERE model_id = 'edge-case-model'"));
     }
   });
 });

@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getSetting } from '../../db/index.js';
+import { getSetting } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { MIN_RELIABILITY_FLOOR_KEY } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(app: Express, method: string, path: string, body: any, token: string) {
   const server = app.listen(0, '127.0.0.1');
@@ -27,11 +28,11 @@ describe('/api/settings/min-reliability-floor', () => {
   let app: Express;
   let token: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    token = mintDashboardToken();
+    token = await mintDashboardToken();
   });
 
   it('reports null (disabled) before anything is configured', async () => {
@@ -44,7 +45,7 @@ describe('/api/settings/min-reliability-floor', () => {
     const put = await request(app, 'PUT', '/api/settings/min-reliability-floor', { floor: 0.8 }, token);
     expect(put.status).toBe(200);
     expect(put.body).toEqual({ floor: 0.8 });
-    expect(getSetting(MIN_RELIABILITY_FLOOR_KEY)).toBe('0.8');
+    expect(await getSetting(MIN_RELIABILITY_FLOOR_KEY)).toBe('0.8');
 
     const get = await request(app, 'GET', '/api/settings/min-reliability-floor', undefined, token);
     expect(get.body).toEqual(put.body);
@@ -55,7 +56,7 @@ describe('/api/settings/min-reliability-floor', () => {
     const put = await request(app, 'PUT', '/api/settings/min-reliability-floor', { floor: null }, token);
     expect(put.status).toBe(200);
     expect(put.body).toEqual({ floor: null });
-    expect(getSetting(MIN_RELIABILITY_FLOOR_KEY)).toBeUndefined();
+    expect(await getSetting(MIN_RELIABILITY_FLOOR_KEY)).toBeUndefined();
   });
 
   it('rejects an out-of-range floor', async () => {

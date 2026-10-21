@@ -20,7 +20,8 @@ vi.mock('../../services/router.js', async (importOriginal) => {
 
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -53,10 +54,8 @@ async function post(app: Express, path: string, body: any, key: string) {
   return { status: res.status, text };
 }
 
-function cooldownExpiry(): number | null {
-  const row = getDb().prepare(
-    "SELECT expires_at_ms FROM rate_limit_cooldowns WHERE platform = 'fake' AND model_id = 'fake-model' AND key_id = 1",
-  ).get() as { expires_at_ms: number } | undefined;
+async function cooldownExpiry(): number | null {
+  const row = (await getDb().get("SELECT expires_at_ms FROM rate_limit_cooldowns WHERE platform = 'fake' AND model_id = 'fake-model' AND key_id = 1")) as { expires_at_ms: number } | undefined;
   return row?.expires_at_ms ?? null;
 }
 
@@ -64,17 +63,17 @@ describe('/v1/responses shared-loop convergence', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     mockRouteRequest.mockReset();
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
-    getDb().prepare('DELETE FROM rate_limit_usage').run();
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
+    (await getDb().run('DELETE FROM rate_limit_usage'));
   });
 
   it('honors a provider Retry-After on the cooldown (drift #2 — was ignored on /v1/responses)', async () => {
@@ -89,7 +88,7 @@ describe('/v1/responses shared-loop convergence', () => {
     const { status } = await post(app, '/v1/responses', { input: 'hi', stream: false }, key);
     expect(status).toBe(429); // exhausted after the single scripted model failed over
 
-    const expiry = cooldownExpiry();
+    const expiry = await cooldownExpiry();
     expect(expiry).not.toBeNull();
     const benchMs = expiry! - before;
     // Retry-After (5 min) is honored: benched well beyond the 90s transient and
@@ -109,7 +108,7 @@ describe('/v1/responses shared-loop convergence', () => {
     const { status } = await post(app, '/v1/responses', { input: 'hi', stream: false }, key);
     expect(status).toBe(429);
 
-    const expiry = cooldownExpiry();
+    const expiry = await cooldownExpiry();
     expect(expiry).not.toBeNull();
     // MODEL_FORBIDDEN_COOLDOWN_MS is a full day; assert at least ~23h out (would
     // have been ~90s before the convergence).

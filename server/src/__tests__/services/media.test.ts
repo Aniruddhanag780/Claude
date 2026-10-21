@@ -1,28 +1,27 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { runImageGeneration, runVideoGeneration, runSpeech } from '../../services/media.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const realFetch = globalThis.fetch;
 
-function addKey(platform: string, raw = `${platform}-test-key`) {
+async function addKey(platform: string, raw = `${platform}-test-key`) {
   const { encrypted, iv, authTag } = encrypt(raw);
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'test', ?, ?, ?, 'healthy', 1)
-  `).run(platform, encrypted, iv, authTag);
+    VALUES (?, 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, encrypted, iv, authTag]));
 }
 
-function addCustomKey(baseUrl: string, raw = 'custom-media-key'): number {
+async function addCustomKey(baseUrl: string, raw = 'custom-media-key'): number {
   const { encrypted, iv, authTag } = encrypt(raw);
-  const row = getDb().prepare(`
+  const row = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
-    VALUES ('custom', 'test', ?, ?, ?, 'healthy', 1, ?)
-  `).run(encrypted, iv, authTag, baseUrl);
+    VALUES ('custom', 'test', ?, ?, ?, 'healthy', 1, ?) RETURNING id`, [encrypted, iv, authTag, baseUrl]));
   return Number(row.lastInsertRowid);
 }
 
-function addMedia(
+async function addMedia(
   platform: string,
   modelId: string,
   modality: 'image' | 'video' | 'audio',
@@ -30,10 +29,9 @@ function addMedia(
   keyId: number | null = null,
   metaJson: string | null = null,
 ) {
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, key_id, meta_json)
-    VALUES (?, ?, ?, ?, ?, 1, '', ?, ?)
-  `).run(platform, modelId, modelId, modality, priority, keyId, metaJson);
+    VALUES (?, ?, ?, ?, ?, 1, '', ?, ?) RETURNING id`, [platform, modelId, modelId, modality, priority, keyId, metaJson]));
 }
 
 function jsonResponse(body: unknown) {
@@ -41,9 +39,9 @@ function jsonResponse(body: unknown) {
 }
 
 describe('media service', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   afterEach(() => {
@@ -51,48 +49,48 @@ describe('media service', () => {
     vi.restoreAllMocks();
   });
 
-  it('migration creates the media_models table', () => {
-    const cols = (getDb().prepare('PRAGMA table_info(media_models)').all() as { name: string }[]).map(c => c.name);
+  it('migration creates the media_models table', async () => {
+    const cols = ((await getDb().all('PRAGMA table_info(media_models)')) as { name: string }[]).map(c => c.name);
     expect(cols).toContain('modality');
     expect(cols).toContain('quota_label');
     expect(cols).toContain('key_id');
   });
 
   it('skips capped provider keys and keeps a reservation until image generation completes', async () => {
-    addMedia('nvidia', 'black-forest-labs/flux.1-schnell', 'image');
-    addKey('nvidia', 'spent-key');
-    addKey('nvidia', 'available-key');
+    await addMedia('nvidia', 'black-forest-labs/flux.1-schnell', 'image');
+    await addKey('nvidia', 'spent-key');
+    await addKey('nvidia', 'available-key');
     const db = getDb();
-    const keys = db.prepare('SELECT id FROM api_keys ORDER BY id').all() as { id: number }[];
-    db.prepare('UPDATE api_keys SET monthly_request_cap = 1').run();
-    db.prepare(`INSERT INTO requests (platform, model_id, key_id, status, latency_ms)
-      VALUES ('nvidia', 'chat-model', ?, 'success', 1)`).run(keys[0].id);
+    const keys = (await db.all('SELECT id FROM api_keys ORDER BY id')) as { id: number }[];
+    (await db.run('UPDATE api_keys SET monthly_request_cap = 1'));
+    (await db.run(`INSERT INTO requests (platform, model_id, key_id, status, latency_ms)
+      VALUES ('nvidia', 'chat-model', ?, 'success', 1) RETURNING id`, [keys[0].id]));
     let finish!: (response: Response) => void;
     const fetchMock = vi.fn(() => new Promise<Response>(resolve => { finish = resolve; }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const first = runImageGeneration('auto', { prompt: 'a cat' });
+    const first = await runImageGeneration('auto', { prompt: 'a cat' });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const request = (fetchMock.mock.calls as unknown as [string, RequestInit][])[0][1];
     expect(new Headers(request.headers).get('Authorization')).toBe('Bearer available-key');
-    await expect(runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 429, code: 'quota_exceeded' });
+    await expect(await runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 429, code: 'quota_exceeded' });
     finish(jsonResponse({ artifacts: [{ base64: 'AAAA' }] }));
     await expect(first).resolves.toMatchObject({ platform: 'nvidia' });
-    expect(db.prepare('SELECT requests FROM key_monthly_usage WHERE key_id = ?').get(keys[1].id)).toEqual({ requests: 1 });
+    expect((await db.get('SELECT requests FROM key_monthly_usage WHERE key_id = ?', [keys[1].id]))).toEqual({ requests: 1 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     // A failed attempt does not consume another request, and cannot leak its reservation.
-    db.prepare('UPDATE api_keys SET monthly_request_cap = 2 WHERE id = ?').run(keys[1].id);
+    (await db.run('UPDATE api_keys SET monthly_request_cap = 2 WHERE id = ?', [keys[1].id]));
     fetchMock.mockResolvedValue(new Response('unavailable', { status: 503 }));
-    await expect(runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 502 });
+    await expect(await runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 502 });
     fetchMock.mockResolvedValue(jsonResponse({ artifacts: [{ base64: 'BBBB' }] }));
-    await expect(runImageGeneration('auto', { prompt: 'a cat' })).resolves.toMatchObject({ platform: 'nvidia' });
+    await expect(await runImageGeneration('auto', { prompt: 'a cat' })).resolves.toMatchObject({ platform: 'nvidia' });
   });
 
   describe('image generation', () => {
-    function twoImageProviders() {
-      addMedia('nvidia', 'black-forest-labs/flux.1-schnell', 'image', 1);
-      addMedia('siliconflow', 'black-forest-labs/FLUX.1-schnell', 'image', 2);
-      addKey('nvidia');
-      addKey('siliconflow');
+    async function twoImageProviders() {
+      await addMedia('nvidia', 'black-forest-labs/flux.1-schnell', 'image', 1);
+      await addMedia('siliconflow', 'black-forest-labs/FLUX.1-schnell', 'image', 2);
+      await addKey('nvidia');
+      await addKey('siliconflow');
     }
     const limited = (ra?: string) => new Response('slow down', { status: 429, headers: ra ? { 'retry-after': ra } : {} });
     const byHost = (nvidia: () => Response, siliconflow: () => Response) =>
@@ -101,13 +99,13 @@ describe('media service', () => {
     it('relays the SOONEST Retry-After when every provider is rate-limited', async () => {
       twoImageProviders();
       globalThis.fetch = byHost(() => limited('5'), () => limited('60'));
-      await expect(runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 429, retryAfterMs: 5_000 });
+      await expect(await runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 429, retryAfterMs: 5_000 });
     });
 
     it('drops the hint when a rate-limited provider stated no delay', async () => {
       twoImageProviders();
       globalThis.fetch = byHost(() => limited('17'), () => limited());
-      const err = await runImageGeneration('auto', { prompt: 'a cat' }).catch(e => e);
+      const err = await (await runImageGeneration('auto', { prompt: 'a cat' })).catch(e => e);
       expect(err.status).toBe(429);
       expect(err.retryAfterMs).toBeUndefined();
     });
@@ -115,7 +113,7 @@ describe('media service', () => {
     it('drops the hint when the chain ends in a non-rate-limit failure', async () => {
       twoImageProviders();
       globalThis.fetch = byHost(() => limited('17'), () => new Response('boom', { status: 500 }));
-      const err = await runImageGeneration('auto', { prompt: 'a cat' }).catch(e => e);
+      const err = await (await runImageGeneration('auto', { prompt: 'a cat' })).catch(e => e);
       expect(err.status).toBe(502);
       expect(err.retryAfterMs).toBeUndefined();
     });
@@ -123,12 +121,12 @@ describe('media service', () => {
     it('fails over past a rate-limited provider', async () => {
       twoImageProviders();
       globalThis.fetch = byHost(() => limited('17'), () => jsonResponse({ images: [{ url: 'https://x/y.png' }] }));
-      await expect(runImageGeneration('auto', { prompt: 'a cat' })).resolves.toMatchObject({ platform: 'siliconflow' });
+      await expect(await runImageGeneration('auto', { prompt: 'a cat' })).resolves.toMatchObject({ platform: 'siliconflow' });
     });
 
     it('NVIDIA: maps artifacts[].base64 → b64_json', async () => {
-      addMedia('nvidia', 'black-forest-labs/flux.1-schnell', 'image');
-      addKey('nvidia');
+      await addMedia('nvidia', 'black-forest-labs/flux.1-schnell', 'image');
+      await addKey('nvidia');
       globalThis.fetch = vi.fn(async () => jsonResponse({ artifacts: [{ base64: 'AAAA' }] })) as any;
       const r = await runImageGeneration('black-forest-labs/flux.1-schnell', { prompt: 'a cat' });
       expect(r.platform).toBe('nvidia');
@@ -136,8 +134,8 @@ describe('media service', () => {
     });
 
     it('NVIDIA FLUX.1 Dev: sends the validated 28-step 1024x1024 payload', async () => {
-      addMedia('nvidia', 'black-forest-labs/flux.1-dev', 'image');
-      addKey('nvidia');
+      await addMedia('nvidia', 'black-forest-labs/flux.1-dev', 'image');
+      await addKey('nvidia');
       const fetchMock = vi.fn(async () => jsonResponse({ artifacts: [{ base64: 'DEV' }] }));
       globalThis.fetch = fetchMock as any;
 
@@ -158,8 +156,8 @@ describe('media service', () => {
     });
 
     it('NVIDIA FLUX.2 Klein 4B: omits unsupported mode and guidance fields', async () => {
-      addMedia('nvidia', 'black-forest-labs/flux.2-klein-4b', 'image');
-      addKey('nvidia');
+      await addMedia('nvidia', 'black-forest-labs/flux.2-klein-4b', 'image');
+      await addKey('nvidia');
       const fetchMock = vi.fn(async () => jsonResponse({ artifacts: [{ base64: 'KLEIN' }] }));
       globalThis.fetch = fetchMock as any;
 
@@ -176,7 +174,7 @@ describe('media service', () => {
     });
 
     it('Pollinations: keyless GET, raw bytes → b64_json (no api key needed)', async () => {
-      addMedia('pollinations', 'flux', 'image');
+      await addMedia('pollinations', 'flux', 'image');
       globalThis.fetch = vi.fn(async () =>
         new Response(Buffer.from('PNGDATA'), { status: 200, headers: { 'content-type': 'image/jpeg' } })) as any;
       const r = await runImageGeneration('flux', { prompt: 'a cat' });
@@ -185,8 +183,8 @@ describe('media service', () => {
     });
 
     it('Cloudflare FLUX.1 Schnell: sends only the prompt and maps result.image', async () => {
-      addMedia('cloudflare', '@cf/black-forest-labs/flux-1-schnell', 'image');
-      addKey('cloudflare', 'acct123:token456');
+      await addMedia('cloudflare', '@cf/black-forest-labs/flux-1-schnell', 'image');
+      await addKey('cloudflare', 'acct123:token456');
       const fetchMock = vi.fn(async () => jsonResponse({ result: { image: 'CFB64' }, success: true }));
       globalThis.fetch = fetchMock as any;
       const r = await runImageGeneration('@cf/black-forest-labs/flux-1-schnell', { prompt: 'x' });
@@ -197,9 +195,9 @@ describe('media service', () => {
     });
 
     it('Cloudflare: requestStyle multipart sends form-data (FLUX.2 rejects JSON)', async () => {
-      addMedia('cloudflare', '@cf/black-forest-labs/flux-2-klein-4b', 'image', 1, null,
+      await addMedia('cloudflare', '@cf/black-forest-labs/flux-2-klein-4b', 'image', 1, null,
         JSON.stringify({ requestStyle: 'multipart' }));
-      addKey('cloudflare', 'acct123:token456');
+      await addKey('cloudflare', 'acct123:token456');
       const fetchMock = vi.fn(async () => jsonResponse({ result: { image: 'KLEINB64' }, success: true }));
       globalThis.fetch = fetchMock as any;
       const r = await runImageGeneration('@cf/black-forest-labs/flux-2-klein-4b', {
@@ -218,8 +216,8 @@ describe('media service', () => {
     });
 
     it('Cloudflare: binary SDXL response → b64_json', async () => {
-      addMedia('cloudflare', '@cf/stabilityai/stable-diffusion-xl-base-1.0', 'image');
-      addKey('cloudflare', 'acct123:token456');
+      await addMedia('cloudflare', '@cf/stabilityai/stable-diffusion-xl-base-1.0', 'image');
+      await addKey('cloudflare', 'acct123:token456');
       globalThis.fetch = vi.fn(async () =>
         new Response(Buffer.from('SDXLPNG'), { status: 200, headers: { 'content-type': 'image/png' } })) as any;
       const r = await runImageGeneration('@cf/stabilityai/stable-diffusion-xl-base-1.0', { prompt: 'x' });
@@ -227,28 +225,28 @@ describe('media service', () => {
     });
 
     it('SiliconFlow: images[].url → url', async () => {
-      addMedia('siliconflow', 'black-forest-labs/FLUX.1-schnell', 'image');
-      addKey('siliconflow');
+      await addMedia('siliconflow', 'black-forest-labs/FLUX.1-schnell', 'image');
+      await addKey('siliconflow');
       globalThis.fetch = vi.fn(async () => jsonResponse({ images: [{ url: 'https://x/y.png' }] })) as any;
       const r = await runImageGeneration('black-forest-labs/FLUX.1-schnell', { prompt: 'x' });
       expect(r.images[0].url).toBe('https://x/y.png');
     });
 
     it('unknown model id → 400', async () => {
-      addMedia('nvidia', 'real-model', 'image');
-      addKey('nvidia');
-      await expect(runImageGeneration('does-not-exist', { prompt: 'x' })).rejects.toMatchObject({ status: 400 });
+      await addMedia('nvidia', 'real-model', 'image');
+      await addKey('nvidia');
+      await expect(await runImageGeneration('does-not-exist', { prompt: 'x' })).rejects.toMatchObject({ status: 400 });
     });
 
     it('no providers configured → 503', async () => {
-      await expect(runImageGeneration('auto', { prompt: 'x' })).rejects.toMatchObject({ status: 503 });
+      await expect(await runImageGeneration('auto', { prompt: 'x' })).rejects.toMatchObject({ status: 503 });
     });
 
     it('fails over to the next provider on error (auto)', async () => {
-      addMedia('nvidia', 'flux-n', 'image', 1);
-      addKey('nvidia');
-      addMedia('siliconflow', 'flux-s', 'image', 2);
-      addKey('siliconflow');
+      await addMedia('nvidia', 'flux-n', 'image', 1);
+      await addKey('nvidia');
+      await addMedia('siliconflow', 'flux-s', 'image', 2);
+      await addKey('siliconflow');
       globalThis.fetch = vi.fn(async (url: any) => {
         if (String(url).includes('nvidia')) return new Response('upstream boom', { status: 500 });
         return jsonResponse({ images: [{ url: 'ok' }] });
@@ -259,17 +257,17 @@ describe('media service', () => {
     });
 
     it('skips a provider with no key, uses the one that has it (auto)', async () => {
-      addMedia('nvidia', 'flux-n', 'image', 1);   // no key added
-      addMedia('siliconflow', 'flux-s', 'image', 2);
-      addKey('siliconflow');
+      await addMedia('nvidia', 'flux-n', 'image', 1);   // no key added
+      await addMedia('siliconflow', 'flux-s', 'image', 2);
+      await addKey('siliconflow');
       globalThis.fetch = vi.fn(async () => jsonResponse({ images: [{ url: 'ok' }] })) as any;
       const r = await runImageGeneration('auto', { prompt: 'x' });
       expect(r.platform).toBe('siliconflow');
     });
 
     it('custom image models call the bound OpenAI-compatible endpoint', async () => {
-      const keyId = addCustomKey('http://127.0.0.1:8282/v1', 'custom-image-key');
-      addMedia('custom', 'local-image', 'image', 1, keyId);
+      const keyId = await addCustomKey('http://127.0.0.1:8282/v1', 'custom-image-key');
+      await addMedia('custom', 'local-image', 'image', 1, keyId);
       const fetchMock = vi.fn(async () => jsonResponse({ data: [{ url: 'https://example.test/image.png' }] }));
       globalThis.fetch = fetchMock as any;
 
@@ -283,15 +281,15 @@ describe('media service', () => {
       expect(headers.Authorization).toBe('Bearer custom-image-key');
       const body = JSON.parse(String(init.body));
       expect(body).toMatchObject({ model: 'local-image', prompt: 'a cat', n: 2, size: '512x512' });
-      const log = getDb().prepare("SELECT key_id FROM requests WHERE request_type = 'image' ORDER BY id DESC LIMIT 1").get() as { key_id: number };
+      const log = (await getDb().get("SELECT key_id FROM requests WHERE request_type = 'image' ORDER BY id DESC LIMIT 1")) as { key_id: number };
       expect(log.key_id).toBe(keyId);
     });
   });
 
   describe('video generation', () => {
     it('Pollinations: sends the authenticated nova-reel request and returns MP4 bytes', async () => {
-      addMedia('pollinations', 'nova-reel', 'video');
-      addKey('pollinations', 'sk_pollinations_test');
+      await addMedia('pollinations', 'nova-reel', 'video');
+      await addKey('pollinations', 'sk_pollinations_test');
       const fetchMock = vi.fn(async () =>
         new Response(Buffer.from('MP4DATA'), { status: 200, headers: { 'content-type': 'video/mp4' } }));
       globalThis.fetch = fetchMock as any;
@@ -320,8 +318,8 @@ describe('media service', () => {
       // Allowed lengths differ per model (nova-reel 6-120 by 6, veo 4/6/8,
       // minimax-h3 exactly 5), so guessing one would 400 on most of the
       // roster. No duration means the provider uses the model's own default.
-      addMedia('pollinations', 'nova-reel', 'video');
-      addKey('pollinations', 'sk_pollinations_test');
+      await addMedia('pollinations', 'nova-reel', 'video');
+      await addKey('pollinations', 'sk_pollinations_test');
       const fetchMock = vi.fn(async () =>
         new Response(Buffer.from('MP4DATA'), { status: 200, headers: { 'content-type': 'video/mp4' } }));
       globalThis.fetch = fetchMock as any;
@@ -334,12 +332,12 @@ describe('media service', () => {
     });
 
     it('Pollinations: rejects unsupported nova-reel durations before calling upstream', async () => {
-      addMedia('pollinations', 'nova-reel', 'video');
-      addKey('pollinations');
+      await addMedia('pollinations', 'nova-reel', 'video');
+      await addKey('pollinations');
       const fetchMock = vi.fn();
       globalThis.fetch = fetchMock as any;
 
-      await expect(runVideoGeneration('nova-reel', {
+      await expect(await runVideoGeneration('nova-reel', {
         prompt: 'x',
         duration: 7,
       })).rejects.toMatchObject({ status: 400 });
@@ -347,7 +345,7 @@ describe('media service', () => {
     });
 
     it('Hugging Face: submits and resolves the fal.ai queue without leaking the token to the media URL', async () => {
-      addMedia(
+      await addMedia(
         'huggingface',
         'Lightricks/LTX-Video-0.9.5',
         'video',
@@ -355,7 +353,7 @@ describe('media service', () => {
         null,
         JSON.stringify({ providerModelId: 'fal-ai/ltx-video-v095' }),
       );
-      addKey('huggingface', 'hf_test_token');
+      await addKey('huggingface', 'hf_test_token');
       // The submit is answered with a job that is still queued, so the poll
       // loop actually runs: an unmatched URL is a hard failure rather than
       // falling through to a canned COMPLETED reply.
@@ -407,9 +405,9 @@ describe('media service', () => {
     });
 
     it('stops the chain when the API caller hangs up instead of paying for a second provider', async () => {
-      addMedia('pollinations', 'nova-reel', 'video', 1);
-      addMedia('pollinations', 'wan-fast', 'video', 2);
-      addKey('pollinations', 'sk_pollinations_test');
+      await addMedia('pollinations', 'nova-reel', 'video', 1);
+      await addMedia('pollinations', 'wan-fast', 'video', 2);
+      await addKey('pollinations', 'sk_pollinations_test');
       const controller = new AbortController();
       const fetchMock = vi.fn(async () => {
         controller.abort();
@@ -417,7 +415,7 @@ describe('media service', () => {
       });
       globalThis.fetch = fetchMock as any;
 
-      await expect(runVideoGeneration('auto', { prompt: 'x' }, controller.signal))
+      await expect(await runVideoGeneration('auto', { prompt: 'x' }, controller.signal))
         .rejects.toMatchObject({ status: 499 });
       // The second catalogued provider is never attempted.
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -427,14 +425,14 @@ describe('media service', () => {
       // A 401 from the provider means the OPERATOR's key was refused. Passing
       // it to the caller would tell an OpenAI SDK that its own gateway key is
       // bad; a caller-attributable 400 does travel through.
-      addMedia('pollinations', 'nova-reel', 'video');
-      addKey('pollinations', 'sk_pollinations_test');
+      await addMedia('pollinations', 'nova-reel', 'video');
+      await addKey('pollinations', 'sk_pollinations_test');
       globalThis.fetch = vi.fn(async () => new Response('nope', { status: 401 })) as any;
-      await expect(runVideoGeneration('nova-reel', { prompt: 'x' }))
+      await expect(await runVideoGeneration('nova-reel', { prompt: 'x' }))
         .rejects.toMatchObject({ status: 502 });
 
       globalThis.fetch = vi.fn(async () => new Response('bad prompt', { status: 400 })) as any;
-      await expect(runVideoGeneration('nova-reel', { prompt: 'x' }))
+      await expect(await runVideoGeneration('nova-reel', { prompt: 'x' }))
         .rejects.toMatchObject({ status: 400 });
     });
 
@@ -442,7 +440,7 @@ describe('media service', () => {
       // The result URL is the one URL in this adapter that comes out of an
       // upstream JSON body, so it goes through the same guard custom-provider
       // base URLs do (#440) instead of being fetched and streamed back.
-      addMedia(
+      await addMedia(
         'huggingface',
         'Lightricks/LTX-Video-0.9.5',
         'video',
@@ -450,7 +448,7 @@ describe('media service', () => {
         null,
         JSON.stringify({ providerModelId: 'fal-ai/ltx-video-v095' }),
       );
-      addKey('huggingface', 'hf_test_token');
+      await addKey('huggingface', 'hf_test_token');
       const fetchMock = vi.fn(async (input: string | URL | Request) => {
         const url = String(input);
         if (url.includes('requests/job-1?_subdomain=queue')) {
@@ -464,7 +462,7 @@ describe('media service', () => {
       });
       globalThis.fetch = fetchMock as any;
 
-      await expect(runVideoGeneration('Lightricks/LTX-Video-0.9.5', { prompt: 'x' }))
+      await expect(await runVideoGeneration('Lightricks/LTX-Video-0.9.5', { prompt: 'x' }))
         .rejects.toThrow(/unusable video URL/);
       // Submit + result read only; the metadata address was never contacted.
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -476,7 +474,7 @@ describe('media service', () => {
     const freeAiWav = () => { const b = Buffer.alloc(48); b.write('RIFF'); b.write('WAVE', 8); return b; };
 
     it('Free.ai maps OpenAI fields to Kokoro and downloads verified WAV without credentials', async () => {
-      addMedia('freeai', 'kokoro', 'audio'); addKey('freeai');
+      await addMedia('freeai', 'kokoro', 'audio'); await addKey('freeai');
       const wav = freeAiWav();
       const fetchMock = vi.spyOn(globalThis, 'fetch')
         .mockResolvedValueOnce(jsonResponse({ audio_url: freeAiUrl }))
@@ -494,7 +492,7 @@ describe('media service', () => {
     });
 
     it('Free.ai preserves native voices and explicit WAV requests', async () => {
-      addMedia('freeai', 'kokoro', 'audio'); addKey('freeai');
+      await addMedia('freeai', 'kokoro', 'audio'); await addKey('freeai');
       const fetchMock = vi.spyOn(globalThis, 'fetch')
         .mockResolvedValueOnce(jsonResponse({ audio_url: freeAiUrl }))
         .mockResolvedValueOnce(new Response(freeAiWav()));
@@ -503,53 +501,53 @@ describe('media service', () => {
     });
 
     it.each(['mp3', 'pcm', 'flac', 'opus'])('Free.ai rejects unsupported %s before generating', async format => {
-      addMedia('freeai', 'kokoro', 'audio'); addKey('freeai');
+      await addMedia('freeai', 'kokoro', 'audio'); await addKey('freeai');
       const fetchMock = vi.spyOn(globalThis, 'fetch');
-      await expect(runSpeech('kokoro', { input: 'Hello', format })).rejects.toThrow('supports wav');
+      await expect(await runSpeech('kokoro', { input: 'Hello', format })).rejects.toThrow('supports wav');
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('Free.ai never sends untested or premium model IDs', async () => {
-      addMedia('freeai', 'premium/voice', 'audio'); addKey('freeai');
+      await addMedia('freeai', 'premium/voice', 'audio'); await addKey('freeai');
       const fetchMock = vi.spyOn(globalThis, 'fetch');
-      await expect(runSpeech('premium/voice', { input: 'Hello' })).rejects.toThrow('only the tested Kokoro');
+      await expect(await runSpeech('premium/voice', { input: 'Hello' })).rejects.toThrow('only the tested Kokoro');
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it.each([{}, { audio_url: 'http://169.254.169.254/latest/meta-data/' }, { audio_url: 'https://example.com/test.wav' }])('Free.ai never downloads unsafe output', async body => {
-      addMedia('freeai', 'kokoro', 'audio'); addKey('freeai');
+      await addMedia('freeai', 'kokoro', 'audio'); await addKey('freeai');
       const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(body));
-      await expect(runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('unsafe audio URL');
+      await expect(await runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('unsafe audio URL');
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it('Free.ai rejects JSON and oversized output instead of labelling them audio', async () => {
-      addMedia('freeai', 'kokoro', 'audio'); addKey('freeai');
+      await addMedia('freeai', 'kokoro', 'audio'); await addKey('freeai');
       vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(jsonResponse({ audio_url: freeAiUrl }))
         .mockResolvedValueOnce(jsonResponse({ error: 'not audio' }))
         .mockResolvedValueOnce(jsonResponse({ audio_url: freeAiUrl }))
         .mockResolvedValueOnce(new Response(freeAiWav(), { headers: { 'Content-Length': String(21 * 1024 * 1024) } }));
-      await expect(runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('recognized WAV');
-      await expect(runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('too large');
+      await expect(await runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('recognized WAV');
+      await expect(await runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('too large');
     });
 
     it('Free.ai preserves quota backoff without retrying a paid model', async () => {
-      addMedia('freeai', 'kokoro', 'audio'); addKey('freeai');
+      await addMedia('freeai', 'kokoro', 'audio'); await addKey('freeai');
       const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('quota', { status: 429, headers: { 'Retry-After': '30' } }));
-      await expect(runSpeech('kokoro', { input: 'Hello' })).rejects.toMatchObject({ status: 429, retryAfterMs: 30000 });
+      await expect(await runSpeech('kokoro', { input: 'Hello' })).rejects.toMatchObject({ status: 429, retryAfterMs: 30000 });
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it('Free.ai reports queued work without following a poll URL or resubmitting generation', async () => {
-      addMedia('freeai', 'kokoro', 'audio'); addKey('freeai');
+      await addMedia('freeai', 'kokoro', 'audio'); await addKey('freeai');
       const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ queued: true, job_id: 'test', poll_url: 'https://example.com/private' }));
-      await expect(runSpeech('kokoro', { input: 'Hello' })).rejects.toMatchObject({ status: 502, code: 'upstream_queued' });
+      await expect(await runSpeech('kokoro', { input: 'Hello' })).rejects.toMatchObject({ status: 502, code: 'upstream_queued' });
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it.each(['simba-3.0', 'simba-3.2'])('Speechify %s sends native fields and decodes JSON audio', async model => {
-      addMedia('speechify', model, 'audio');
-      addKey('speechify');
+      await addMedia('speechify', model, 'audio');
+      await addKey('speechify');
       const audio = Buffer.from('ID3test-audio');
       const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ audio_data: audio.toString('base64'), audio_format: 'mp3', billable_characters_count: 5 }));
       const result = await runSpeech(model, { input: 'Hello', voice: 'alloy' });
@@ -563,7 +561,7 @@ describe('media service', () => {
     });
 
     it('Speechify preserves native voices and requested supported formats', async () => {
-      addMedia('speechify', 'test-simba', 'audio'); addKey('speechify');
+      await addMedia('speechify', 'test-simba', 'audio'); await addKey('speechify');
       const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ audio_data: 'T2dnUw==', audio_format: 'ogg' }));
       const result = await runSpeech('test-simba', { input: 'Hello', voice: 'native-voice-id', format: 'ogg' });
       expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ voice_id: 'native-voice-id', audio_format: 'ogg' });
@@ -571,21 +569,21 @@ describe('media service', () => {
     });
 
     it.each(['pcm', 'flac', 'opus'])('Speechify rejects unsupported %s without sending a request', async format => {
-      addMedia('speechify', 'test-simba', 'audio'); addKey('speechify');
+      await addMedia('speechify', 'test-simba', 'audio'); await addKey('speechify');
       const fetchMock = vi.spyOn(globalThis, 'fetch');
-      await expect(runSpeech('test-simba', { input: 'Hello', format })).rejects.toThrow('Speechify supports');
+      await expect(await runSpeech('test-simba', { input: 'Hello', format })).rejects.toThrow('Speechify supports');
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it.each([{}, { audio_data: 'not base64', audio_format: 'mp3' }, { audio_data: '', audio_format: 'mp3' }, { audio_data: 'SUQz', audio_format: 'wav' }])('Speechify rejects malformed audio instead of returning JSON as sound', async body => {
-      addMedia('speechify', 'test-simba', 'audio'); addKey('speechify');
+      await addMedia('speechify', 'test-simba', 'audio'); await addKey('speechify');
       vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(body));
-      await expect(runSpeech('test-simba', { input: 'Hello' })).rejects.toThrow('Speechify returned');
+      await expect(await runSpeech('test-simba', { input: 'Hello' })).rejects.toThrow('Speechify returned');
     });
 
     it('Cloudflare MeloTTS: base64 audio → audio/mpeg bytes', async () => {
-      addMedia('cloudflare', '@cf/myshell-ai/melotts', 'audio');
-      addKey('cloudflare', 'acct:tok');
+      await addMedia('cloudflare', '@cf/myshell-ai/melotts', 'audio');
+      await addKey('cloudflare', 'acct:tok');
       const fetchMock = vi.fn(async () => jsonResponse({ result: { audio: Buffer.from('MP3').toString('base64') } }));
       globalThis.fetch = fetchMock as any;
       const r = await runSpeech('@cf/myshell-ai/melotts', { input: 'hi', voice: 'alloy' });
@@ -596,8 +594,8 @@ describe('media service', () => {
     });
 
     it('SiliconFlow CosyVoice: maps OpenAI voices, accepts native names, and defaults unknown names', async () => {
-      addMedia('siliconflow', 'FunAudioLLM/CosyVoice2-0.5B', 'audio');
-      addKey('siliconflow');
+      await addMedia('siliconflow', 'FunAudioLLM/CosyVoice2-0.5B', 'audio');
+      await addKey('siliconflow');
       const fetchMock = vi.fn(async () =>
         new Response(Buffer.from('COSY'), { status: 200, headers: { 'content-type': 'audio/mpeg' } }));
       globalThis.fetch = fetchMock as any;
@@ -617,7 +615,7 @@ describe('media service', () => {
     });
 
     it('Pollinations openai-audio: keeps OpenAI voices and defaults unknown names (keyless)', async () => {
-      addMedia('pollinations', 'openai-audio', 'audio');
+      await addMedia('pollinations', 'openai-audio', 'audio');
       const fetchMock = vi.fn(async () =>
         jsonResponse({ choices: [{ message: { audio: { data: Buffer.from('POLLY').toString('base64') } } }] }));
       globalThis.fetch = fetchMock as any;
@@ -631,8 +629,8 @@ describe('media service', () => {
     });
 
     it('Gemini TTS: maps OpenAI voices and wraps base64 PCM as WAV', async () => {
-      addMedia('google', 'gemini-2.5-flash-preview-tts', 'audio');
-      addKey('google');
+      await addMedia('google', 'gemini-2.5-flash-preview-tts', 'audio');
+      await addKey('google');
       const pcm = Buffer.from([1, 2, 3, 4]);
       const fetchMock = vi.fn(async () => jsonResponse({
         candidates: [{ content: { parts: [{ inlineData: { mimeType: 'audio/L16;codec=pcm;rate=24000', data: pcm.toString('base64') } }] } }],
@@ -649,8 +647,8 @@ describe('media service', () => {
     });
 
     it.each(['gemini-3.8-flash-tts', 'gemini-3.8-flash-lite-tts'])('Gemini TTS: passes through existing WAV bytes for %s', async model => {
-      addMedia('google', model, 'audio');
-      addKey('google');
+      await addMedia('google', model, 'audio');
+      await addKey('google');
       const wav = Buffer.alloc(48);
       wav.write('RIFF', 0); wav.writeUInt32LE(40, 4); wav.write('WAVE', 8);
       wav.write('fmt ', 12); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20);
@@ -663,15 +661,15 @@ describe('media service', () => {
     });
 
     it('Gemini TTS: rejects an invalid declared WAV rather than wrapping it as PCM', async () => {
-      addMedia('google', 'gemini-3.8-flash-tts', 'audio');
-      addKey('google');
+      await addMedia('google', 'gemini-3.8-flash-tts', 'audio');
+      await addKey('google');
       globalThis.fetch = vi.fn(async () => jsonResponse({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'audio/wav', data: Buffer.from('not audio').toString('base64') } }] } }] }));
-      await expect(runSpeech('gemini-3.8-flash-tts', { input: 'hello' })).rejects.toThrow('malformed WAV');
+      await expect(await runSpeech('gemini-3.8-flash-tts', { input: 'hello' })).rejects.toThrow('malformed WAV');
     });
 
     it('Gemini TTS: canonicalizes native voices and defaults unknown names', async () => {
-      addMedia('google', 'gemini-2.5-flash-preview-tts', 'audio');
-      addKey('google');
+      await addMedia('google', 'gemini-2.5-flash-preview-tts', 'audio');
+      await addKey('google');
       const pcm = Buffer.from([1, 2]);
       const fetchMock = vi.fn(async () => jsonResponse({
         candidates: [{ content: { parts: [{ inlineData: { mimeType: 'audio/L16;rate=24000', data: pcm.toString('base64') } }] } }],
@@ -689,10 +687,10 @@ describe('media service', () => {
     });
 
     it('uses provider-safe voices during failover without losing a native Gemini voice', async () => {
-      addMedia('cloudflare', '@cf/myshell-ai/melotts', 'audio', 1);
-      addKey('cloudflare', 'acct:tok');
-      addMedia('google', 'gemini-2.5-flash-preview-tts', 'audio', 2);
-      addKey('google');
+      await addMedia('cloudflare', '@cf/myshell-ai/melotts', 'audio', 1);
+      await addKey('cloudflare', 'acct:tok');
+      await addMedia('google', 'gemini-2.5-flash-preview-tts', 'audio', 2);
+      await addKey('google');
       const pcm = Buffer.from([1, 2]);
       const fetchMock = vi.fn(async (url: string | URL | Request) => {
         if (String(url).includes('cloudflare.com')) {
@@ -714,8 +712,8 @@ describe('media service', () => {
     });
 
     it('custom audio models call the bound OpenAI-compatible endpoint', async () => {
-      const keyId = addCustomKey('http://127.0.0.1:8383/v1', 'custom-audio-key');
-      addMedia('custom', 'local-tts', 'audio', 1, keyId);
+      const keyId = await addCustomKey('http://127.0.0.1:8383/v1', 'custom-audio-key');
+      await addMedia('custom', 'local-tts', 'audio', 1, keyId);
       const fetchMock = vi.fn(async () =>
         new Response(Buffer.from('MP3'), { status: 200, headers: { 'content-type': 'audio/mpeg' } })) as any;
       globalThis.fetch = fetchMock as any;
@@ -730,7 +728,7 @@ describe('media service', () => {
       expect(headers.Authorization).toBe('Bearer custom-audio-key');
       const body = JSON.parse(String(init.body));
       expect(body).toMatchObject({ model: 'local-tts', input: 'hi', voice: 'alloy', response_format: 'mp3' });
-      const log = getDb().prepare("SELECT key_id FROM requests WHERE request_type = 'audio' ORDER BY id DESC LIMIT 1").get() as { key_id: number };
+      const log = (await getDb().get("SELECT key_id FROM requests WHERE request_type = 'audio' ORDER BY id DESC LIMIT 1")) as { key_id: number };
       expect(log.key_id).toBe(keyId);
     });
   });

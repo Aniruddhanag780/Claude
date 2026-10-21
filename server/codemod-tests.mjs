@@ -34,6 +34,71 @@ const SHARED_ASYNC = new Set([
 
 const TESTS_ROOT = path.resolve('src/__tests__');
 
+// Cache: absolute source path -> Set of exported async function names.
+const asyncExportsCache = new Map();
+
+/** Resolve a relative import specifier (…/*.js) to the on-disk .ts source. */
+function resolveSource(importerFile, specifier) {
+  const base = path.resolve(path.dirname(importerFile), specifier);
+  const candidates = base.endsWith('.js')
+    ? [base.replace(/\.js$/, '.ts'), base.replace(/\.js$/, '.tsx')]
+    : [base + '.ts', base, path.join(base, 'index.ts')];
+  for (const c of candidates) {
+    try { if (fs.statSync(c).isFile()) return c; } catch { /* keep looking */ }
+  }
+  return null;
+}
+
+/** Names exported as `async` functions from a product source file. */
+function asyncExportsOf(srcPath) {
+  if (asyncExportsCache.has(srcPath)) return asyncExportsCache.get(srcPath);
+  const names = new Set();
+  try {
+    const text = fs.readFileSync(srcPath, 'utf8');
+    const sf = ts.createSourceFile(srcPath, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    for (const st of sf.statements) {
+      if (ts.isFunctionDeclaration(st) && st.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) && st.name) {
+        names.add(st.name.text);
+      } else if (ts.isVariableStatement(st)) {
+        for (const d of st.declarationList.declarations) {
+          const init = d.initializer;
+          const isAsyncFn = init && ((ts.isArrowFunction(init) || ts.isFunctionExpression(init)) &&
+            init.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword));
+          if (isAsyncFn && ts.isIdentifier(d.name)) names.add(d.name.text);
+        }
+      }
+    }
+  } catch { /* unresolvable — treat as no async exports */ }
+  asyncExportsCache.set(srcPath, names);
+  return names;
+}
+
+/**
+ * Local names imported from relative product modules that resolve to an async
+ * function. Awaiting a non-promise is a no-op, so a false positive is safe;
+ * false negatives just leave a file for the manual bucket.
+ */
+function asyncImportedNames(sf, file) {
+  const out = new Set();
+  for (const st of sf.statements) {
+    if (!ts.isImportDeclaration(st)) continue;
+    const spec = st.moduleSpecifier.getText(sf).replace(/^['"]|['"]$/g, '');
+    if (!spec.startsWith('.')) continue;           // only relative product imports
+    if (/__tests__|\/helpers\//.test(spec)) continue; // skip test helpers
+    const src = resolveSource(file, spec);
+    if (!src) continue;
+    const asyncNames = asyncExportsOf(src);
+    if (!asyncNames.size) continue;
+    const clause = st.importClause;
+    if (!clause?.namedBindings || !ts.isNamedImports(clause.namedBindings)) continue;
+    for (const el of clause.namedBindings.elements) {
+      const imported = (el.propertyName ?? el.name).text;
+      if (asyncNames.has(imported)) out.add(el.name.text); // local alias
+    }
+  }
+  return out;
+}
+
 function codemodFile(file) {
   const text = fs.readFileSync(file, 'utf8');
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -129,7 +194,7 @@ function codemodFile(file) {
       localAsyncedNames.add(fn.parent.name.text);
     }
   }
-  const asyncedNames = new Set([...SHARED_ASYNC, ...localAsyncedNames]);
+  const asyncedNames = new Set([...SHARED_ASYNC, ...localAsyncedNames, ...asyncImportedNames(sf, file)]);
 
   // ---- pass 2: stmt-var uses, helper calls, stray refs ---------------------
   const stmtUses = [];   // {decl, call, fn}
@@ -257,8 +322,18 @@ function codemodFile(file) {
   };
   const chainEdit = (call, receiverNode, sqlNode) => {
     const method = call.expression.name.text;
-    const target = ts.isAwaitExpression(call.parent) ? call.parent : call;
-    addEdit(...rangeOf(target), chainBuild(receiverNode, sqlNode, method, call.arguments));
+    // `await db.run(...).lastInsertRowid` binds await to db.run(...) only — the
+    // member access would read off the Promise. Parenthesize the awaited call.
+    const p = call.parent;
+    const memberAccessed =
+      (ts.isPropertyAccessExpression(p) && p.expression === call) ||
+      (ts.isElementAccessExpression(p) && p.expression === call) ||
+      (ts.isCallExpression(p) && p.expression === call);
+    const target = ts.isAwaitExpression(p) ? p : call;
+    addEdit(...rangeOf(target), (r) => {
+      const body = chainBuild(receiverNode, sqlNode, method, call.arguments)(r);
+      return memberAccessed ? `(${body})` : body;
+    });
   };
 
   for (const c of directCalls) { chainEdit(c.node, c.receiverNode, c.sqlNode); markAsync(c.fn); }
@@ -293,6 +368,56 @@ function codemodFile(file) {
       return needsParens ? `(await ${rendered})` : `await ${rendered}`;
     });
     markAsync(c.fn);
+  }
+
+  // await call sites of LOCAL functions this run made async that aren't already
+  // awaited via asyncedNames (e.g. header builders `auth()` that now return a
+  // Promise). Names already in asyncedNames were handled above — skip to avoid
+  // `await await x()`.
+  {
+    const enclosingFnOf = (node) => {
+      let n = node.parent;
+      while (n) {
+        if (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) ||
+            ts.isArrowFunction(n) || ts.isMethodDeclaration(n)) return n;
+        n = n.parent;
+      }
+      return null;
+    };
+    const asyncLocalNames = new Set();
+    for (const fn of asyncFns) {
+      let name = null;
+      if (ts.isFunctionDeclaration(fn) && fn.name) name = fn.name.text;
+      else if ((ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) &&
+               ts.isVariableDeclaration(fn.parent) && ts.isIdentifier(fn.parent.name)) {
+        name = fn.parent.name.text;
+      }
+      if (name && !asyncedNames.has(name)) asyncLocalNames.add(name);
+    }
+    if (asyncLocalNames.size) {
+      const localCalls = [];
+      const collect = (node) => {
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+            asyncLocalNames.has(node.expression.text) &&
+            !ts.isAwaitExpression(node.parent)) {
+          localCalls.push(node);
+        }
+        ts.forEachChild(node, collect);
+      };
+      collect(sf);
+      for (const call of localCalls) {
+        const fn = enclosingFnOf(call);
+        checkHazards(call, fn, `call to ${call.expression.text}()`);
+        const p = call.parent;
+        const needsParens = (ts.isPropertyAccessExpression(p) && p.expression === call) ||
+          (ts.isCallExpression(p) && p.expression === call);
+        addEdit(...rangeOf(call), (r) => {
+          const rendered = r(...rangeOf(call));
+          return needsParens ? `(await ${rendered})` : `await ${rendered}`;
+        });
+        markAsync(fn);
+      }
+    }
   }
 
   // 'async ' inserts

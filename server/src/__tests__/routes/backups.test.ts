@@ -4,9 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 import { createBackup, restoreBackup } from '../../services/backups.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 let dataDir = '';
@@ -28,13 +29,13 @@ async function request(app: Express, method: string, path: string, body?: unknow
   return { status: res.status, body: data };
 }
 
-function dumpPath(id: number): string {
-  const row = getDb().prepare('SELECT filepath FROM backups WHERE id = ?').get(id) as { filepath: string };
+async function dumpPath(id: number): string {
+  const row = (await getDb().get('SELECT filepath FROM backups WHERE id = ?', [id])) as { filepath: string };
   return row.filepath;
 }
 
-function modelCount(): number {
-  return (getDb().prepare('SELECT COUNT(*) AS n FROM models').get() as { n: number }).n;
+async function modelCount(): number {
+  return ((await getDb().get('SELECT COUNT(*) AS n FROM models')) as { n: number }).n;
 }
 
 /** Everything above the first blank line: format, schema, key fingerprint and
@@ -46,19 +47,19 @@ function headerOf(sql: string): string {
 describe('Backups API', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    // Backups anchor to the database's directory, so point the default DB path
-    // at a scratch directory rather than writing dumps into the repo.
+    // Backups anchor to getDataDir(), so point it at a scratch directory rather
+    // than writing dumps into the repo (src/data).
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'freeapi-backups-'));
-    process.env.FREEAPI_DB_PATH = path.join(dataDir, 'freeapi.db');
-    initDb(':memory:');
+    process.env.FREEAPI_DATA_DIR = dataDir;
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   afterAll(() => {
-    delete process.env.FREEAPI_DB_PATH;
+    delete process.env.FREEAPI_DATA_DIR;
     fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
@@ -90,21 +91,21 @@ describe('Backups API', () => {
     expect(after.body.items.some((item: { id: number }) => item.id === created.body.backup.id)).toBe(false);
   });
 
-  it('restores request history without charging the monthly ledger twice', () => {
+  it('restores request history without charging the monthly ledger twice', async () => {
     const db = getDb();
     const keyId = 851_901;
-    const insert = () => db.prepare(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms)
-      VALUES ('groq', 'backup-ledger-test', ?, 'success', 10, 5, 1)`).run(keyId);
-    const usage = () => db.prepare('SELECT requests, tokens FROM key_monthly_usage WHERE key_id = ?').get(keyId);
-    insert();
-    const full = createBackup(db);
-    restoreBackup(db, full.id);
-    expect(usage()).toEqual({ requests: 1, tokens: 15 });
-    const partial = createBackup(db, { tables: ['requests'] });
-    restoreBackup(db, partial.id);
-    expect(usage()).toEqual({ requests: 1, tokens: 15 });
-    insert();
-    expect(usage()).toEqual({ requests: 2, tokens: 30 });
+    const insert = async () => (await db.run(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms)
+      VALUES ('groq', 'backup-ledger-test', ?, 'success', 10, 5, 1) RETURNING id`, [keyId]));
+    const usage = async () => (await db.get('SELECT requests, tokens FROM key_monthly_usage WHERE key_id = ?', [keyId]));
+    await insert();
+    const full = await createBackup(db);
+    await restoreBackup(db, full.id);
+    expect(await usage()).toEqual({ requests: 1, tokens: 15 });
+    const partial = await createBackup(db, { tables: ['requests'] });
+    await restoreBackup(db, partial.id);
+    expect(await usage()).toEqual({ requests: 1, tokens: 15 });
+    await insert();
+    expect(await usage()).toEqual({ requests: 2, tokens: 30 });
   });
 
   it('round-trips the schedule setting', async () => {
@@ -129,16 +130,16 @@ describe('Backups API', () => {
     expect(created.body.backup.tables).toEqual(['models']);
   });
 
-  it('prefixes scheduled backups with auto-', () => {
-    const manual = createBackup(getDb(), { tables: [], source: 'manual', backupPath: '' });
+  it('prefixes scheduled backups with auto-', async () => {
+    const manual = await createBackup(getDb(), { tables: [], source: 'manual', backupPath: '' });
     expect(manual.filename).toMatch(/^backup-.*\.sql$/);
 
-    const scheduled = createBackup(getDb(), { tables: [], source: 'scheduled', backupPath: '' });
+    const scheduled = await createBackup(getDb(), { tables: [], source: 'scheduled', backupPath: '' });
     expect(scheduled.filename).toMatch(/^auto-backup-.*\.sql$/);
   });
 
   it('names and lists the desktop updater\'s backup as pre-update', async () => {
-    const backup = createBackup(getDb(), { tables: [], source: 'pre-update', backupPath: '' });
+    const backup = await createBackup(getDb(), { tables: [], source: 'pre-update', backupPath: '' });
     expect(backup.filename).toMatch(/^pre-update-.*\.sql$/);
     const listed = await request(app, 'GET', '/api/backups');
     const items = listed.body.items as Array<{ id: number; source: string }>;
@@ -152,11 +153,11 @@ describe('Backups API', () => {
     }
 
     // The dashboard session used by this test is a live row in both tables.
-    expect((getDb().prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number }).n).toBeGreaterThan(0);
-    expect((getDb().prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n).toBeGreaterThan(0);
+    expect(((await getDb().get('SELECT COUNT(*) AS n FROM users')) as { n: number }).n).toBeGreaterThan(0);
+    expect(((await getDb().get('SELECT COUNT(*) AS n FROM sessions')) as { n: number }).n).toBeGreaterThan(0);
 
     const created = await request(app, 'POST', '/api/backups', {});
-    const sql = fs.readFileSync(dumpPath(created.body.backup.id), 'utf8');
+    const sql = fs.readFileSync(await dumpPath(created.body.backup.id), 'utf8');
     expect(sql).not.toMatch(/INSERT INTO "users"/);
     expect(sql).not.toMatch(/INSERT INTO "sessions"/);
     expect(sql).not.toMatch(/INSERT INTO "url_tokens"/);
@@ -171,7 +172,7 @@ describe('Backups API', () => {
 
   it('records the schema version and encryption-key fingerprint in the dump header', async () => {
     const created = await request(app, 'POST', '/api/backups', {});
-    const sql = fs.readFileSync(dumpPath(created.body.backup.id), 'utf8');
+    const sql = fs.readFileSync(await dumpPath(created.body.backup.id), 'utf8');
     expect(sql).toMatch(/^-- format: 1$/m);
     expect(sql).toMatch(/^-- schema: \d+ migrations, latest \d{8}_\d{6}_[a-z0-9_]+\.ts$/m);
     expect(sql).toMatch(/^-- key-fingerprint: sha256:[0-9a-f]{16}$/m);
@@ -179,8 +180,8 @@ describe('Backups API', () => {
 
   it('rolls a failed restore back and leaves the data intact', async () => {
     const created = await request(app, 'POST', '/api/backups', {});
-    const file = dumpPath(created.body.backup.id);
-    const before = modelCount();
+    const file = await dumpPath(created.body.backup.id);
+    const before = await modelCount();
     expect(before).toBeGreaterThan(0);
 
     // A dump that empties models and then hits an unknown column. Without a
@@ -194,24 +195,24 @@ describe('Backups API', () => {
     const restored = await request(app, 'POST', `/api/backups/${created.body.backup.id}/restore`);
     expect(restored.status).toBe(400);
     expect(restored.body.error.message).toMatch(/rolled back/i);
-    expect(modelCount()).toBe(before);
+    expect(await modelCount()).toBe(before);
   });
 
   it('refuses a dump written under a different encryption key', async () => {
     const created = await request(app, 'POST', '/api/backups', {});
-    const file = dumpPath(created.body.backup.id);
+    const file = await dumpPath(created.body.backup.id);
     const sql = fs.readFileSync(file, 'utf8');
     fs.writeFileSync(file, sql.replace(/^-- key-fingerprint: .*$/m, '-- key-fingerprint: sha256:ffffffffffffffff'), 'utf8');
 
     const restored = await request(app, 'POST', `/api/backups/${created.body.backup.id}/restore`);
     expect(restored.status).toBe(409);
     expect(restored.body.error.message).toMatch(/ENCRYPTION_KEY/);
-    expect(modelCount()).toBeGreaterThan(0);
+    expect(await modelCount()).toBeGreaterThan(0);
   });
 
   it('refuses a dump taken at a different schema version', async () => {
     const created = await request(app, 'POST', '/api/backups', {});
-    const file = dumpPath(created.body.backup.id);
+    const file = await dumpPath(created.body.backup.id);
     const sql = fs.readFileSync(file, 'utf8');
     fs.writeFileSync(file, sql.replace(/^-- schema: .*$/m, '-- schema: 3 migrations, latest 20240101_000001_ancient.ts'), 'utf8');
 
@@ -222,13 +223,13 @@ describe('Backups API', () => {
 
   it('refuses a hand-edited dump that writes to the accounts table', async () => {
     const created = await request(app, 'POST', '/api/backups', {});
-    const file = dumpPath(created.body.backup.id);
+    const file = await dumpPath(created.body.backup.id);
     const sql = fs.readFileSync(file, 'utf8');
     fs.writeFileSync(file, `${sql}DELETE FROM "users";\n`, 'utf8');
 
     const restored = await request(app, 'POST', `/api/backups/${created.body.backup.id}/restore`);
     expect(restored.status).toBe(400);
-    expect((getDb().prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number }).n).toBeGreaterThan(0);
+    expect(((await getDb().get('SELECT COUNT(*) AS n FROM users')) as { n: number }).n).toBeGreaterThan(0);
   });
 
   it('rejects a backup path outside the database directory', async () => {

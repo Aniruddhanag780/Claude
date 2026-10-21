@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Request, Response } from 'express';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { clearAllCooldowns } from '../../services/ratelimit.js';
 import { clientContextMiddleware, getClientContext } from '../../lib/client-context.js';
@@ -19,15 +19,15 @@ import {
 } from '../../services/routing-decision.js';
 import { seedDecisionModels } from '../helpers/decision-models.js';
 import type { ChatMessage } from '@freellmapi/shared/types.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const realFetch = globalThis.fetch;
 
-function addKey(platform: string, raw = `${platform}-test-key`): void {
+async function addKey(platform: string, raw = `${platform}-test-key`): void {
   const { encrypted, iv, authTag } = encrypt(raw);
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'test', ?, ?, ?, 'healthy', 1)
-  `).run(platform, encrypted, iv, authTag);
+    VALUES (?, 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, encrypted, iv, authTag]));
 }
 
 function cloudflareAnswer(choice: string, probability: number) {
@@ -57,13 +57,13 @@ const user = (content: ChatMessage['content']): ChatMessage => ({ role: 'user', 
 const HARD = [user('Prove that the square root of 2 is irrational, then generalise it.')];
 
 describe('decision routing (#1354)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    seedDecisionModels();
-    clearAllCooldowns(Number.MAX_SAFE_INTEGER);
+    await initTestDb();
+    await seedDecisionModels();
+    await clearAllCooldowns(Number.MAX_SAFE_INTEGER);
     resetDecisionRoutingCache();
-    setRoutingStrategy('decision');
+    await setRoutingStrategy('decision');
   });
 
   afterEach(() => {
@@ -73,26 +73,26 @@ describe('decision routing (#1354)', () => {
   });
 
   it('does nothing (no decision call) unless the decision strategy is active', async () => {
-    setRoutingStrategy('balanced');
-    addKey('cloudflare', 'acct:token');
+    await setRoutingStrategy('balanced');
+    await addKey('cloudflare', 'acct:token');
     const fn = mockFetch(() => cloudflareAnswer('smartest', 0.9));
     expect(await applyDecisionRouting(HARD)).toBeNull();
     expect(fn).not.toHaveBeenCalled();
   });
 
   it('skips the decision when the request pins a model', async () => {
-    addKey('cloudflare', 'acct:token');
+    await addKey('cloudflare', 'acct:token');
     const fn = mockFetch(() => cloudflareAnswer('smartest', 0.9));
     expect(await applyDecisionRouting(HARD, { pinned: true })).toBeNull();
     expect(fn).not.toHaveBeenCalled();
   });
 
   it('routes THIS request with the preset the decision model picked', async () => {
-    addKey('cloudflare', 'acct:token');
+    await addKey('cloudflare', 'acct:token');
     const fn = mockFetch(() => cloudflareAnswer('smartest', 0.82));
     const seen = await inRequest(async () => {
       const pick = await applyDecisionRouting(HARD);
-      return { pick, strategy: effectiveRoutingStrategy(), ctx: getClientContext().routingStrategy };
+      return { pick, strategy: await effectiveRoutingStrategy(), ctx: getClientContext().routingStrategy };
     });
     expect(seen.pick).toEqual({ strategy: 'smartest', source: 'decision', probability: 0.82, model: '@cf/cloudflare/clef-flash' });
     expect(seen.strategy).toBe('smartest');
@@ -103,28 +103,28 @@ describe('decision routing (#1354)', () => {
     expect(Object.keys(body.questions.strategy.criteria).sort()).toEqual(['balanced', 'fastest', 'reliable', 'smartest']);
     expect(body.state).toContain('square root of 2');
     // Logged as the router's own decision, not as the chat client's.
-    const log = getDb().prepare('SELECT client_agent, status FROM decision_requests').all();
+    const log = (await getDb().all('SELECT client_agent, status FROM decision_requests'));
     expect(log).toEqual([{ client_agent: ROUTER_CLIENT, status: 'ok' }]);
   });
 
   it('does not leak a pick into another request', async () => {
-    addKey('cloudflare', 'acct:token');
+    await addKey('cloudflare', 'acct:token');
     mockFetch(() => cloudflareAnswer('fastest', 0.95));
     await inRequest(async () => { await applyDecisionRouting([user('hi')]); });
-    const other = await inRequest(async () => effectiveRoutingStrategy());
+    const other = await inRequest(async () => await effectiveRoutingStrategy());
     expect(other).toBe('balanced');
   });
 
   it('routes as Balanced when the decision model is unsure', async () => {
-    addKey('cloudflare', 'acct:token');
+    await addKey('cloudflare', 'acct:token');
     mockFetch(() => cloudflareAnswer('reliable', 0.31));
     const pick = await chooseRoutingPreset(HARD);
     expect(pick).toEqual({ strategy: 'balanced', source: 'low_confidence', probability: 0.31, model: '@cf/cloudflare/clef-flash' });
   });
 
   it('honours a custom minimum probability', async () => {
-    addKey('cloudflare', 'acct:token');
-    setDecisionRoutingSettings({ minProbability: 0.3 });
+    await addKey('cloudflare', 'acct:token');
+    await setDecisionRoutingSettings({ minProbability: 0.3 });
     mockFetch(() => cloudflareAnswer('reliable', 0.31));
     expect((await chooseRoutingPreset(HARD)).strategy).toBe('reliable');
   });
@@ -133,10 +133,10 @@ describe('decision routing (#1354)', () => {
     // A low-confidence pick cached as Balanced must not outlive a lowering of
     // the threshold: the point of lowering it is to let the model's own pick
     // through for texts already judged during the cache TTL.
-    addKey('cloudflare', 'acct:token');
+    await addKey('cloudflare', 'acct:token');
     const fn = mockFetch(() => cloudflareAnswer('reliable', 0.31));
     expect(await chooseRoutingPreset(HARD)).toMatchObject({ strategy: 'balanced', source: 'low_confidence' });
-    setDecisionRoutingSettings({ minProbability: 0.3 });
+    await setDecisionRoutingSettings({ minProbability: 0.3 });
     const after = await chooseRoutingPreset(HARD);
     expect(after).toMatchObject({ strategy: 'reliable', source: 'decision' });
     expect(fn).toHaveBeenCalledTimes(2);
@@ -146,7 +146,7 @@ describe('decision routing (#1354)', () => {
   });
 
   it('asks once per turn: the same text is answered from cache', async () => {
-    addKey('cloudflare', 'acct:token');
+    await addKey('cloudflare', 'acct:token');
     const fn = mockFetch(() => cloudflareAnswer('fastest', 0.9));
     expect((await chooseRoutingPreset([user('what is 2+2')])).source).toBe('decision');
     const again = await chooseRoutingPreset([user('what is 2+2'), { role: 'assistant', content: '', tool_calls: [] }, { role: 'tool', content: '4', tool_call_id: 'x' }]);
@@ -157,7 +157,7 @@ describe('decision routing (#1354)', () => {
   });
 
   it('routes as Balanced on a slow decision instead of holding the request', async () => {
-    addKey('cloudflare', 'acct:token');
+    await addKey('cloudflare', 'acct:token');
     mockFetch((_url, init) => new Promise<Response>((_resolve, reject) => {
       init.signal?.addEventListener('abort', () => reject(init.signal?.reason ?? new Error('aborted')));
     }));
@@ -174,7 +174,7 @@ describe('decision routing (#1354)', () => {
   });
 
   it('routes as Balanced when the decision call fails or answers off-list', async () => {
-    addKey('cloudflare', 'acct:token');
+    await addKey('cloudflare', 'acct:token');
     mockFetch(() => new Response('boom', { status: 500 }));
     expect(await chooseRoutingPreset(HARD)).toMatchObject({ strategy: 'balanced', source: 'error' });
     resetDecisionRoutingCache();
@@ -183,16 +183,16 @@ describe('decision routing (#1354)', () => {
   });
 
   it("leaves BeatAPI's 1-per-minute free routes out of 'auto'", async () => {
-    getDb().prepare(`INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label)
-                     VALUES ('beatapi', 'jev-1.14-free', 'JEV', 'decision', -1, 1, '')`).run();
-    addKey('beatapi', 'sk-beat');
+    (await getDb().run(`INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label)
+                     VALUES ('beatapi', 'jev-1.14-free', 'JEV', 'decision', -1, 1, '') RETURNING id`));
+    await addKey('beatapi', 'sk-beat');
     const fn = mockFetch(() => cloudflareAnswer('smartest', 0.9));
     expect(await chooseRoutingPreset(HARD)).toEqual({ strategy: 'balanced', source: 'unavailable' });
     expect(fn).not.toHaveBeenCalled();
   });
 
   it('records picks and fallbacks for the dashboard', async () => {
-    addKey('cloudflare', 'acct:token');
+    await addKey('cloudflare', 'acct:token');
     mockFetch(() => cloudflareAnswer('fastest', 0.9));
     await applyDecisionRouting([user('hi')]);
     await applyDecisionRouting([]);
@@ -202,12 +202,12 @@ describe('decision routing (#1354)', () => {
     expect(stats.recent.map(r => r.source)).toEqual(['unavailable', 'decision']);
   });
 
-  it('validates settings', () => {
-    expect(getDecisionRoutingSettings()).toEqual({ model: 'auto', minProbability: 0.5 });
-    expect(() => setDecisionRoutingSettings({ minProbability: 1.5 })).toThrow();
-    expect(() => setDecisionRoutingSettings({ model: '  ' })).toThrow();
-    setDecisionRoutingSettings({ model: 'inception/mercury-decide:free', minProbability: 0.7 });
-    expect(getDecisionRoutingSettings()).toEqual({ model: 'inception/mercury-decide:free', minProbability: 0.7 });
+  it('validates settings', async () => {
+    expect(await getDecisionRoutingSettings()).toEqual({ model: 'auto', minProbability: 0.5 });
+    expect(async () => await setDecisionRoutingSettings({ minProbability: 1.5 })).toThrow();
+    expect(async () => await setDecisionRoutingSettings({ model: '  ' })).toThrow();
+    await setDecisionRoutingSettings({ model: 'inception/mercury-decide:free', minProbability: 0.7 });
+    expect(await getDecisionRoutingSettings()).toEqual({ model: 'inception/mercury-decide:free', minProbability: 0.7 });
   });
 
   it('labels fallbacks in the response header', () => {
@@ -235,27 +235,27 @@ describe('decisionStateFor', () => {
 });
 
 describe('effectiveRoutingStrategy', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   it('is the set strategy for every non-decision strategy', async () => {
-    setRoutingStrategy('fastest');
-    expect(await inRequest(async () => effectiveRoutingStrategy())).toBe('fastest');
+    await setRoutingStrategy('fastest');
+    expect(await inRequest(async () => await effectiveRoutingStrategy())).toBe('fastest');
   });
 
   it('is Balanced under decision until a preset is picked', async () => {
-    setRoutingStrategy('decision');
-    expect(effectiveRoutingStrategy()).toBe('balanced');
-    expect(await inRequest(async () => effectiveRoutingStrategy())).toBe('balanced');
+    await setRoutingStrategy('decision');
+    expect(await effectiveRoutingStrategy()).toBe('balanced');
+    expect(await inRequest(async () => await effectiveRoutingStrategy())).toBe('balanced');
   });
 });
 
 describe('decision routing status (setup guide)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     resetDecisionRoutingCache();
   });
 
@@ -266,19 +266,19 @@ describe('decision routing status (setup guide)', () => {
 
   it('names the providers whose key would make it ready, until one exists', async () => {
     const { getDecisionRoutingStatus } = await import('../../services/routing-decision.js');
-    seedDecisionModels();
+    await seedDecisionModels();
     expect(getDecisionRoutingStatus()).toMatchObject({ ready: false, hasModels: true, keyPlatforms: ['cloudflare', 'openrouter'] });
-    addKey('openrouter', 'sk-or');
+    await addKey('openrouter', 'sk-or');
     expect(getDecisionRoutingStatus()).toMatchObject({ ready: true, keyPlatforms: ['cloudflare', 'openrouter'] });
   });
 
   it("does not count a BeatAPI key as ready under 'auto', but does when BeatAPI is pinned", async () => {
     const { getDecisionRoutingStatus } = await import('../../services/routing-decision.js');
-    getDb().prepare(`INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label)
-                     VALUES ('beatapi', 'jev-1.14-free', 'JEV', 'decision', 0, 1, '')`).run();
-    addKey('beatapi', 'sk-beat');
+    (await getDb().run(`INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label)
+                     VALUES ('beatapi', 'jev-1.14-free', 'JEV', 'decision', 0, 1, '') RETURNING id`));
+    await addKey('beatapi', 'sk-beat');
     expect(getDecisionRoutingStatus()).toMatchObject({ ready: false, hasModels: false, keyPlatforms: [] });
-    setDecisionRoutingSettings({ model: 'jev-1.14-free' });
+    await setDecisionRoutingSettings({ model: 'jev-1.14-free' });
     expect(getDecisionRoutingStatus()).toMatchObject({ ready: true, hasModels: true, keyPlatforms: ['beatapi'] });
   });
 });

@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 import { setCooldown, isOnCooldown } from '../../services/ratelimit.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -35,17 +36,17 @@ async function createKey(app: Express, platform: string, key: string) {
 describe('Key cooldown visibility and clearing', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
   });
 
   it('reports an empty cooldown list for a key that is not benched', async () => {
@@ -78,7 +79,7 @@ describe('Key cooldown visibility and clearing', () => {
     expect(status).toBe(200);
     expect(body.cleared).toBe(2);
 
-    expect(isOnCooldown('groq', 'llama-3.3-70b', id)).toBe(false);
+    expect(await isOnCooldown('groq', 'llama-3.3-70b', id)).toBe(false);
     const after = await request(app, 'GET', '/api/keys');
     expect(after.body.find((k: any) => k.id === id).cooldowns).toEqual([]);
   });
@@ -91,8 +92,8 @@ describe('Key cooldown visibility and clearing', () => {
 
     await request(app, 'DELETE', `/api/keys/${a}/cooldowns`);
 
-    expect(isOnCooldown('groq', 'llama-3.3-70b', a)).toBe(false);
-    expect(isOnCooldown('cerebras', 'qwen-3-coder', b)).toBe(true);
+    expect(await isOnCooldown('groq', 'llama-3.3-70b', a)).toBe(false);
+    expect(await isOnCooldown('cerebras', 'qwen-3-coder', b)).toBe(true);
   });
 
   it('returns 404 for an unknown key and 400 for a non-numeric id', async () => {

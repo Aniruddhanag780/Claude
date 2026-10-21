@@ -3,9 +3,10 @@ import express from 'express';
 import type { Express } from 'express';
 import http from 'node:http';
 import { createApp } from '../../app.js';
-import { initDb, getSetting, setSetting } from '../../db/index.js';
+import { getSetting, setSetting } from '../../db/index.js';
 import { createUpdateRouter, UPDATE_CHECK_SETTING } from '../../routes/update.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const NOW = Date.parse('2026-08-09T14:00:00.000Z');
 const RELEASE_URL = 'https://api.github.com/repos/tashfeenahmed/freellmapi/releases/latest';
@@ -72,14 +73,14 @@ function createTestApp(overrides: Parameters<typeof createUpdateRouter>[0] = {})
 // made by the server (the CSP blocks the browser from making it), and it is
 // only made once an operator has opted in.
 describe('GET /api/update/release', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   it('is off until an operator opts in, and makes no outbound request', async () => {
     // No autoCheckEnabled override: this is the real settings-table default.
-    expect(getSetting(UPDATE_CHECK_SETTING)).toBeUndefined();
+    expect(await getSetting(UPDATE_CHECK_SETTING)).toBeUndefined();
     const fetchMock = vi.fn();
     const { app, logger } = createTestApp({ fetch: fetchMock });
 
@@ -182,15 +183,15 @@ describe('/api/settings/update-check', () => {
   let app: Express;
   let token: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    token = mintDashboardToken();
+    token = await mintDashboardToken();
   });
 
-  afterEach(() => {
-    setSetting(UPDATE_CHECK_SETTING, '0');
+  afterEach(async () => {
+    await setSetting(UPDATE_CHECK_SETTING, '0');
   });
 
   async function request(method: string, body?: unknown) {
@@ -217,7 +218,7 @@ describe('/api/settings/update-check', () => {
     const put = await request('PUT', { enabled: true });
     expect(put.status).toBe(200);
     expect(put.body).toEqual({ enabled: true });
-    expect(getSetting(UPDATE_CHECK_SETTING)).toBe('1');
+    expect(await getSetting(UPDATE_CHECK_SETTING)).toBe('1');
 
     const get = await request('GET');
     expect(get.body).toEqual({ enabled: true });
@@ -226,6 +227,6 @@ describe('/api/settings/update-check', () => {
   it('rejects a body that is not a boolean flag', async () => {
     const result = await request('PUT', { enabled: 'yes' });
     expect(result.status).toBe(400);
-    expect(getSetting(UPDATE_CHECK_SETTING)).not.toBe('1');
+    expect(await getSetting(UPDATE_CHECK_SETTING)).not.toBe('1');
   });
 });

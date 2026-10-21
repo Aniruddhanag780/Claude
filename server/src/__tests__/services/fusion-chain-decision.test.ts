@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Request, Response } from 'express';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { clearAllCooldowns } from '../../services/ratelimit.js';
 import { clientContextMiddleware, setRequestRoutingStrategy } from '../../lib/client-context.js';
 import { getOrderedFusionChain, refreshStatsCache, setRoutingStrategy } from '../../services/router.js';
 import { seedDecisionModels } from '../helpers/decision-models.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #1354 follow-up: with the 'decision' strategy active, the fusion panel's
 // auto-pick (getOrderedFusionChain) must follow the preset the decision model
@@ -14,34 +15,30 @@ import { seedDecisionModels } from '../helpers/decision-models.js';
 // decision-strategy request as plain Balanced, so a 'smartest' request got its
 // chat answer from the big model and its panel slots from the Balanced order.
 
-function addKey(platform: string, raw = `${platform}-test-key`): void {
+async function addKey(platform: string, raw = `${platform}-test-key`): void {
   const { encrypted, iv, authTag } = encrypt(raw);
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'fusion-decision', ?, ?, ?, 'healthy', 1)
-  `).run(platform, encrypted, iv, authTag);
+    VALUES (?, 'fusion-decision', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, encrypted, iv, authTag]));
 }
 
-function addModel(modelId: string, sizeLabel: string, speedRank: number): void {
+async function addModel(modelId: string, sizeLabel: string, speedRank: number): void {
   const db = getDb();
-  const id = Number(db.prepare(`
+  const id = Number((await db.run(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
                         monthly_token_budget, context_window, enabled, supports_vision, supports_tools)
-    VALUES ('groq', ?, ?, 1, ?, ?, '~1M', 128000, 1, 0, 1)
-  `).run(modelId, modelId, speedRank, sizeLabel).lastInsertRowid);
-  db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, id);
-  const profile = db.prepare("SELECT value FROM settings WHERE key = 'active_profile_id'").get() as { value: string } | undefined;
+    VALUES ('groq', ?, ?, 1, ?, ?, '~1M', 128000, 1, 0, 1) RETURNING id`, [modelId, modelId, speedRank, sizeLabel])).lastInsertRowid);
+  (await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1) RETURNING id', [id, id]));
+  const profile = (await db.get("SELECT value FROM settings WHERE key = 'active_profile_id'")) as { value: string } | undefined;
   if (profile) {
-    db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1)').run(Number(profile.value), id, id);
+    (await db.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1) RETURNING id', [Number(profile.value), id, id]));
   }
 }
 
-function seedHistory(modelId: string, latencyMs: number, ttfbMs: number): void {
-  const insert = getDb().prepare(`
+async function seedHistory(modelId: string, latencyMs: number, ttfbMs: number): void {
+  for (let i = 0; i < 20; i++) (await getDb().run(`
     INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, ttfb_ms)
-    VALUES ('groq', ?, 'success', 50, 300, ?, ?)
-  `);
-  for (let i = 0; i < 20; i++) insert.run(modelId, latencyMs, ttfbMs);
+    VALUES ('groq', ?, 'success', 50, 300, ?, ?) RETURNING id`, [modelId, latencyMs, ttfbMs]));
 }
 
 /** Run `fn` inside a request scope, optionally pre-tagged with a decision pick. */
@@ -56,27 +53,27 @@ function inRequest<T>(strategy: 'smartest' | 'fastest' | undefined, fn: () => T)
 }
 
 describe('fusion panel chain under decision routing (#1354)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    getDb().prepare('UPDATE models SET enabled = 0').run();
-    addModel('big-slow', 'Frontier', 11);
-    addModel('small-fast', 'Small', 1);
-    seedHistory('big-slow', 15_000, 4_000);
-    seedHistory('small-fast', 400, 100);
-    refreshStatsCache(getDb(), true);
-    seedDecisionModels();
-    addKey('groq', 'gsk-fusion-decision');
-    clearAllCooldowns(Number.MAX_SAFE_INTEGER);
-    setRoutingStrategy('decision');
+    await initTestDb();
+    (await getDb().run('UPDATE models SET enabled = 0'));
+    await addModel('big-slow', 'Frontier', 11);
+    await addModel('small-fast', 'Small', 1);
+    await seedHistory('big-slow', 15_000, 4_000);
+    await seedHistory('small-fast', 400, 100);
+    await refreshStatsCache(getDb(), true);
+    await seedDecisionModels();
+    await addKey('groq', 'gsk-fusion-decision');
+    await clearAllCooldowns(Number.MAX_SAFE_INTEGER);
+    await setRoutingStrategy('decision');
   });
 
-  afterEach(() => {
-    setRoutingStrategy('balanced');
+  afterEach(async () => {
+    await setRoutingStrategy('balanced');
   });
 
   const firstModelId = (strategy: 'smartest' | 'fastest' | undefined) => {
-    const chain = inRequest(strategy, () => getOrderedFusionChain(1000));
+    const chain = inRequest(strategy, async () => await getOrderedFusionChain(1000));
     return chain[0]?.modelId;
   };
 
@@ -88,11 +85,11 @@ describe('fusion panel chain under decision routing (#1354)', () => {
     expect(firstModelId('fastest')).toBe('small-fast');
   });
 
-  it('outside any request scope, decision scores as Balanced (the documented fallback)', () => {
+  it('outside any request scope, decision scores as Balanced (the documented fallback)', async () => {
     // With these ranks the Balanced preset scores the frontier model first —
     // the point is that the call is accepted and deterministic outside a
     // request scope, exactly like the weightsWithPeak('balanced') fallthrough.
-    const chain = getOrderedFusionChain(1000);
+    const chain = await getOrderedFusionChain(1000);
     expect(chain[0]?.modelId).toBe('big-slow');
   });
 });

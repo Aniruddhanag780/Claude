@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -40,8 +41,8 @@ async function request(
   return { status: res.status, body: json, raw };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 /** Build an SSE Response whose frames deliberately contain NO usage block. */
@@ -140,17 +141,17 @@ function usageFrames(raw: string) {
 describe('Streaming usage-frame fallback injection', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
 
     const addKey = await request(app, 'POST', '/api/keys', {
       platform: 'groq',
@@ -178,7 +179,7 @@ describe('Streaming usage-frame fallback injection', () => {
       messages: [{ role: 'user', content: 'hi' }],
       stream: true,
       stream_options: { include_usage: true },
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     const frames = usageFrames(raw);
@@ -208,7 +209,7 @@ describe('Streaming usage-frame fallback injection', () => {
     const { status, raw } = await request(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hi' }],
       stream: true,
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     // #1084: agents read `usage` for context-window display even when they
@@ -248,7 +249,7 @@ describe('Streaming usage-frame fallback injection', () => {
 
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(body.usage).toBeDefined();
@@ -274,7 +275,7 @@ describe('Streaming usage-frame fallback injection', () => {
       messages: [{ role: 'user', content: 'hi' }],
       stream: true,
       stream_options: { include_usage: true },
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     const frames = usageFrames(raw);
@@ -302,7 +303,7 @@ describe('Streaming usage-frame fallback injection', () => {
       messages: [{ role: 'user', content: 'hi' }],
       stream: true,
       stream_options: { include_usage: true },
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     // The upstream's real mid-stream frame must be the ONLY usage frame —
@@ -341,7 +342,7 @@ describe('Streaming usage-frame fallback injection', () => {
       messages: [{ role: 'user', content: 'hi' }],
       stream: true,
       stream_options: { include_usage: true },
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     // Real usage must be preserved and the estimate must NOT fire.

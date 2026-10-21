@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { routeRequest, setRoutingStrategy } from '../../services/router.js';
 import { encrypt } from '../../lib/crypto.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function post(app: Express, path: string, body: any, key: string) {
   const server = app.listen(0, '127.0.0.1');
@@ -59,66 +60,65 @@ describe('Tools-aware routing', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
-  it('flags tool-capable families and leaves the known-bad ones unflagged', () => {
+  it('flags tool-capable families and leaves the known-bad ones unflagged', async () => {
     const db = getDb();
-    const flag = (modelId: string) =>
-      (db.prepare('SELECT supports_tools FROM models WHERE model_id = ?').get(modelId) as { supports_tools: number } | undefined)?.supports_tools;
+    const flag = async (modelId: string) =>
+      ((await db.get('SELECT supports_tools FROM models WHERE model_id = ?', [modelId])) as { supports_tools: number } | undefined)?.supports_tools;
 
     // Verified tool-callers from the live benchmark stay eligible.
-    expect(flag('openai/gpt-oss-120b')).toBe(1);
-    expect(flag('gemini-2.5-flash')).toBe(1);
-    expect(flag('llama-3.3-70b-versatile')).toBe(1);
+    expect(await flag('openai/gpt-oss-120b')).toBe(1);
+    expect(await flag('gemini-2.5-flash')).toBe(1);
+    expect(await flag('llama-3.3-70b-versatile')).toBe(1);
 
     // hermes-3 emits tool calls as text — must NOT ride the llama-3 rule.
-    const hermes = db.prepare("SELECT supports_tools FROM models WHERE model_id LIKE '%hermes-3%'").all() as { supports_tools: number }[];
+    const hermes = (await db.all("SELECT supports_tools FROM models WHERE model_id LIKE '%hermes-3%'")) as { supports_tools: number }[];
     for (const h of hermes) expect(h.supports_tools).toBe(0);
 
     // gemma must NOT ride the gemini rule.
-    const gemma = db.prepare("SELECT supports_tools FROM models WHERE LOWER(model_id) LIKE '%gemma%'").all() as { supports_tools: number }[];
+    const gemma = (await db.all("SELECT supports_tools FROM models WHERE LOWER(model_id) LIKE '%gemma%'")) as { supports_tools: number }[];
     for (const g of gemma) expect(g.supports_tools).toBe(0);
 
     // Sanity: the flag splits the catalog (some 1s, some 0s).
-    const on = (db.prepare('SELECT COUNT(*) c FROM models WHERE supports_tools = 1').get() as { c: number }).c;
-    const off = (db.prepare('SELECT COUNT(*) c FROM models WHERE supports_tools = 0').get() as { c: number }).c;
+    const on = ((await db.get('SELECT COUNT(*) c FROM models WHERE supports_tools = 1')) as { c: number }).c;
+    const off = ((await db.get('SELECT COUNT(*) c FROM models WHERE supports_tools = 0')) as { c: number }).c;
     expect(on).toBeGreaterThanOrEqual(5);
     expect(off).toBeGreaterThan(0);
   });
 
-  it('routeRequest skips non-tool models when requireTools is set', () => {
+  it('routeRequest skips non-tool models when requireTools is set', async () => {
     const db = getDb();
-    setRoutingStrategy('priority');
-    db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+    await setRoutingStrategy('priority');
+    (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
 
     // One key for google, whose catalog holds both a non-tool model (gemma)
     // and tool-capable ones (gemini). Put gemma at the top of the chain.
     const { encrypted, iv, authTag } = encrypt('test-google-key');
-    db.prepare(`
+    (await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('google', 'test', ?, ?, ?, 'healthy', 1)
-    `).run(encrypted, iv, authTag);
+      VALUES ('google', 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [encrypted, iv, authTag]));
 
-    const gemma = db.prepare("SELECT id FROM models WHERE platform = 'google' AND LOWER(model_id) LIKE '%gemma%' AND enabled = 1").get() as { id: number } | undefined;
+    const gemma = (await db.get("SELECT id FROM models WHERE platform = 'google' AND LOWER(model_id) LIKE '%gemma%' AND enabled = 1")) as { id: number } | undefined;
     expect(gemma).toBeDefined();
-    db.prepare('UPDATE fallback_config SET priority = 0, enabled = 1 WHERE model_db_id = ?').run(gemma!.id);
+    (await db.run('UPDATE fallback_config SET priority = 0, enabled = 1 WHERE model_db_id = ?', [gemma!.id]));
 
     // Plain request takes the chain head: gemma.
-    const plain = routeRequest(1000);
+    const plain = await routeRequest(1000);
     expect(plain.modelId.toLowerCase()).toContain('gemma');
 
     // Tool-bearing request must skip past gemma to a tool-capable model.
-    const tooled = routeRequest(1000, undefined, undefined, false, true);
+    const tooled = await routeRequest(1000, undefined, undefined, false, true);
     expect(tooled.modelId.toLowerCase()).not.toContain('gemma');
-    const flag = db.prepare('SELECT supports_tools FROM models WHERE id = ?').get(tooled.modelDbId) as { supports_tools: number };
+    const flag = (await db.get('SELECT supports_tools FROM models WHERE id = ?', [tooled.modelDbId])) as { supports_tools: number };
     expect(flag.supports_tools).toBe(1);
 
-    db.prepare('DELETE FROM api_keys').run();
+    (await db.run('DELETE FROM api_keys'));
   });
 
   it('lets a tool request through routing when a tool-capable model is enabled (no 422)', async () => {
@@ -130,43 +130,43 @@ describe('Tools-aware routing', () => {
   });
 
   it('rejects a tool request with a clear 422 when no tool-capable model is enabled', async () => {
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_tools = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 0 WHERE supports_tools = 1'));
 
     const { status, body } = await post(app, '/v1/chat/completions', TOOLS_CHAT, key);
     expect(status).toBe(422);
     expect(body.error.code).toBe('no_tools_model');
     expect(body.error.type).toBe('invalid_request_error');
 
-    getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_tools = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 1 WHERE supports_tools = 1'));
   });
 
   it('applies the same gate on /v1/responses (Codex path)', async () => {
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_tools = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 0 WHERE supports_tools = 1'));
 
     const { status, body } = await post(app, '/v1/responses', TOOLS_RESPONSES, key);
     expect(status).toBe(422);
     expect(body.error.code).toBe('no_tools_model');
 
-    getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_tools = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 1 WHERE supports_tools = 1'));
   });
 
   it('applies the /v1/responses tools gate before dropping built-in tool descriptors', async () => {
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_tools = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 0 WHERE supports_tools = 1'));
 
     const { status, body } = await post(app, '/v1/responses', BUILTIN_TOOL_RESPONSES, key);
     expect(status).toBe(422);
     expect(body.error.code).toBe('no_tools_model');
 
-    getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_tools = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 1 WHERE supports_tools = 1'));
   });
 
   it('does not apply the tools gate to a plain chat request', async () => {
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_tools = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 0 WHERE supports_tools = 1'));
     const { status, body } = await post(app, '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
     }, key);
     expect(status).not.toBe(422);
     expect(body?.error?.code).not.toBe('no_tools_model');
-    getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_tools = 1').run();
+    (await getDb().run('UPDATE models SET enabled = 1 WHERE supports_tools = 1'));
   });
 });

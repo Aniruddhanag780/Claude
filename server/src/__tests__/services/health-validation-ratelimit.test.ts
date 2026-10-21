@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+import { initTestDb } from '../helpers/test-db.js';
 
 const validateKey = vi.hoisted(() => vi.fn());
 
@@ -9,7 +10,7 @@ vi.mock('../../providers/index.js', () => ({
   }),
 }));
 
-const { initDb, getDb } = await import('../../db/index.js');
+const { getDb } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const {
   checkAllKeys,
@@ -27,13 +28,13 @@ const {
 
 let nextId = 30000;
 
-function seedKey(platform: string): number {
+async function seedKey(platform: string): number {
   const id = ++nextId;
   const enc = encrypt(`ratelimit-${id}`);
-  getDb().prepare(`
+  await getDb().run(`
     INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, enabled, status, last_checked_at)
     VALUES (?, ?, ?, ?, ?, ?, 1, 'healthy', null)
-  `).run(id, platform, `ratelimit-${id}`, enc.encrypted, enc.iv, enc.authTag);
+  `, [id, platform, `ratelimit-${id}`, enc.encrypted, enc.iv, enc.authTag]);
   return id;
 }
 
@@ -45,13 +46,13 @@ function fakeClock() {
   };
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
-beforeEach(() => {
-  getDb().prepare('DELETE FROM api_keys').run();
+beforeEach(async () => {
+  await getDb().run('DELETE FROM api_keys');
   clearValidationRateLimitState();
   validateKey.mockReset();
   vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -61,8 +62,8 @@ beforeEach(() => {
 
 describe('validation rate-limit backoff (#1369)', () => {
   it('skips a key rate-limited within the window, checks the rest', async () => {
-    const limited = seedKey('llmtr');
-    const other = seedKey('groq');
+    const limited = await seedKey('llmtr');
+    const other = await seedKey('groq');
     const clock = fakeClock();
     recordValidationRateLimited(limited, clock.now());
 
@@ -79,7 +80,7 @@ describe('validation rate-limit backoff (#1369)', () => {
   });
 
   it('re-asks after the window passes, and always on a forced pass', async () => {
-    const limited = seedKey('llmtr');
+    const limited = await seedKey('llmtr');
     const clock = fakeClock();
     recordValidationRateLimited(limited, clock.now());
 
@@ -104,14 +105,14 @@ describe('validation rate-limit backoff (#1369)', () => {
   });
 
   it('remembers a 429 from validation and skips the key on the next pass', async () => {
-    const id = seedKey('llmtr');
+    const id = await seedKey('llmtr');
     const err = Object.assign(new Error('Too Many Requests'), { status: 429 });
     validateKey.mockRejectedValue(err);
 
     await checkKeyHealth(id);
     // checkKeyHealth stamps last_checked_at: backdate it so the recency skip
     // cannot mask the 429 skip under test.
-    getDb().prepare("UPDATE api_keys SET last_checked_at = '2000-01-01' WHERE id = ?").run(id);
+    await getDb().run("UPDATE api_keys SET last_checked_at = '2000-01-01' WHERE id = ?", [id]);
 
     // Real clocks on both sides: the 429 mark is recorded with Date.now, so
     // the pass must read it with the same domain. (A fake clock here would
@@ -126,11 +127,11 @@ describe('validation rate-limit backoff (#1369)', () => {
   });
 
   it('does not back off on non-429 transport errors', async () => {
-    const id = seedKey('llmtr');
+    const id = await seedKey('llmtr');
     validateKey.mockRejectedValue(new Error('Bearer [REDACTED] failed'));
 
     await checkKeyHealth(id);
-    getDb().prepare("UPDATE api_keys SET last_checked_at = '2000-01-01' WHERE id = ?").run(id);
+    await getDb().run("UPDATE api_keys SET last_checked_at = '2000-01-01' WHERE id = ?", [id]);
 
     const checked: number[] = [];
     await checkAllKeys({

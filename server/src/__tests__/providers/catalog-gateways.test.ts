@@ -7,7 +7,8 @@ import { AUTH_JSON_PROVIDER_MAP, parseKeysFromFile } from '../../lib/key-parser.
 import { inferPoolForPlatform } from '../../services/provider-quota.js';
 import { applyCatalog } from '../../services/catalog-sync.js';
 import { isBuiltinDiscoveryEligible } from '../../services/builtin-model-discovery.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const json = (body: unknown, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers });
 const configs = [
@@ -25,7 +26,7 @@ const stream = (model?: string) => new Response([
 ].map(c => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n');
 
 describe.each(configs)('$platform catalog-only adapter', config => {
-  beforeEach(() => { process.env.ENCRYPTION_KEY = '0'.repeat(64); initDb(':memory:'); });
+  beforeEach(async () => { process.env.ENCRYPTION_KEY = '0'.repeat(64); await initTestDb(); });
   afterEach(() => { vi.restoreAllMocks(); getDb().close(); });
 
   it('registers keys, explicit import aliases and one shared quota pool', () => {
@@ -96,18 +97,18 @@ describe.each(configs)('$platform catalog-only adapter', config => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it('does not seed or discover models; only ingests tier-selected catalog rows', () => {
+  it('does not seed or discover models; only ingests tier-selected catalog rows', async () => {
     const db = getDb();
-    expect(db.prepare('SELECT COUNT(*) AS n FROM models WHERE platform=?').get(config.platform)).toEqual({ n: 0 });
-    expect(isBuiltinDiscoveryEligible(db, config.platform)).toBe(false);
-    const result = applyCatalog(db, { version: '2099.01.01', generatedAt: new Date().toISOString(), tier: 'live', quirks: [], models: [{ platform: config.platform, modelId: config.model, displayName: 'Test model', intelligenceRank: 50, speedRank: 50, sizeLabel: '', limits: { rpm: null, rpd: null, tpm: null, tpd: null }, monthlyTokenBudget: 'Shared free allowance', contextWindow: 8192, enabled: true, supportsTools: false, supportsVision: false }] });
+    expect((await db.get('SELECT COUNT(*) AS n FROM models WHERE platform=?', [config.platform]))).toEqual({ n: 0 });
+    expect(await isBuiltinDiscoveryEligible(db, config.platform)).toBe(false);
+    const result = await applyCatalog(db, { version: '2099.01.01', generatedAt: new Date().toISOString(), tier: 'live', quirks: [], models: [{ platform: config.platform, modelId: config.model, displayName: 'Test model', intelligenceRank: 50, speedRank: 50, sizeLabel: '', limits: { rpm: null, rpd: null, tpm: null, tpd: null }, monthlyTokenBudget: 'Shared free allowance', contextWindow: 8192, enabled: true, supportsTools: false, supportsVision: false }] });
     expect(result.skippedUnknownPlatform).toBe(0);
-    expect(db.prepare('SELECT model_id FROM models WHERE platform=?').all(config.platform)).toEqual([{ model_id: config.model }]);
+    expect((await db.all('SELECT model_id FROM models WHERE platform=?', [config.platform]))).toEqual([{ model_id: config.model }]);
   });
 });
 
 describe('Inferbase wire-format guards and documented free output ceiling', () => {
-  beforeEach(() => { process.env.ENCRYPTION_KEY = '0'.repeat(64); initDb(':memory:'); });
+  beforeEach(async () => { process.env.ENCRYPTION_KEY = '0'.repeat(64); await initTestDb(); });
   afterEach(() => { vi.restoreAllMocks(); getDb().close(); });
   it('filters provider routing/usage receipts while retaining standard completion and usage chunks', async () => {
     const model = 'deepseek-v4-flash';

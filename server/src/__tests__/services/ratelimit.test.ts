@@ -1,6 +1,6 @@
 import fs from 'fs';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import {
   canMakeRequest,
   canUseTokens,
@@ -18,6 +18,7 @@ import {
   getProviderDailyTokenCap,
 } from '../../services/ratelimit.js';
 import { parseRetryAfterMs } from '../../providers/base.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 function removeDbFile(dbPath: string) {
   for (const suffix of ['', '-shm', '-wal']) {
@@ -38,61 +39,61 @@ describe('Rate Limiter', () => {
   });
 
   describe('canMakeRequest', () => {
-    it('should allow request when under RPM limit', () => {
-      expect(canMakeRequest('groq', 'llama-70b', testId, {
+    it('should allow request when under RPM limit', async () => {
+      expect(await canMakeRequest('groq', 'llama-70b', testId, {
         rpm: 30, rpd: null, tpm: null, tpd: null,
       })).toBe(true);
     });
 
-    it('should deny request when RPM limit reached', () => {
+    it('should deny request when RPM limit reached', async () => {
       const limits = { rpm: 2, rpd: null, tpm: null, tpd: null };
-      recordRequest('groq', 'llama-70b', testId);
-      recordRequest('groq', 'llama-70b', testId);
-      expect(canMakeRequest('groq', 'llama-70b', testId, limits)).toBe(false);
+      await recordRequest('groq', 'llama-70b', testId);
+      await recordRequest('groq', 'llama-70b', testId);
+      expect(await canMakeRequest('groq', 'llama-70b', testId, limits)).toBe(false);
     });
 
-    it('should deny request when RPD limit reached', () => {
+    it('should deny request when RPD limit reached', async () => {
       const limits = { rpm: null, rpd: 1, tpm: null, tpd: null };
-      recordRequest('google', 'gemini', testId);
-      expect(canMakeRequest('google', 'gemini', testId, limits)).toBe(false);
+      await recordRequest('google', 'gemini', testId);
+      expect(await canMakeRequest('google', 'gemini', testId, limits)).toBe(false);
     });
 
-    it('should allow request when limits are null (unlimited)', () => {
-      expect(canMakeRequest('nvidia', 'nemotron', testId, {
+    it('should allow request when limits are null (unlimited)', async () => {
+      expect(await canMakeRequest('nvidia', 'nemotron', testId, {
         rpm: null, rpd: null, tpm: null, tpd: null,
       })).toBe(true);
     });
   });
 
   describe('canUseTokens', () => {
-    it('should allow tokens when under TPM limit', () => {
-      expect(canUseTokens('groq', 'llama-70b', testId, 500, {
+    it('should allow tokens when under TPM limit', async () => {
+      expect(await canUseTokens('groq', 'llama-70b', testId, 500, {
         tpm: 6000, tpd: null,
       })).toBe(true);
     });
 
-    it('should deny tokens when TPM limit would be exceeded', () => {
-      recordTokens('cerebras', 'qwen3', testId, 50000);
-      expect(canUseTokens('cerebras', 'qwen3', testId, 20000, {
+    it('should deny tokens when TPM limit would be exceeded', async () => {
+      await recordTokens('cerebras', 'qwen3', testId, 50000);
+      expect(await canUseTokens('cerebras', 'qwen3', testId, 20000, {
         tpm: 60000, tpd: null,
       })).toBe(false);
     });
 
-    it('should allow when limit is null', () => {
-      expect(canUseTokens('nvidia', 'nemotron', testId, 100000, {
+    it('should allow when limit is null', async () => {
+      expect(await canUseTokens('nvidia', 'nemotron', testId, 100000, {
         tpm: null, tpd: null,
       })).toBe(true);
     });
   });
 
   describe('getRateLimitStatus', () => {
-    it('should return current usage counts', () => {
+    it('should return current usage counts', async () => {
       const limits = { rpm: 30, rpd: 1000, tpm: 6000, tpd: null };
-      recordRequest('groq', 'test-model', testId);
-      recordRequest('groq', 'test-model', testId);
-      recordTokens('groq', 'test-model', testId, 500);
+      await recordRequest('groq', 'test-model', testId);
+      await recordRequest('groq', 'test-model', testId);
+      await recordTokens('groq', 'test-model', testId, 500);
 
-      const status = getRateLimitStatus('groq', 'test-model', testId, limits);
+      const status = await getRateLimitStatus('groq', 'test-model', testId, limits);
       expect(status.rpm.used).toBe(2);
       expect(status.rpm.limit).toBe(30);
       expect(status.rpd.used).toBe(2);
@@ -101,51 +102,51 @@ describe('Rate Limiter', () => {
   });
 
   describe('escalating cooldown', () => {
-    it('escalates the 2nd/3rd/4th hit within 24h to 10m / 1h / 24h', () => {
+    it('escalates the 2nd/3rd/4th hit within 24h to 10m / 1h / 24h', async () => {
       const id = Math.floor(Math.random() * 1_000_000);
       const args = ['cerebras', `escalating-model-${id}`, id] as const;
       // 1st: 2 minutes
-      expect(getNextCooldownDuration(...args)).toBe(2 * 60 * 1000);
+      expect(await getNextCooldownDuration(...args)).toBe(2 * 60 * 1000);
       // 2nd: 10 minutes
-      expect(getNextCooldownDuration(...args)).toBe(10 * 60 * 1000);
+      expect(await getNextCooldownDuration(...args)).toBe(10 * 60 * 1000);
       // 3rd: 1 hour
-      expect(getNextCooldownDuration(...args)).toBe(60 * 60 * 1000);
+      expect(await getNextCooldownDuration(...args)).toBe(60 * 60 * 1000);
       // 4th: 24 hours
-      expect(getNextCooldownDuration(...args)).toBe(24 * 60 * 60 * 1000);
+      expect(await getNextCooldownDuration(...args)).toBe(24 * 60 * 60 * 1000);
       // 5th+ stays at 24h (quarantined until next quota window)
-      expect(getNextCooldownDuration(...args)).toBe(24 * 60 * 60 * 1000);
+      expect(await getNextCooldownDuration(...args)).toBe(24 * 60 * 60 * 1000);
     });
 
-    it('counts independently per (platform, model, key)', () => {
+    it('counts independently per (platform, model, key)', async () => {
       const id = Math.floor(Math.random() * 1_000_000);
       // Different keys for the same model should each start at 2m, not share state.
-      expect(getNextCooldownDuration('groq', `m-${id}`, id)).toBe(2 * 60 * 1000);
-      expect(getNextCooldownDuration('groq', `m-${id}`, id + 1)).toBe(2 * 60 * 1000);
-      expect(getNextCooldownDuration('groq', `m-${id}-other`, id)).toBe(2 * 60 * 1000);
+      expect(await getNextCooldownDuration('groq', `m-${id}`, id)).toBe(2 * 60 * 1000);
+      expect(await getNextCooldownDuration('groq', `m-${id}`, id + 1)).toBe(2 * 60 * 1000);
+      expect(await getNextCooldownDuration('groq', `m-${id}-other`, id)).toBe(2 * 60 * 1000);
     });
   });
 
   describe('getCooldownDurationForLimit (daily vs transient 429)', () => {
-    it('uses a short, non-escalating cooldown when the daily quota is NOT exhausted', () => {
+    it('uses a short, non-escalating cooldown when the daily quota is NOT exhausted', async () => {
       const id = Math.floor(Math.random() * 1_000_000);
       const args = ['groq', `transient-${id}`, id] as const;
       // groq-like: large daily quota, no requests recorded yet → transient (TPM/RPM)
       // 429s must stay at the short fixed cooldown and never escalate.
-      expect(getCooldownDurationForLimit(...args, { rpd: 1000, tpd: null })).toBe(90 * 1000);
-      expect(getCooldownDurationForLimit(...args, { rpd: 1000, tpd: null })).toBe(90 * 1000);
-      expect(getCooldownDurationForLimit(...args, { rpd: 1000, tpd: null })).toBe(90 * 1000);
+      expect(await getCooldownDurationForLimit(...args, { rpd: 1000, tpd: null })).toBe(90 * 1000);
+      expect(await getCooldownDurationForLimit(...args, { rpd: 1000, tpd: null })).toBe(90 * 1000);
+      expect(await getCooldownDurationForLimit(...args, { rpd: 1000, tpd: null })).toBe(90 * 1000);
     });
 
-    it('stays transient for the first 429 with null daily limits (heuristic threshold)', () => {
+    it('stays transient for the first 429 with null daily limits (heuristic threshold)', async () => {
       const id = Math.floor(Math.random() * 1_000_000);
       // 1st 429 → transient (no signal yet). Subsequent 429s stay transient
       // until the threshold is crossed.
       expect(
-        getCooldownDurationForLimit('mistral', `nolimit-${id}`, id, { rpd: null, tpd: null }),
+        await getCooldownDurationForLimit('mistral', `nolimit-${id}`, id, { rpd: null, tpd: null }),
       ).toBe(90 * 1000);
     });
 
-    it('escalates null-limit 429s only as far as the unknown-limit 10m cap', () => {
+    it('escalates null-limit 429s only as far as the unknown-limit 10m cap', async () => {
       // Documented RPD path (see "escalates only once the daily request limit
       // is actually reached"): 1st call after counter ≥ limit → 2min (idx=0),
       // 2nd → 10min (idx=1), 3rd → HOUR (idx=2), 4th+ → DAY (idx=3).
@@ -159,34 +160,34 @@ describe('Rate Limiter', () => {
       const platform = 'ollama';
       const model = `nolimit-esc-${id}`;
       // 1st 429 — no history → transient
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(90 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(90 * 1000);
       // 2nd 429 — heuristic threshold (2) crossed → 2min (ladder idx=0)
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(2 * 60 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(2 * 60 * 1000);
       // 3rd 429 → 10min (idx=1)
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(10 * 60 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(10 * 60 * 1000);
       // 4th 429 — ladder says HOUR, cap holds it at 10min
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(10 * 60 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(10 * 60 * 1000);
       // 5th 429 — ladder says DAY, cap holds it at 10min
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(10 * 60 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(10 * 60 * 1000);
       // 6th+ stays at the cap, never the 24h quarantine
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(10 * 60 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(10 * 60 * 1000);
     });
 
-    it('keeps the full 24h ladder for a model with a real, exhausted RPD', () => {
+    it('keeps the full 24h ladder for a model with a real, exhausted RPD', async () => {
       // The cap is for GUESSED exhaustion only. A published rpd whose counter
       // is spent is measured evidence, so the quarantine steps stay reachable.
       const id = Math.floor(Math.random() * 1_000_000);
       const platform = 'openrouter';
       const model = `daily-esc-${id}`;
-      for (let i = 0; i < 3; i++) recordRequest(platform, model, id);
+      for (let i = 0; i < 3; i++) await recordRequest(platform, model, id);
       const limits = { rpd: 3, tpd: null };
-      expect(getCooldownDurationForLimit(platform, model, id, limits)).toBe(2 * 60 * 1000);
-      expect(getCooldownDurationForLimit(platform, model, id, limits)).toBe(10 * 60 * 1000);
-      expect(getCooldownDurationForLimit(platform, model, id, limits)).toBe(60 * 60 * 1000);
-      expect(getCooldownDurationForLimit(platform, model, id, limits)).toBe(24 * 60 * 60 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, limits)).toBe(2 * 60 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, limits)).toBe(10 * 60 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, limits)).toBe(60 * 60 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, limits)).toBe(24 * 60 * 60 * 1000);
     });
 
-    it('does NOT trigger the heuristic when limits are known (even after 5+ hits)', () => {
+    it('does NOT trigger the heuristic when limits are known (even after 5+ hits)', async () => {
       // rpd=1000 known: counters track it, daily-exhausted check uses the
       // counter, not the hit count. The null-limits heuristic only fires
       // when BOTH rpd AND tpd are null. With a known cap, repeated 429s
@@ -195,37 +196,37 @@ describe('Rate Limiter', () => {
       const platform = 'openrouter';
       const model = `known-${id}`;
       for (let i = 0; i < 5; i++) {
-        expect(getCooldownDurationForLimit(platform, model, id, { rpd: 1000, tpd: null })).toBe(90 * 1000);
+        expect(await getCooldownDurationForLimit(platform, model, id, { rpd: 1000, tpd: null })).toBe(90 * 1000);
       }
       expect(recentHitCount(platform, model, id, Date.now())).toBe(0);
     });
 
-    it('clears null-limit hit history after a successful request', () => {
+    it('clears null-limit hit history after a successful request', async () => {
       const id = Math.floor(Math.random() * 1_000_000);
       const platform = 'ollama';
       const model = `nolimit-success-${id}`;
 
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(90 * 1000);
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(2 * 60 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(90 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(2 * 60 * 1000);
       expect(recentHitCount(platform, model, id, Date.now())).toBe(2);
 
-      recordRequest(platform, model, id);
+      await recordRequest(platform, model, id);
 
       expect(recentHitCount(platform, model, id, Date.now())).toBe(0);
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(90 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(90 * 1000);
     });
 
-    it('escalates only once the daily request limit is actually reached', () => {
+    it('escalates only once the daily request limit is actually reached', async () => {
       const id = Math.floor(Math.random() * 1_000_000);
       const platform = 'openrouter';
       const model = `daily-${id}`;
       // Below the daily limit → still transient.
-      recordRequest(platform, model, id);
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: 5, tpd: null })).toBe(90 * 1000);
+      await recordRequest(platform, model, id);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: 5, tpd: null })).toBe(90 * 1000);
       // Reach the daily limit → now it escalates (2m, then 10m, ...).
-      for (let i = 0; i < 5; i++) recordRequest(platform, model, id);
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: 5, tpd: null })).toBe(2 * 60 * 1000);
-      expect(getCooldownDurationForLimit(platform, model, id, { rpd: 5, tpd: null })).toBe(10 * 60 * 1000);
+      for (let i = 0; i < 5; i++) await recordRequest(platform, model, id);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: 5, tpd: null })).toBe(2 * 60 * 1000);
+      expect(await getCooldownDurationForLimit(platform, model, id, { rpd: 5, tpd: null })).toBe(10 * 60 * 1000);
     });
   });
 
@@ -291,31 +292,31 @@ describe('Rate Limiter', () => {
       expect(getProviderDailyRequestCap('openrouter')).toBeNull();
     });
 
-    it('counts requests across ALL of a provider\'s models for one key', () => {
-      recordRequest('openrouter', 'deepseek/deepseek-v3.1:free', testId);
-      recordRequest('openrouter', 'deepseek/deepseek-v3.1:free', testId);
-      recordRequest('openrouter', 'qwen/qwen3-coder:free', testId);
+    it('counts requests across ALL of a provider\'s models for one key', async () => {
+      await recordRequest('openrouter', 'deepseek/deepseek-v3.1:free', testId);
+      await recordRequest('openrouter', 'deepseek/deepseek-v3.1:free', testId);
+      await recordRequest('openrouter', 'qwen/qwen3-coder:free', testId);
       // Same key on a different provider must not bleed into the count.
-      recordRequest('groq', 'llama-70b', testId);
-      expect(providerDailyRequestCount('openrouter', testId)).toBe(3);
+      await recordRequest('groq', 'llama-70b', testId);
+      expect(await providerDailyRequestCount('openrouter', testId)).toBe(3);
     });
 
-    it('blocks the whole provider once the shared daily cap is hit', () => {
+    it('blocks the whole provider once the shared daily cap is hit', async () => {
       process.env[ENV] = '3';
-      recordRequest('openrouter', 'model-a', testId);
-      recordRequest('openrouter', 'model-b', testId);
-      expect(canUseProvider('openrouter', testId)).toBe(true); // 2 < 3
-      recordRequest('openrouter', 'model-c', testId);
-      expect(canUseProvider('openrouter', testId)).toBe(false); // 3 >= 3
+      await recordRequest('openrouter', 'model-a', testId);
+      await recordRequest('openrouter', 'model-b', testId);
+      expect(await canUseProvider('openrouter', testId)).toBe(true); // 2 < 3
+      await recordRequest('openrouter', 'model-c', testId);
+      expect(await canUseProvider('openrouter', testId)).toBe(false); // 3 >= 3
     });
 
-    it('shares the Requesty daily cap across its free models by default', () => {
+    it('shares the Requesty daily cap across its free models by default', async () => {
       for (let i = 0; i < 179; i++) {
-        recordRequest('requesty', i % 2 ? 'google/gemma-4-31b-it' : 'nvidia/nemotron-3-super-120b-a12b', testId);
+        await recordRequest('requesty', i % 2 ? 'google/gemma-4-31b-it' : 'nvidia/nemotron-3-super-120b-a12b', testId);
       }
-      expect(canUseProvider('requesty', testId)).toBe(true); // 179 < 180
-      recordRequest('requesty', 'mistral/leanstral-1-5', testId);
-      expect(canUseProvider('requesty', testId)).toBe(false); // 180 >= 180
+      expect(await canUseProvider('requesty', testId)).toBe(true); // 179 < 180
+      await recordRequest('requesty', 'mistral/leanstral-1-5', testId);
+      expect(await canUseProvider('requesty', testId)).toBe(false); // 180 >= 180
     });
   });
 
@@ -324,15 +325,15 @@ describe('Rate Limiter', () => {
     let original: string | undefined;
     let dbReady = false;
 
-    function ensureDb() {
+    async function ensureDb() {
       if (dbReady) return;
       process.env.ENCRYPTION_KEY = '0'.repeat(64);
-      initDb(':memory:');
+      await initTestDb();
       dbReady = true;
     }
 
-    function seedNavyModel(modelId: string, tpdLimit: number, monthlyTokenBudget: string) {
-      getDb().prepare(`
+    async function seedNavyModel(modelId: string, tpdLimit: number, monthlyTokenBudget: string) {
+      (await getDb().run(`
         INSERT INTO models (
           platform, model_id, display_name, intelligence_rank, speed_rank,
           size_label, rpm_limit, rpd_limit, tpm_limit, tpd_limit,
@@ -345,14 +346,14 @@ describe('Rate Limiter', () => {
         ON CONFLICT(platform, model_id, endpoint_scope) DO UPDATE SET
           tpd_limit = excluded.tpd_limit,
           monthly_token_budget = excluded.monthly_token_budget
-      `).run(modelId, `${modelId} (NavyAI)`, tpdLimit, monthlyTokenBudget);
+      `, [modelId, `${modelId} (NavyAI)`, tpdLimit, monthlyTokenBudget]));
     }
 
-    beforeEach(() => {
-      ensureDb();
+    beforeEach(async () => {
+      await ensureDb();
       original = process.env[ENV];
-      getDb().prepare('DELETE FROM rate_limit_usage').run();
-      getDb().prepare("DELETE FROM models WHERE platform = 'navy'").run();
+      (await getDb().run('DELETE FROM rate_limit_usage'));
+      (await getDb().run("DELETE FROM models WHERE platform = 'navy'"));
       delete process.env[ENV];
     });
 
@@ -370,24 +371,24 @@ describe('Rate Limiter', () => {
       expect(getProviderDailyTokenCap('navy')).toBeNull();
     });
 
-    it('counts NavyAI tokens across all models using catalog multiplier hints', () => {
-      seedNavyModel('gpt-5.4', 33_333, '150K/day shared \u00b7 4.5x');
-      seedNavyModel('llama-3.3-70b-instruct', 150_000, '150K/day shared \u00b7 1x');
+    it('counts NavyAI tokens across all models using catalog multiplier hints', async () => {
+      await seedNavyModel('gpt-5.4', 33_333, '150K/day shared \u00b7 4.5x');
+      await seedNavyModel('llama-3.3-70b-instruct', 150_000, '150K/day shared \u00b7 1x');
 
-      recordTokens('navy', 'gpt-5.4', testId, 1000);
-      recordTokens('navy', 'llama-3.3-70b-instruct', testId, 1000);
+      await recordTokens('navy', 'gpt-5.4', testId, 1000);
+      await recordTokens('navy', 'llama-3.3-70b-instruct', testId, 1000);
 
-      expect(providerDailyTokenCount('navy', testId)).toBe(5500);
+      expect(await providerDailyTokenCount('navy', testId)).toBe(5500);
     });
 
-    it('blocks the provider key when multiplier-adjusted tokens would exceed the shared cap', () => {
+    it('blocks the provider key when multiplier-adjusted tokens would exceed the shared cap', async () => {
       process.env[ENV] = '5000';
-      seedNavyModel('gemini-2.5-flash', 75_000, '150K/day shared \u00b7 2x');
+      await seedNavyModel('gemini-2.5-flash', 75_000, '150K/day shared \u00b7 2x');
 
-      recordTokens('navy', 'gemini-2.5-flash', testId, 2000);
+      await recordTokens('navy', 'gemini-2.5-flash', testId, 2000);
 
-      expect(canUseProviderTokens('navy', testId, 'gemini-2.5-flash', 400)).toBe(true);
-      expect(canUseProviderTokens('navy', testId, 'gemini-2.5-flash', 600)).toBe(false);
+      expect(await canUseProviderTokens('navy', testId, 'gemini-2.5-flash', 400)).toBe(true);
+      expect(await canUseProviderTokens('navy', testId, 'gemini-2.5-flash', 600)).toBe(false);
     });
   });
 });
@@ -397,20 +398,20 @@ describe('Cooldown duration with upstream Retry-After', () => {
   let testId: number;
   beforeEach(() => { testId = Math.floor(Math.random() * 1_000_000); });
 
-  it('uses the transient cooldown when no Retry-After is given', () => {
-    expect(getCooldownDurationForLimit('groq', 'm', testId, noLimits)).toBe(90_000);
+  it('uses the transient cooldown when no Retry-After is given', async () => {
+    expect(await getCooldownDurationForLimit('groq', 'm', testId, noLimits)).toBe(90_000);
   });
 
-  it('never benches shorter than the heuristic (ignores a shorter Retry-After)', () => {
-    expect(getCooldownDurationForLimit('groq', 'm', testId, noLimits, 30_000)).toBe(90_000);
+  it('never benches shorter than the heuristic (ignores a shorter Retry-After)', async () => {
+    expect(await getCooldownDurationForLimit('groq', 'm', testId, noLimits, 30_000)).toBe(90_000);
   });
 
-  it('honors a Retry-After longer than the heuristic', () => {
-    expect(getCooldownDurationForLimit('groq', 'm', testId, noLimits, 300_000)).toBe(300_000);
+  it('honors a Retry-After longer than the heuristic', async () => {
+    expect(await getCooldownDurationForLimit('groq', 'm', testId, noLimits, 300_000)).toBe(300_000);
   });
 
-  it('caps an absurd Retry-After at a day', () => {
-    expect(getCooldownDurationForLimit('groq', 'm', testId, noLimits, 5 * 86_400_000)).toBe(86_400_000);
+  it('caps an absurd Retry-After at a day', async () => {
+    expect(await getCooldownDurationForLimit('groq', 'm', testId, noLimits, 5 * 86_400_000)).toBe(86_400_000);
   });
 });
 

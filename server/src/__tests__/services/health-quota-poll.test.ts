@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import { encrypt } from '../../lib/crypto.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #1403: the health pass piggybacks provider-reported quota polling on a
 // healthy verdict, throttled per key, and a quota failure must never bend the
@@ -21,29 +22,27 @@ vi.mock('../../providers/index.js', () => ({
 
 const { checkKeyHealth, maybePollKeyQuota, QUOTA_POLL_INTERVAL_MS } = await import('../../services/health.js');
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
 let nextId = 9100;
-function seedKey(): number {
+async function seedKey(): number {
   const id = ++nextId;
   const key = encrypt('sk-or-health-test');
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, enabled, status)
-    VALUES (?, 'openrouter', 'quota-poll-test', ?, ?, ?, 1, 'unknown')
-  `).run(id, key.encrypted, key.iv, key.authTag);
+    VALUES (?, 'openrouter', 'quota-poll-test', ?, ?, ?, 1, 'unknown') RETURNING id`, [id, key.encrypted, key.iv, key.authTag]));
   return id;
 }
 
-function seedQuotaApiObservation(keyId: number, ageMs: number): void {
+async function seedQuotaApiObservation(keyId: number, ageMs: number): void {
   const seen = new Date(Date.now() - ageMs).toISOString().replace('T', ' ').replace('Z', '');
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO provider_quota_observations
       (id, platform, key_id, quota_pool_key, metric, source, created_at, observed_at)
-    VALUES (?, 'openrouter', ?, 'openrouter::account', 'credits', 'quota_api', ?, ?)
-  `).run(`qpo-${keyId}-${ageMs}`, keyId, seen, seen);
+    VALUES (?, 'openrouter', ?, 'openrouter::account', 'credits', 'quota_api', ?, ?) RETURNING id`, [`qpo-${keyId}-${ageMs}`, keyId, seen, seen]));
 }
 
 beforeEach(() => {
@@ -54,7 +53,7 @@ beforeEach(() => {
 
 describe('health-pass quota polling (#1403)', () => {
   it('polls quota after a healthy check and records nothing on failure without changing the verdict', async () => {
-    const keyId = seedKey();
+    const keyId = await seedKey();
     validateKey.mockResolvedValue(true);
     fetchQuota.mockResolvedValue(false); // quota endpoint down
 
@@ -63,23 +62,23 @@ describe('health-pass quota polling (#1403)', () => {
     // Give the fire-and-forget poll a tick to run.
     await new Promise(r => setImmediate(r));
     expect(fetchQuota).toHaveBeenCalledTimes(1);
-    const row = getDb().prepare('SELECT status FROM api_keys WHERE id = ?').get(keyId) as { status: string };
+    const row = (await getDb().get('SELECT status FROM api_keys WHERE id = ?', [keyId])) as { status: string };
     expect(row.status).toBe('healthy');
   });
 
   it('fetchQuota throwing does not demote the key', async () => {
-    const keyId = seedKey();
+    const keyId = await seedKey();
     validateKey.mockResolvedValue(true);
     fetchQuota.mockRejectedValue(new Error('socket hang up'));
     const status = await checkKeyHealth(keyId);
     expect(status).toBe('healthy');
     await new Promise(r => setImmediate(r));
-    const row = getDb().prepare('SELECT status FROM api_keys WHERE id = ?').get(keyId) as { status: string };
+    const row = (await getDb().get('SELECT status FROM api_keys WHERE id = ?', [keyId])) as { status: string };
     expect(row.status).toBe('healthy');
   });
 
   it('does not poll after an invalid verdict', async () => {
-    const keyId = seedKey();
+    const keyId = await seedKey();
     validateKey.mockResolvedValue({ valid: false, error: 'bad key' });
     const status = await checkKeyHealth(keyId);
     expect(status).toBe('invalid');
@@ -88,23 +87,23 @@ describe('health-pass quota polling (#1403)', () => {
   });
 
   it('maybePollKeyQuota throttles to one poll per interval per key', async () => {
-    const keyId = seedKey();
+    const keyId = await seedKey();
     fetchQuota.mockResolvedValue(true);
 
     // Fresh observation: too soon, must skip.
-    seedQuotaApiObservation(keyId, 60_000);
+    await seedQuotaApiObservation(keyId, 60_000);
     expect(await maybePollKeyQuota(keyId)).toBe(false);
     expect(fetchQuota).not.toHaveBeenCalled();
 
     // Only an old observation remains: poll runs.
-    getDb().prepare("DELETE FROM provider_quota_observations WHERE key_id = ? AND created_at > datetime('now', '-1 hour')").run(keyId);
-    seedQuotaApiObservation(keyId, QUOTA_POLL_INTERVAL_MS + 60_000);
+    (await getDb().run("DELETE FROM provider_quota_observations WHERE key_id = ? AND created_at > to_char((now() at time zone 'utc') - interval '1 hour', 'YYYY-MM-DD HH24:MI:SS')", [keyId]));
+    await seedQuotaApiObservation(keyId, QUOTA_POLL_INTERVAL_MS + 60_000);
     expect(await maybePollKeyQuota(keyId)).toBe(true);
     expect(fetchQuota).toHaveBeenCalledTimes(1);
   });
 
   it('maybePollKeyQuota polls immediately when the key has no quota_api history', async () => {
-    const keyId = seedKey();
+    const keyId = await seedKey();
     fetchQuota.mockResolvedValue(true);
     expect(await maybePollKeyQuota(keyId)).toBe(true);
     expect(fetchQuota).toHaveBeenCalledTimes(1);

@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { initDb } from '../../db/index.js';
 import {
   hashIdempotencyKey,
   computeIdempotencyFingerprint,
@@ -10,6 +9,7 @@ import {
   idempotencyTtlMs,
 } from '../../services/idempotency.js';
 import type { ChatMessage } from '@freellmapi/shared/types.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const IDEM_ENV = ['IDEMPOTENCY_TTL_MS'] as const;
 
@@ -33,10 +33,10 @@ const sampleBody = (text: string) => ({
 describe('idempotency', () => {
   const saved: Record<string, string | undefined> = {};
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     for (const k of IDEM_ENV) saved[k] = process.env[k];
-    initDb(':memory:');
+    await initTestDb();
   });
 
   afterEach(() => {
@@ -46,16 +46,16 @@ describe('idempotency', () => {
     }
   });
 
-  it('miss on an unknown key hash', () => {
-    const r = lookupIdempotencyReplay(hashIdempotencyKey('never-stored'), fingerprintFor('m', 'hi'));
+  it('miss on an unknown key hash', async () => {
+    const r = await lookupIdempotencyReplay(hashIdempotencyKey('never-stored'), fingerprintFor('m', 'hi'));
     expect(r.kind).toBe('miss');
   });
 
-  it('replays a stored response with the same key + fingerprint', () => {
+  it('replays a stored response with the same key + fingerprint', async () => {
     const keyHash = hashIdempotencyKey('retry-me');
     const fp = fingerprintFor('groq/llama', 'same question');
-    storeIdempotencyResult(keyHash, fp, 200, sampleBody('first answer'), 'exec-1');
-    const r = lookupIdempotencyReplay(keyHash, fp);
+    await storeIdempotencyResult(keyHash, fp, 200, sampleBody('first answer'), 'exec-1');
+    const r = await lookupIdempotencyReplay(keyHash, fp);
     expect(r.kind).toBe('replay');
     if (r.kind === 'replay') {
       expect(r.status).toBe(200);
@@ -63,46 +63,46 @@ describe('idempotency', () => {
     }
   });
 
-  it('reports conflict when the same key is reused with different content', () => {
+  it('reports conflict when the same key is reused with different content', async () => {
     const keyHash = hashIdempotencyKey('shared-key');
-    storeIdempotencyResult(
+    await storeIdempotencyResult(
       keyHash,
       fingerprintFor('m', 'question A'),
       200,
       sampleBody('answer A'),
     );
-    const r = lookupIdempotencyReplay(keyHash, fingerprintFor('m', 'question B'));
+    const r = await lookupIdempotencyReplay(keyHash, fingerprintFor('m', 'question B'));
     expect(r.kind).toBe('conflict');
   });
 
-  it('treats an expired claim as a miss', () => {
+  it('treats an expired claim as a miss', async () => {
     const keyHash = hashIdempotencyKey('expired');
     const fp = fingerprintFor('m', 'q');
     const now = 1_000_000;
-    storeIdempotencyResult(keyHash, fp, 200, sampleBody('old'), undefined, now);
-    const r = lookupIdempotencyReplay(keyHash, fp, now + idempotencyTtlMs() + 1);
+    await storeIdempotencyResult(keyHash, fp, 200, sampleBody('old'), undefined, now);
+    const r = await lookupIdempotencyReplay(keyHash, fp, now + idempotencyTtlMs() + 1);
     expect(r.kind).toBe('miss');
   });
 
-  it('replaces the previous claim when the same key is reused after completion', () => {
+  it('replaces the previous claim when the same key is reused after completion', async () => {
     const keyHash = hashIdempotencyKey('replaced');
     const fpA = fingerprintFor('m', 'first');
-    storeIdempotencyResult(keyHash, fpA, 200, sampleBody('answer A'));
+    await storeIdempotencyResult(keyHash, fpA, 200, sampleBody('answer A'));
     const fpB = fingerprintFor('m', 'second');
-    storeIdempotencyResult(keyHash, fpB, 200, sampleBody('answer B'));
+    await storeIdempotencyResult(keyHash, fpB, 200, sampleBody('answer B'));
     // After a new successful completion with a DIFFERENT fingerprint, the old
     // claim is replaced: the new fingerprint replays, and the old fingerprint
     // (same key, different content) is a conflict — not a silent wrong answer.
-    expect(lookupIdempotencyReplay(keyHash, fpB).kind).toBe('replay');
-    expect(lookupIdempotencyReplay(keyHash, fpA).kind).toBe('conflict');
+    expect((await lookupIdempotencyReplay(keyHash, fpB)).kind).toBe('replay');
+    expect((await lookupIdempotencyReplay(keyHash, fpA)).kind).toBe('conflict');
   });
 
-  it('clear removes the claim', () => {
+  it('clear removes the claim', async () => {
     const keyHash = hashIdempotencyKey('cleared');
     const fp = fingerprintFor('m', 'q');
-    storeIdempotencyResult(keyHash, fp, 200, sampleBody('x'));
-    clearIdempotencyResult(keyHash);
-    expect(lookupIdempotencyReplay(keyHash, fp).kind).toBe('miss');
+    await storeIdempotencyResult(keyHash, fp, 200, sampleBody('x'));
+    await clearIdempotencyResult(keyHash);
+    expect((await lookupIdempotencyReplay(keyHash, fp)).kind).toBe('miss');
   });
 
   it('normalizeIdempotencyKey trims, rejects empties and >255-byte values', () => {

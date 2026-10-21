@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // The dashboard Audio tab lists speech-to-text rows (modality='transcription',
 // synced from the catalog's `transcriptionModels`) next to TTS. These tests pin
@@ -41,31 +42,33 @@ async function put(app: Express, path: string, body: unknown) {
   return { status: res.status, body: data };
 }
 
-function seedTranscriptionRows() {
-  const insert = getDb().prepare(`
+async function seedTranscriptionRows() {
+  await getDb().run(`
     INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label)
     VALUES (?, ?, ?, 'transcription', ?, 1, ?)
-  `);
-  insert.run('groq', 'whisper-large-v3', 'Whisper large v3', 1, '~2000 min/day');
-  insert.run('cloudflare', '@cf/openai/whisper', 'Whisper', 2, '10 min/day free');
+  `, ['groq', 'whisper-large-v3', 'Whisper large v3', 1, '~2000 min/day']);
+  await getDb().run(`
+    INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label)
+    VALUES (?, ?, ?, 'transcription', ?, 1, ?)
+  `, ['cloudflare', '@cf/openai/whisper', 'Whisper', 2, '10 min/day free']);
 }
 
 describe('transcription models on the media dashboard API', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   it('lists transcription rows alongside the other media modalities', async () => {
-    seedTranscriptionRows();
-    getDb().prepare(`
+    await seedTranscriptionRows();
+    await getDb().run(`
       INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label)
       VALUES ('cloudflare', '@cf/black-forest-labs/flux-1-schnell', 'FLUX.1 [schnell]', 'image', 1, 1, 'free tier')
-    `).run();
+    `);
 
     const { status, body } = await get(app, '/api/media');
     expect(status).toBe(200);
@@ -87,12 +90,12 @@ describe('transcription models on the media dashboard API', () => {
   });
 
   it('counts healthy keys for a transcription row’s platform', async () => {
-    seedTranscriptionRows();
+    await seedTranscriptionRows();
     const { encrypted, iv, authTag } = encrypt('not-a-real-key');
-    getDb().prepare(`
+    await getDb().run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
       VALUES ('groq', 'test', ?, ?, ?, 'healthy', 1)
-    `).run(encrypted, iv, authTag);
+    `, [encrypted, iv, authTag]);
 
     const { body } = await get(app, '/api/media');
     const byPlatform = new Map(body.models
@@ -103,10 +106,8 @@ describe('transcription models on the media dashboard API', () => {
   });
 
   it('toggles a transcription row off and back on via PUT /api/media/:id', async () => {
-    seedTranscriptionRows();
-    const row = getDb().prepare(
-      "SELECT id FROM media_models WHERE modality = 'transcription' AND platform = 'groq'",
-    ).get() as { id: number };
+    await seedTranscriptionRows();
+    const row = await getDb().get("SELECT id FROM media_models WHERE modality = 'transcription' AND platform = 'groq'") as { id: number };
 
     expect((await put(app, `/api/media/${row.id}`, { enabled: false })).status).toBe(200);
     let listed = await get(app, '/api/media');

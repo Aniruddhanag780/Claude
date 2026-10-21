@@ -1,12 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
+import type { Db } from '../../db/types.js';
+import { initTestDb } from '../helpers/test-db.js';
 import { initEncryptionKey, encrypt, decrypt } from '../../lib/crypto.js';
-
-function freshDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.exec(`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
-  return db;
-}
 
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 
@@ -20,88 +15,85 @@ function restoreEnv() {
   }
 }
 
+/** Per-test database (the PG equivalent of the old throwaway `new Database(':memory:')`). */
+let db: Db;
+
 describe('initEncryptionKey — input validation', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     restoreEnv();
+    db = await initTestDb();
   });
 
   afterEach(() => {
     restoreEnv();
   });
 
-  it('accepts a valid 64-char hex env key', () => {
+  it('accepts a valid 64-char hex env key', async () => {
     process.env.ENCRYPTION_KEY = 'a'.repeat(64);
-    const db = freshDb();
-    expect(() => initEncryptionKey(db)).not.toThrow();
+    await initEncryptionKey(db);
     // Round-trip a value to confirm the key actually works.
     const enc = encrypt('hello');
     expect(decrypt(enc.encrypted, enc.iv, enc.authTag)).toBe('hello');
   });
 
-  it('throws on too-short env key (typo guard)', () => {
+  it('throws on too-short env key (typo guard)', async () => {
     process.env.ENCRYPTION_KEY = 'abc';
-    const db = freshDb();
-    expect(() => initEncryptionKey(db)).toThrow(/Invalid ENCRYPTION_KEY \(env\).+expected 64 hex chars/);
+    await expect(await initEncryptionKey(db)).rejects.toThrow(/Invalid ENCRYPTION_KEY \(env\).+expected 64 hex chars/);
   });
 
-  it('throws on too-long env key', () => {
+  it('throws on too-long env key', async () => {
     process.env.ENCRYPTION_KEY = 'a'.repeat(80);
-    const db = freshDb();
-    expect(() => initEncryptionKey(db)).toThrow(/Invalid ENCRYPTION_KEY \(env\)/);
+    await expect(await initEncryptionKey(db)).rejects.toThrow(/Invalid ENCRYPTION_KEY \(env\)/);
   });
 
-  it('throws on non-hex env key of correct length', () => {
+  it('throws on non-hex env key of correct length', async () => {
     process.env.ENCRYPTION_KEY = 'g'.repeat(64); // g is not hex
-    const db = freshDb();
-    expect(() => initEncryptionKey(db)).toThrow(/Invalid ENCRYPTION_KEY \(env\)/);
+    await expect(await initEncryptionKey(db)).rejects.toThrow(/Invalid ENCRYPTION_KEY \(env\)/);
   });
 
-  it('auto-generates and persists a key outside production when ENCRYPTION_KEY is unset', () => {
+  it('auto-generates and persists a key outside production when ENCRYPTION_KEY is unset', async () => {
     process.env.NODE_ENV = 'test';
-    const db = freshDb();
-    expect(() => initEncryptionKey(db)).not.toThrow();
-    const row = db.prepare("SELECT value FROM settings WHERE key = 'encryption_key'").get() as { value: string };
+    (await db.run("DELETE FROM settings WHERE key = 'encryption_key'")); // harness seeded one
+    await initEncryptionKey(db);
+    const row = (await db.get("SELECT value FROM settings WHERE key = 'encryption_key'")) as { value: string };
     expect(row.value).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it('loads an existing DB-stored fallback key outside production', () => {
+  it('loads an existing DB-stored fallback key outside production', async () => {
     process.env.NODE_ENV = 'test';
-    const db = freshDb();
-    db.prepare("INSERT INTO settings (key, value) VALUES ('encryption_key', ?)").run('b'.repeat(64));
-    expect(() => initEncryptionKey(db)).not.toThrow();
+    (await db.run("INSERT INTO settings (key, value) VALUES ('encryption_key', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", ['b'.repeat(64)]));
+    await initEncryptionKey(db);
     // The existing key is reused, not overwritten.
-    const row = db.prepare("SELECT value FROM settings WHERE key = 'encryption_key'").get() as { value: string };
+    const row = (await db.get("SELECT value FROM settings WHERE key = 'encryption_key'")) as { value: string };
     expect(row.value).toBe('b'.repeat(64));
   });
 
-  it('requires ENCRYPTION_KEY in production and never persists a fallback key', () => {
+  it('requires ENCRYPTION_KEY in production and never persists a fallback key', async () => {
     process.env.NODE_ENV = 'production';
-    const db = freshDb();
-    expect(() => initEncryptionKey(db)).toThrow(/ENCRYPTION_KEY is required/);
-    const row = db.prepare("SELECT value FROM settings WHERE key = 'encryption_key'").get();
+    (await db.run("DELETE FROM settings WHERE key = 'encryption_key'")); // harness seeded one
+    await expect(await initEncryptionKey(db)).rejects.toThrow(/ENCRYPTION_KEY is required/);
+    const row = (await db.get("SELECT value FROM settings WHERE key = 'encryption_key'"));
     expect(row).toBeUndefined();
   });
 
-  it('does not load a DB-stored fallback key in production', () => {
+  it('does not load a DB-stored fallback key in production', async () => {
     process.env.NODE_ENV = 'production';
-    const db = freshDb();
-    db.prepare("INSERT INTO settings (key, value) VALUES ('encryption_key', ?)").run('b'.repeat(64));
-    expect(() => initEncryptionKey(db)).toThrow(/ENCRYPTION_KEY is required/);
+    (await db.run("INSERT INTO settings (key, value) VALUES ('encryption_key', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", ['b'.repeat(64)]));
+    await expect(await initEncryptionKey(db)).rejects.toThrow(/ENCRYPTION_KEY is required/);
   });
 
-  it('treats the placeholder as "not set" and auto-generates outside production', () => {
+  it('treats the placeholder as "not set" and auto-generates outside production', async () => {
     process.env.ENCRYPTION_KEY = 'your-64-char-hex-key-here';
     process.env.NODE_ENV = 'test';
-    const db = freshDb();
-    expect(() => initEncryptionKey(db)).not.toThrow();
-    const row = db.prepare("SELECT value FROM settings WHERE key = 'encryption_key'").get() as { value: string };
+    (await db.run("DELETE FROM settings WHERE key = 'encryption_key'")); // harness seeded one
+    await initEncryptionKey(db);
+    const row = (await db.get("SELECT value FROM settings WHERE key = 'encryption_key'")) as { value: string };
     expect(row.value).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it('throws on a corrupted DB-stored key', () => {
+  it('throws on a corrupted DB-stored key', async () => {
     process.env.NODE_ENV = 'test';
-    const db = freshDb();
-    db.prepare("INSERT INTO settings (key, value) VALUES ('encryption_key', ?)").run('not-hex');
-    expect(() => initEncryptionKey(db)).toThrow(/Invalid ENCRYPTION_KEY \(db\)/);
+    (await db.run("INSERT INTO settings (key, value) VALUES ('encryption_key', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", ['not-hex']));
+    await expect(await initEncryptionKey(db)).rejects.toThrow(/Invalid ENCRYPTION_KEY \(db\)/);
   });
 });

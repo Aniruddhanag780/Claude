@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { clearAllCooldowns } from '../../services/ratelimit.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { seedSearchEngines } from '../helpers/search-engines.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // HTTP surface of web search (#1174): POST /v1/search and GET
 // /v1/search/engines for API callers, /api/search/engines and
@@ -15,12 +16,11 @@ import { seedSearchEngines } from '../helpers/search-engines.js';
 const realFetch = globalThis.fetch;
 let dashToken = '';
 
-function addKey(platform: string): number {
+async function addKey(platform: string): number {
   const { encrypted, iv, authTag } = encrypt(`${platform}-key`);
-  const row = getDb().prepare(`
+  const row = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'test', ?, ?, ?, 'healthy', 1)
-  `).run(platform, encrypted, iv, authTag);
+    VALUES (?, 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, encrypted, iv, authTag]));
   return Number(row.lastInsertRowid);
 }
 
@@ -31,7 +31,7 @@ async function call(app: Express, method: string, path: string, opts: { body?: u
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const auth = opts.auth === undefined ? (path.startsWith('/api') ? 'dash' : 'api') : opts.auth;
   if (auth === 'dash') headers.Authorization = `Bearer ${dashToken}`;
-  if (auth === 'api') headers.Authorization = `Bearer ${getUnifiedApiKey()}`;
+  if (auth === 'api') headers.Authorization = `Bearer ${await getUnifiedApiKey()}`;
   const res = await realFetch(`http://127.0.0.1:${addr.port}${path}`, {
     method,
     headers,
@@ -49,13 +49,13 @@ function mockUpstream(handler: (url: string) => Response) {
 describe('search routes', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    seedSearchEngines();
-    clearAllCooldowns(Number.MAX_SAFE_INTEGER);
+    await initTestDb();
+    await seedSearchEngines();
+    await clearAllCooldowns(Number.MAX_SAFE_INTEGER);
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   afterEach(() => {
@@ -75,7 +75,7 @@ describe('search routes', () => {
   });
 
   it('POST /v1/search serves hits with provider and engine', async () => {
-    addKey('tavily');
+    await addKey('tavily');
     mockUpstream(() => new Response(JSON.stringify({ results: [{ title: 'T', url: 'https://t', content: 'c', score: 0.5 }] }), { status: 200 }));
     const { status, body } = await call(app, 'POST', '/v1/search', { body: { query: 'q', max_results: 2 } });
     expect(status).toBe(200);
@@ -88,7 +88,7 @@ describe('search routes', () => {
   });
 
   it('POST /v1/search forwards Retry-After when every engine is rate limited', async () => {
-    addKey('tavily');
+    await addKey('tavily');
     mockUpstream(() => new Response('{}', { status: 429, headers: { 'retry-after': '7' } }));
     const { status, headers, body } = await call(app, 'POST', '/v1/search', { body: { query: 'q' } });
     expect(status).toBe(429);
@@ -97,7 +97,7 @@ describe('search routes', () => {
   });
 
   it('GET /v1/search/engines lists the enabled engines and whether each is usable', async () => {
-    addKey('exa');
+    await addKey('exa');
     const { status, body } = await call(app, 'GET', '/v1/search/engines');
     expect(status).toBe(200);
     expect(body.data.map((e: any) => e.id)).toEqual(['tavily-search', 'exa-search', 'firecrawl-search', 'linkup-search']);
@@ -122,7 +122,7 @@ describe('search routes', () => {
   });
 
   it('GET /api/analytics/search returns the search summary', async () => {
-    getDb().prepare(`INSERT INTO search_requests (engine_id, platform, status, latency_ms, result_count) VALUES ('exa-search', 'exa', 'ok', 300, 5)`).run();
+    (await getDb().run(`INSERT INTO search_requests (engine_id, platform, status, latency_ms, result_count) VALUES ('exa-search', 'exa', 'ok', 300, 5) RETURNING id`));
     const { status, body } = await call(app, 'GET', '/api/analytics/search?range=30d');
     expect(status).toBe(200);
     expect(body).toMatchObject({ total: 1, successRate: 100, avgLatencyMs: 300 });

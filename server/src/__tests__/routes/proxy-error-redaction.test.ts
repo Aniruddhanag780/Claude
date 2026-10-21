@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -31,24 +32,24 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, body: json, headers: res.headers, raw: data };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 describe('Provider error redaction', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
 
     const addKey = await request(app, 'POST', '/api/keys', {
       platform: 'groq',
@@ -87,7 +88,7 @@ describe('Provider error redaction', () => {
     const completion = await request(app, 'POST', '/v1/chat/completions', {
       model: 'groq/compound-mini',
       messages: [{ role: 'user', content: 'hello' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(completion.status).toBe(502);
     const responseText = JSON.stringify(completion.body);
@@ -127,7 +128,7 @@ describe('Provider error redaction', () => {
     const completion = await request(app, 'POST', '/v1/chat/completions', {
       model: 'groq/compound-mini',
       messages: [{ role: 'user', content: 'hello' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(completion.status).toBe(400);
     expect(completion.body.error.type).toBe('invalid_request_error');

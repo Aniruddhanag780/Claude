@@ -64,12 +64,12 @@ describe('cooldownDecisionForError on a 400 not-allowed body (#618)', () => {
     rpdLimit: null, tpdLimit: null,
   } as any;
 
-  it('benches the model like a 403 instead of the transient ladder', () => {
+  it('benches the model like a 403 instead of the transient ladder', async () => {
     const err = Object.assign(
       new Error('API error 400: user is not allowed to access model kat-coder-pro-v2.5'),
       { status: 400 },
     );
-    const decision = cooldownDecisionForError(route, err);
+    const decision = await cooldownDecisionForError(route, err);
     expect(decision.durationMs).toBe(MODEL_FORBIDDEN_COOLDOWN_MS);
     expect(decision.source).toBe('tier');
   });

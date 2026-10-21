@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -27,24 +28,24 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, body: json };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 describe('OpenAI multimodal array content', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
 
     const addKey = await request(app, 'POST', '/api/keys', {
       platform: 'groq',
@@ -63,7 +64,7 @@ describe('OpenAI multimodal array content', () => {
     // we assert it isn't rejected with a 400 zod error.
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).not.toBe(400);
     if (status === 400) {
       // Diagnostic if regression: show the validation error.
@@ -77,7 +78,7 @@ describe('OpenAI multimodal array content', () => {
         role: 'user',
         content: [{ type: 'text', text: 'hello from opencode-style client' }],
       }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).not.toBe(400);
     if (status === 400) {
       throw new Error(`unexpected 400: ${JSON.stringify(body)}`);
@@ -93,7 +94,7 @@ describe('OpenAI multimodal array content', () => {
           { type: 'image_url', image_url: { url: 'https://example.com/x.png' } },
         ],
       }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).not.toBe(400);
   });
 
@@ -127,7 +128,7 @@ describe('OpenAI multimodal array content', () => {
         role: 'user',
         content: [{ type: 'text', text: 'hi' }],
       }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(body.choices[0].message.content).toBe('got it');
@@ -167,7 +168,7 @@ describe('OpenAI multimodal array content', () => {
           { type: 'image_url', image_url: { url: dataUri } },
         ],
       }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(body.choices[0].message.content).toBe('a red square');
@@ -175,9 +176,7 @@ describe('OpenAI multimodal array content', () => {
     // The image survives to the provider verbatim: the router must have picked a
     // vision-capable model (the precheck 422s otherwise) and the adapter must
     // forward the block rather than flattening it to text.
-    const routed = getDb()
-      .prepare("SELECT supports_vision FROM models WHERE platform = 'groq' AND model_id = ?")
-      .get(upstream.model) as { supports_vision: number } | undefined;
+    const routed = (await getDb().get("SELECT supports_vision FROM models WHERE platform = 'groq' AND model_id = ?", [upstream.model])) as { supports_vision: number } | undefined;
     expect(routed?.supports_vision).toBe(1);
 
     const content = upstream.messages[0].content;
@@ -189,7 +188,7 @@ describe('OpenAI multimodal array content', () => {
   it('rejects an empty array as missing content', async () => {
     const { status } = await request(app, 'POST', '/v1/chat/completions', {
       messages: [], // top-level empty messages
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).toBe(400);
   });
 
@@ -204,7 +203,7 @@ describe('OpenAI multimodal array content', () => {
         { role: 'assistant', content: [] },
         { role: 'user', content: 'continue' },
       ],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).not.toBe(400);
     if (status === 400) throw new Error(`unexpected 400: ${JSON.stringify(body)}`);
   });
@@ -220,7 +219,7 @@ describe('OpenAI multimodal array content', () => {
           { role: 'assistant', content: [{ text: 'hello!' }] },
           { role: 'user', content: [{ text: 'ok' }] },
         ],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).not.toBe(400);
       if (status === 400) throw new Error(`unexpected 400: ${JSON.stringify(body)}`);
     });
@@ -239,7 +238,7 @@ describe('OpenAI multimodal array content', () => {
           { role: 'tool', tool_call_id: 'call_1', content: 'file1.ts' },
           { role: 'user', content: 'thanks' },
         ],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).not.toBe(400);
       if (status === 400) throw new Error(`unexpected 400: ${JSON.stringify(body)}`);
     });
@@ -250,7 +249,7 @@ describe('OpenAI multimodal array content', () => {
           { role: 'developer', content: 'You are a coding agent.' },
           { role: 'user', content: 'hi' },
         ],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).not.toBe(400);
       if (status === 400) throw new Error(`unexpected 400: ${JSON.stringify(body)}`);
     });
@@ -258,7 +257,7 @@ describe('OpenAI multimodal array content', () => {
     it('reports the failing path in 400 validation errors', async () => {
       const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
         messages: [{ role: 'user', content: 42 }],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).toBe(400);
       // Path-qualified detail ("messages.0...") instead of a bare "Invalid input"
       expect(body.error.message).toMatch(/messages\.0/);
@@ -281,7 +280,7 @@ describe('OpenAI multimodal array content', () => {
           { role: 'tool', tool_call_id: '', content: '/home' },
           { role: 'user', content: 'thanks' },
         ],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).not.toBe(400);
       if (status === 400) throw new Error(`unexpected 400: ${JSON.stringify(body)}`);
     });
@@ -294,7 +293,7 @@ describe('OpenAI multimodal array content', () => {
           { role: 'tool', tool_call_id: 'c1', content: null },
           { role: 'user', content: 'ok' },
         ],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).not.toBe(400);
       if (status === 400) throw new Error(`unexpected 400: ${JSON.stringify(body)}`);
     });
@@ -306,7 +305,7 @@ describe('OpenAI multimodal array content', () => {
           { role: 'function', name: 'get_weather', content: '{"temp": 20}' },
           { role: 'user', content: 'thanks' },
         ],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).not.toBe(400);
       if (status === 400) throw new Error(`unexpected 400: ${JSON.stringify(body)}`);
     });
@@ -316,7 +315,7 @@ describe('OpenAI multimodal array content', () => {
         const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
           max_tokens: value,
           messages: [{ role: 'user', content: 'hi' }],
-        }, authHeaders());
+        }, await authHeaders());
         expect(status).not.toBe(400);
         if (status === 400) throw new Error(`unexpected 400 for max_tokens ${value}: ${JSON.stringify(body)}`);
       }
@@ -327,7 +326,7 @@ describe('OpenAI multimodal array content', () => {
         tool_choice: 'any',
         tools: [{ function: { name: 'ls', parameters: { type: 'object', properties: {} } } }],
         messages: [{ role: 'user', content: 'hi' }],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).not.toBe(400);
       if (status === 400) throw new Error(`unexpected 400: ${JSON.stringify(body)}`);
     });
@@ -349,7 +348,7 @@ describe('OpenAI multimodal array content', () => {
           },
           { role: 'user', content: 'Che modello sei' },
         ],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).not.toBe(400);
       if (status === 400) throw new Error(`unexpected 400: ${JSON.stringify(body)}`);
     });
@@ -360,7 +359,7 @@ describe('OpenAI multimodal array content', () => {
         tool_choice: null,
         parallel_tool_calls: null,
         messages: [{ role: 'user', content: 'hi' }],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).not.toBe(400);
       if (status === 400) throw new Error(`unexpected 400: ${JSON.stringify(body)}`);
     });
@@ -395,7 +394,7 @@ describe('OpenAI multimodal array content', () => {
           { role: 'assistant', content: 'ancora', tool_calls: [] },
           { role: 'user', content: 'Che modello sei' },
         ],
-      }, authHeaders());
+      }, await authHeaders());
       expect(status).toBe(200);
       expect(body.choices[0].message.content).toBe('ok');
     });

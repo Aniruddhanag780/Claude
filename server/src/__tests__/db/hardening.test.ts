@@ -55,8 +55,8 @@ afterEach(() => {
 });
 
 describe('database runtime hardening', () => {
-  it('sets a busy timeout so concurrent writers wait instead of erroring', () => {
-    const db = connectDb(tempDbPath());
+  it('sets a busy timeout so concurrent writers wait instead of erroring', async () => {
+    const db = await connectDb(tempDbPath());
     // pragma() returns a scalar or a row list depending on driver; normalise.
     const raw = db.pragma('busy_timeout');
     const value = Array.isArray(raw)
@@ -65,8 +65,8 @@ describe('database runtime hardening', () => {
     expect(value).toBe(5000);
   });
 
-  it('keeps foreign keys and WAL on', () => {
-    const db = connectDb(tempDbPath());
+  it('keeps foreign keys and WAL on', async () => {
+    const db = await connectDb(tempDbPath());
     const fk = db.pragma('foreign_keys');
     const fkValue = Array.isArray(fk)
       ? Number((fk[0] as Record<string, unknown>).foreign_keys)
@@ -88,21 +88,21 @@ describe('database runtime hardening', () => {
   // synthesizes 0o666 there and chmod cannot clear it, so the assertion failed
   // whether or not the file was protected.
 
-  itPosix('restricts the database file to the owner', () => {
+  itPosix('restricts the database file to the owner', async () => {
     const dbPath = tempDbPath();
-    connectDb(dbPath);
+    await connectDb(dbPath);
 
     const mode = fs.statSync(dbPath).mode & 0o777;
     expect(mode & 0o077).toBe(0);
   });
 
-  itPosix('restricts the WAL sidecars once they exist', () => {
+  itPosix('restricts the WAL sidecars once they exist', async () => {
     const dbPath = tempDbPath();
-    const db = connectDb(dbPath);
+    const db = await connectDb(dbPath);
     // Force a write so -wal/-shm are created, then reconnect to chmod them.
     db.exec('CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY)');
     db.exec('INSERT INTO probe (id) VALUES (1)');
-    connectDb(dbPath);
+    await connectDb(dbPath);
 
     for (const suffix of ['-wal', '-shm']) {
       const target = `${dbPath}${suffix}`;
@@ -112,9 +112,9 @@ describe('database runtime hardening', () => {
     }
   });
 
-  itWindows('restricts the database file to the owner', () => {
+  itWindows('restricts the database file to the owner', async () => {
     const dbPath = tempDbPath();
-    connectDb(dbPath);
+    await connectDb(dbPath);
 
     const entries = aclEntries(dbPath);
     // Inherited ACEs are where the extra principals come from: a file created
@@ -126,13 +126,13 @@ describe('database runtime hardening', () => {
     expect(entries).toHaveLength(3);
   });
 
-  itWindows('restricts the WAL sidecars once they exist', () => {
+  itWindows('restricts the WAL sidecars once they exist', async () => {
     const dbPath = tempDbPath();
-    const db = connectDb(dbPath);
+    const db = await connectDb(dbPath);
     // Force a write so -wal/-shm are created, then reconnect to harden them.
     db.exec('CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY)');
     db.exec('INSERT INTO probe (id) VALUES (1)');
-    connectDb(dbPath);
+    await connectDb(dbPath);
 
     let checked = 0;
     for (const suffix of ['-wal', '-shm']) {
@@ -152,17 +152,17 @@ describe('database runtime hardening', () => {
     expect(checked).toBeGreaterThan(0);
   });
 
-  itWindows('leaves an already-restricted file unchanged when reconnecting', () => {
+  itWindows('leaves an already-restricted file unchanged when reconnecting', async () => {
     const dbPath = tempDbPath();
-    connectDb(dbPath);
+    await connectDb(dbPath);
     const first = aclEntries(dbPath);
-    connectDb(dbPath);
+    await connectDb(dbPath);
 
     expect(aclEntries(dbPath)).toEqual(first);
   });
 
   it('works for an in-memory database without touching the filesystem', () => {
-    expect(() => connectDb(':memory:')).not.toThrow();
+    expect(async () => await connectDb(':memory:')).not.toThrow();
   });
 });
 
@@ -223,8 +223,8 @@ describe('WAL sidecars on a normal start', () => {
   // the ACL onto the new child, while POSIX never propagates modes and instead
   // makes the child unreachable by clearing the directory's search bit.
 
-  function connectAndWrite(dbPath: string): void {
-    const db = connectDb(dbPath);
+  async function connectAndWrite(dbPath: string): void {
+    const db = await connectDb(dbPath);
     // Deliberately no second connectDb: this must hold for a process that opens
     // the database exactly once, which is what the server does.
     db.exec('CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY)');
@@ -235,9 +235,9 @@ describe('WAL sidecars on a normal start', () => {
     return ['-wal', '-shm'].map(s => `${dbPath}${s}`).filter(p => fs.existsSync(p));
   }
 
-  itPosix('makes the directory it created unreachable to other accounts', () => {
+  itPosix('makes the directory it created unreachable to other accounts', async () => {
     const { dataDir, dbPath } = unbornDataDir();
-    connectAndWrite(dbPath);
+    await connectAndWrite(dbPath);
 
     expect(sidecars(dbPath).length).toBeGreaterThan(0);
     expect(fs.statSync(dataDir).mode & 0o077).toBe(0);
@@ -246,9 +246,9 @@ describe('WAL sidecars on a normal start', () => {
     expect(fs.statSync(dataDir).mode & 0o700).toBe(0o700);
   });
 
-  itWindows('gives the sidecars the restricted ACL by inheritance', () => {
+  itWindows('gives the sidecars the restricted ACL by inheritance', async () => {
     const { dataDir, dbPath } = unbornDataDir();
-    connectAndWrite(dbPath);
+    await connectAndWrite(dbPath);
 
     const dirEntries = aclEntries(dataDir);
     expect(dirEntries.filter(e => e.includes('(I)'))).toEqual([]);
@@ -266,21 +266,21 @@ describe('WAL sidecars on a normal start', () => {
     }
   });
 
-  itPosix('leaves a directory it did not create exactly as it found it', () => {
+  itPosix('leaves a directory it did not create exactly as it found it', async () => {
     // The safety property that makes the default acceptable. A group-readable
     // shared directory must come out of connectDb unchanged.
     const dir = existingDir();
     fs.chmodSync(dir, 0o755);
-    connectAndWrite(path.join(dir, 'freeapi.db'));
+    await connectAndWrite(path.join(dir, 'freeapi.db'));
 
     expect(fs.statSync(dir).mode & 0o777).toBe(0o755);
   });
 
-  itPosix('hardens that same directory once the operator opts in', () => {
+  itPosix('hardens that same directory once the operator opts in', async () => {
     const dir = existingDir();
     fs.chmodSync(dir, 0o755);
     process.env.FREEAPI_DB_DIR_HARDENING = '1';
-    connectAndWrite(path.join(dir, 'freeapi.db'));
+    await connectAndWrite(path.join(dir, 'freeapi.db'));
 
     expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
   });

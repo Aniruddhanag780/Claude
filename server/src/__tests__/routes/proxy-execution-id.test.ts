@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #1102 follow-up: `execution_id` must be on EVERY JSON body the chat
 // completion route sends — success and error alike — or clients cannot rely on
@@ -33,8 +34,8 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, headers: res.headers, text, body: json };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 const sse = (...payloads: (object | string)[]) =>
@@ -76,18 +77,18 @@ function mockUpstream(opts: { fail?: boolean; stream?: boolean } = {}) {
 describe('execution_id on chat completion bodies (#1102)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
     const addKey = await request(app, 'POST', '/api/keys',
       { platform: 'groq', key: 'gsk_execution_id_test_key', label: 'execution-id' });
     expect(addKey.status).toBe(201);
@@ -101,7 +102,7 @@ describe('execution_id on chat completion bodies (#1102)', () => {
     mockUpstream();
     const { status, body, headers } = await request(app, 'POST', '/v1/chat/completions', {
       model: 'groq/compound-mini', messages: [{ role: 'user', content: 'hello' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(typeof body.execution_id).toBe('string');
@@ -113,7 +114,7 @@ describe('execution_id on chat completion bodies (#1102)', () => {
   it('the 400 validation rejection carries execution_id', async () => {
     const { status, body, headers } = await request(app, 'POST', '/v1/chat/completions', {
       model: 'groq/compound-mini', messages: 'not-an-array',
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(400);
     expect(body.error.type).toBe('invalid_request_error');
@@ -124,7 +125,7 @@ describe('execution_id on chat completion bodies (#1102)', () => {
     mockUpstream({ fail: true });
     const { status, body, headers } = await request(app, 'POST', '/v1/chat/completions', {
       model: 'groq/compound-mini', messages: [{ role: 'user', content: 'hello' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(502);
     expect(body.error).toBeTruthy();
@@ -135,7 +136,7 @@ describe('execution_id on chat completion bodies (#1102)', () => {
     mockUpstream({ stream: true });
     const r = await request(app, 'POST', '/v1/chat/completions', {
       model: 'groq/compound-mini', stream: true, messages: [{ role: 'user', content: 'hello' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(r.status).toBe(200);
     expect(r.headers.get('x-request-id')).toBeTruthy();

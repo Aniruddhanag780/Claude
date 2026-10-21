@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getUnifiedApiKey } from '../../db/index.js';
+import { getUnifiedApiKey } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(app: Express, method: string, path: string, body?: any, headers: Record<string, string> = {}) {
   const server = app.listen(0, '127.0.0.1');
@@ -27,9 +28,9 @@ async function request(app: Express, method: string, path: string, body?: any, h
 describe('Proxy authentication and CORS', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 
@@ -56,7 +57,7 @@ describe('Proxy authentication and CORS', () => {
   it('accepts the unified key supplied via the x-api-key header', async () => {
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
-    }, { 'x-api-key': getUnifiedApiKey() });
+    }, { 'x-api-key': await getUnifiedApiKey() });
 
     // Auth passes — it gets past the 401 gate. (Routing then fails because no
     // provider keys are configured in this test DB, which is fine: we only

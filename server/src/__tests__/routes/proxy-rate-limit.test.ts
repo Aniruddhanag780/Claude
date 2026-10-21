@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(app: Express, headers: Record<string, string> = {}) {
   const server = app.listen(0, '127.0.0.1');
@@ -27,9 +27,9 @@ async function request(app: Express, headers: Record<string, string> = {}) {
 describe('Proxy per-IP rate limiting (#35 item #6)', () => {
   const originalRpm = process.env.PROXY_RATE_LIMIT_RPM;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   afterAll(() => {

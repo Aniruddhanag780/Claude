@@ -2,12 +2,13 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { requireAuth } from '../../middleware/requireAuth.js';
 import { resolveProvider } from '../../providers/index.js';
 import { healthRouter } from '../../routes/health.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // POST /api/health/quota/:keyId — the manual override of the #1403 15-minute
 // health-poll throttle (#1404). Only the provider probe is replaced; the route,
@@ -21,8 +22,8 @@ describe('POST /api/health/quota/:keyId (#1403)', () => {
 
   beforeAll(async () => {
     vi.stubEnv('ENCRYPTION_KEY', '0'.repeat(64));
-    initDb(':memory:');
-    token = mintDashboardToken();
+    await initTestDb();
+    token = await mintDashboardToken();
     const app = express();
     app.use(express.json());
     app.use('/api/health', requireAuth, healthRouter);
@@ -36,25 +37,23 @@ describe('POST /api/health/quota/:keyId (#1403)', () => {
     vi.unstubAllEnvs();
   });
 
-  const addKey = (platform: string, baseUrl: string | null = null) => {
+  const addKey = async (platform: string, baseUrl: string | null = null) => {
     const enc = encrypt('sk-test-secret');
-    return getDb().prepare(
-      'INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, base_url, status, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, 1)',
-    ).run(platform, `test ${platform}`, enc.encrypted, enc.iv, enc.authTag, baseUrl, 'healthy').lastInsertRowid as number;
+    return ((await getDb().run('INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, base_url, status, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, 1) RETURNING id', [platform, `test ${platform}`, enc.encrypted, enc.iv, enc.authTag, baseUrl, 'healthy']))).lastInsertRowid as number;
   };
 
   const post = (path: string) =>
     fetch(`${url}/api/health${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
-    getDb().prepare('DELETE FROM provider_quota_state').run();
-    getDb().prepare('DELETE FROM provider_quota_observations').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM api_keys'));
+    (await getDb().run('DELETE FROM provider_quota_state'));
+    (await getDb().run('DELETE FROM provider_quota_observations'));
     vi.restoreAllMocks();
   });
 
   it('records and returns a fresh quota_api reading for a probed platform', async () => {
-    const keyId = addKey('openrouter');
+    const keyId = await addKey('openrouter');
     // Drive the real fetchQuota → recordQuotaObservation path: mock only the
     // upstream HTTP call the provider instance makes, via its fetch override.
     const provider = resolveProvider('openrouter')!;
@@ -80,7 +79,7 @@ describe('POST /api/health/quota/:keyId (#1403)', () => {
   });
 
   it('a platform without a quota endpoint answers 400', async () => {
-    const keyId = addKey('mistral');
+    const keyId = await addKey('mistral');
     const res = await post(`/quota/${keyId}`);
     expect(res.status).toBe(400);
     const body = await res.json() as any;
@@ -93,7 +92,7 @@ describe('POST /api/health/quota/:keyId (#1403)', () => {
   });
 
   it('a probe failure answers recorded:false, never a 500', async () => {
-    const keyId = addKey('openrouter');
+    const keyId = await addKey('openrouter');
     vi.spyOn(resolveProvider('openrouter')!, 'fetchQuota').mockRejectedValue(new Error('socket hang up'));
     const res = await post(`/quota/${keyId}`);
     // pollKeyQuota is failure-silent by construction: the route still answers.

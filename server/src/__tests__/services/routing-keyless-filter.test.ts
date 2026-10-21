@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { routeRequest, setRoutingStrategy } from '../../services/router.js';
 import * as ratelimit from '../../services/ratelimit.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { routingExhaustionBody } from '../../lib/fallback-loop.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // A model whose PLATFORM has no enabled+healthy key can never produce a route:
 // selectKeyForModel's first query comes back empty for it, every request. So it
@@ -29,19 +30,17 @@ vi.mock('../../lib/crypto.js', async () => {
 const ORIGINAL_DEV_MODE = process.env.DEV_MODE;
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 
-function insertModel(platform: string, modelId: string, priority: number): number {
+async function insertModel(platform: string, modelId: string, priority: number): number {
   const db = getDb();
-  db.prepare(
-    "INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES (?, ?, ?, 1, 1, 1)"
-  ).run(platform, modelId, modelId);
-  const id = (db.prepare('SELECT id FROM models WHERE model_id = ?').get(modelId) as any).id;
-  db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, priority);
+  (await db.run("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES (?, ?, ?, 1, 1, 1) RETURNING id", [platform, modelId, modelId]));
+  const id = ((await db.get('SELECT id FROM models WHERE model_id = ?', [modelId])) as any).id;
+  (await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1) RETURNING id', [id, priority]));
   return id;
 }
 
-function routeError(): any {
+async function routeError(): any {
   try {
-    routeRequest(100);
+    await routeRequest(100);
   } catch (e) {
     return e;
   }
@@ -49,25 +48,23 @@ function routeError(): any {
 }
 
 describe('keyless-platform prefilter', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.DEV_MODE = 'true';
     process.env.NODE_ENV = 'test';
-    initDb(':memory:');
-    setRoutingStrategy('priority');
+    await initTestDb();
+    await setRoutingStrategy('priority');
     const db = getDb();
-    db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
-    db.prepare('DELETE FROM fallback_config').run();
-    db.prepare('DELETE FROM profile_models').run();
-    db.prepare('DELETE FROM models').run();
-    db.prepare('DELETE FROM api_keys').run();
+    (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
+    (await db.run('DELETE FROM fallback_config'));
+    (await db.run('DELETE FROM profile_models'));
+    (await db.run('DELETE FROM models'));
+    (await db.run('DELETE FROM api_keys'));
 
     // google is keyed; cohere and mistral are in the catalog with no key at all.
-    insertModel('google', 'gemini-1.5-pro', 1);
-    insertModel('cohere', 'command-r', 2);
-    insertModel('mistral', 'mistral-small', 3);
-    db.prepare(
-      "INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('google', 'Key A', 'enc', 'iv', 'tag', 'healthy', 1)"
-    ).run();
+    await insertModel('google', 'gemini-1.5-pro', 1);
+    await insertModel('cohere', 'command-r', 2);
+    await insertModel('mistral', 'mistral-small', 3);
+    (await db.run("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('google', 'Key A', 'enc', 'iv', 'tag', 'healthy', 1) RETURNING id"));
 
     vi.clearAllMocks();
     (ratelimit.canMakeRequest as any).mockReturnValue(true);
@@ -82,17 +79,17 @@ describe('keyless-platform prefilter', () => {
     else process.env.NODE_ENV = ORIGINAL_NODE_ENV;
   });
 
-  it('still routes to the keyed model (no behavior change on the happy path)', () => {
-    expect(routeRequest(100).modelId).toBe('gemini-1.5-pro');
+  it('still routes to the keyed model (no behavior change on the happy path)', async () => {
+    expect((await routeRequest(100)).modelId).toBe('gemini-1.5-pro');
   });
 
   // The absent diag line IS the proof the row was never walked: a keyless model
   // that reaches selectKeyForModel always pushes "no enabled+healthy key for
   // platform" before returning null.
-  it('keeps keyless models out of the walk, the diagnostics, and the route count', () => {
+  it('keeps keyless models out of the walk, the diagnostics, and the route count', async () => {
     (ratelimit.canMakeRequest as any).mockReturnValue(false); // exhaust the keyed model
 
-    const err = routeError();
+    const err = await routeError();
     // Walked rows + exactly ONE aggregate line for the two keyless platforms.
     expect(err.diagnostics).toHaveLength(2);
     expect(err.diagnostics[0]).toContain('google/gemini-1.5-pro');
@@ -104,13 +101,13 @@ describe('keyless-platform prefilter', () => {
     expect(err.message).not.toContain('no usable key configured');
   });
 
-  it('exempts an explicitly pinned model so it reports against its own label', () => {
+  it('exempts an explicitly pinned model so it reports against its own label', async () => {
     const db = getDb();
-    const cohereId = (db.prepare("SELECT id FROM models WHERE model_id = 'command-r'").get() as any).id;
+    const cohereId = ((await db.get("SELECT id FROM models WHERE model_id = 'command-r'")) as any).id;
 
     let err: any;
     try {
-      routeRequest(100, undefined, cohereId);
+      await routeRequest(100, undefined, cohereId);
     } catch (e) {
       err = e;
     }
@@ -120,7 +117,7 @@ describe('keyless-platform prefilter', () => {
 
     (ratelimit.canMakeRequest as any).mockReturnValue(false);
     try {
-      routeRequest(100, undefined, cohereId);
+      await routeRequest(100, undefined, cohereId);
     } catch (e) {
       err = e;
     }
@@ -130,15 +127,15 @@ describe('keyless-platform prefilter', () => {
     expect(err.message).toContain('1 model skipped: no key configured for their platform.');
   });
 
-  it('reports the skip count even when every candidate is keyless', () => {
-    getDb().prepare('DELETE FROM api_keys').run();
-    const err = routeError();
+  it('reports the skip count even when every candidate is keyless', async () => {
+    (await getDb().run('DELETE FROM api_keys'));
+    const err = await routeError();
     expect(err.message).toContain('3 models skipped: no key configured for their platform.');
     // A fully-unconfigured pool must still classify as config (503), which
     // routingExhaustionBody reads off the diagnostics, not the message.
     expect(err.diagnostics).toEqual([
       '3 model(s) skipped: no enabled+healthy key for platform (cohere, google, mistral)',
     ]);
-    expect(routingExhaustionBody(err).status).toBe(503);
+    expect((await routingExhaustionBody(err)).status).toBe(503);
   });
 });

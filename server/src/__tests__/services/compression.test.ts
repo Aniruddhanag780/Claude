@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { ChatMessage } from '@freellmapi/shared/types.js';
-import { initDb } from '../../db/index.js';
 import {
   DEFAULT_COMPRESSION_CONFIG,
   getCompressionConfig,
@@ -27,6 +26,7 @@ import { clearCompressionStats, getCompressionStats } from '../../services/compr
 import type { CompressionConfig, CompressionMode } from '../../services/compression/types.js';
 import goldenCorpus from '../fixtures/compression-golden.json';
 import { computeCacheKey } from '../../services/cache.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 function config(mode: CompressionMode, patch: Partial<CompressionConfig> = {}): CompressionConfig {
   return {
@@ -44,16 +44,16 @@ function msg(role: ChatMessage['role'], content: string, extra: Partial<ChatMess
 }
 
 describe('compression configuration', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     delete process.env.FREELLMAPI_COMPRESSION;
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  it('uses setting → env → off precedence and persists complete engine defaults', () => {
+  it('uses setting → env → off precedence and persists complete engine defaults', async () => {
     process.env.FREELLMAPI_COMPRESSION = 'lossless';
-    expect(getCompressionConfig().mode).toBe('lossless');
-    const saved = setCompressionConfig({
+    expect((await getCompressionConfig()).mode).toBe('lossless');
+    const saved = await setCompressionConfig({
       mode: 'standard',
       engines: { toolfilter: { enabled: true, intensity: 'aggressive' } },
     });
@@ -181,13 +181,13 @@ describe('compression engines', () => {
     _clearPrefixFreezeForTesting();
   });
 
-  it('applies whitespace hygiene and exact block dedup in lossless mode', () => {
+  it('applies whitespace hygiene and exact block dedup in lossless mode', async () => {
     const block = [
       'alpha beta gamma delta with enough repeated prose to qualify',
       'epsilon zeta eta theta with another deliberately long line',
       'iota kappa lambda mu and a third substantial repeated line',
     ].join('\n');
-    const result = compressRequest([
+    const result = await compressRequest([
       msg('system', 'Be useful.   \n\n\n\nBe precise.'),
       msg('user', `${block}\n\nquestion one`),
       msg('assistant', 'ack'),
@@ -214,13 +214,13 @@ describe('compression engines', () => {
     }
   });
 
-  it('compacts pretty tabular JSON only when smaller and passes the trust gate', () => {
+  it('compacts pretty tabular JSON only when smaller and passes the trust gate', async () => {
     const rows = Array.from({ length: 20 }, (_, index) => ({
       id: index,
       provider: `provider-${index}`,
       healthy: true,
     }));
-    const result = compressRequest([
+    const result = await compressRequest([
       msg('assistant', null as unknown as string, {
         content: null,
         tool_calls: [{
@@ -236,13 +236,13 @@ describe('compression engines', () => {
     expect(result.stats.discardedByGate).toEqual([]);
   });
 
-  it('finds embedded JSON tables after malformed prose without rescanning nested arrays', () => {
+  it('finds embedded JSON tables after malformed prose without rescanning nested arrays', async () => {
     const rows = Array.from({ length: 12 }, (_, index) => ({
       id: index,
       status: 'ready',
     }));
     const content = `log message with an unmatched " quote\npayload=${JSON.stringify({ rows }, null, 2)}`;
-    const result = compressRequest([
+    const result = await compressRequest([
       msg('tool', content),
     ], { config: config('lossless'), recordStats: false });
     expect(result.messages[0].content).toContain('[[json-table:v1');
@@ -250,7 +250,7 @@ describe('compression engines', () => {
     expect(result.stats.discardedByGate).toEqual([]);
   });
 
-  it('filters long tool output while preserving every error, stack, number, path, and diff hunk', () => {
+  it('filters long tool output while preserving every error, stack, number, path, and diff hunk', async () => {
     const lines = [
       ...Array.from({ length: 220 }, () => 'building package alpha'),
       'Error: compilation failed',
@@ -258,7 +258,7 @@ describe('compression engines', () => {
       '@@ -10,2 +10,3 @@',
       'exit_code=1',
     ];
-    const result = compressRequest([
+    const result = await compressRequest([
       msg('assistant', '', {
         tool_calls: [{
           id: 'call_build',
@@ -277,9 +277,9 @@ describe('compression engines', () => {
     expect(result.stats.discardedByGate).toEqual([]);
   });
 
-  it('supersedes an earlier read only when the later copy preserves protected facts', () => {
+  it('supersedes an earlier read only when the later copy preserves protected facts', async () => {
     const file = 'export const port = 4321;\n// /repo/src/config.ts\nexport const enabled = true;';
-    const result = compressRequest([
+    const result = await compressRequest([
       msg('assistant', '', { tool_calls: [{ id: 'r1', type: 'function', function: { name: 'read_file', arguments: '{"path":"/repo/src/config.ts"}' } }] }),
       msg('tool', file, { tool_call_id: 'r1' }),
       msg('assistant', '', { tool_calls: [{ id: 'r2', type: 'function', function: { name: 'read_file', arguments: '{"path":"/repo/src/config.ts"}' } }] }),
@@ -289,19 +289,19 @@ describe('compression engines', () => {
     expect(result.messages[3].content).toBe(file);
   });
 
-  it('freezes a recurring system prefix on its third appearance', () => {
+  it('freezes a recurring system prefix on its third appearance', async () => {
     const cfg = config('lossless');
     const messages = [msg('system', 'Stable prefix.   \n\n\n\nKeep this spacing.'), msg('user', 'hello')];
-    expect(compressRequest(messages, { config: cfg, recordStats: false }).messages[0].content)
+    expect((await compressRequest(messages, { config: cfg, recordStats: false })).messages[0].content)
       .toBe('Stable prefix.\n\nKeep this spacing.');
-    compressRequest(messages, { config: cfg, recordStats: false });
-    expect(compressRequest(messages, { config: cfg, recordStats: false }).messages[0].content)
+    await compressRequest(messages, { config: cfg, recordStats: false });
+    expect((await compressRequest(messages, { config: cfg, recordStats: false })).messages[0].content)
       .toBe(messages[0].content);
   });
 
-  it('counts prefix recurrence across requests, not duplicate messages or off-mode traffic', () => {
+  it('counts prefix recurrence across requests, not duplicate messages or off-mode traffic', async () => {
     const duplicated = 'Duplicate system prefix.   \n\n\n\nKeep one copy.';
-    const first = compressRequest([
+    const first = await compressRequest([
       msg('system', duplicated),
       msg('system', duplicated),
       msg('system', duplicated),
@@ -312,13 +312,13 @@ describe('compression engines', () => {
     _clearPrefixFreezeForTesting();
     const offConfig = config('off');
     const messages = [msg('system', 'Off traffic.   \n\n\n\nTracker line.')];
-    compressRequest(messages, { config: offConfig, recordStats: false });
-    compressRequest(messages, { config: offConfig, recordStats: false });
-    const enabled = compressRequest(messages, { config: config('lossless'), recordStats: false });
+    await compressRequest(messages, { config: offConfig, recordStats: false });
+    await compressRequest(messages, { config: offConfig, recordStats: false });
+    const enabled = await compressRequest(messages, { config: config('lossless'), recordStats: false });
     expect(enabled.messages[0].content).toBe('Off traffic.\n\nTracker line.');
   });
 
-  it('uses Unicode query terms when pruning multilingual history', () => {
+  it('uses Unicode query terms when pruning multilingual history', async () => {
     const cfg = config('aggressive');
     for (const engine of Object.values(cfg.engines)) engine.enabled = false;
     cfg.engines.relevance = { enabled: true, maxChars: 260 };
@@ -326,7 +326,7 @@ describe('compression engines', () => {
       '認証 エラー の診断結果は署名検証の失敗です。',
       ...Array.from({ length: 80 }, () => '無関係な古い履歴です。'),
     ].join('\n');
-    const result = compressRequest([
+    const result = await compressRequest([
       msg('assistant', history),
       msg('user', '認証 エラー を修正してください'),
     ], { config: cfg, recordStats: false });
@@ -335,13 +335,13 @@ describe('compression engines', () => {
     expect(result.stats.enginesApplied).toEqual(['relevance']);
   });
 
-  it('arms the aggressive adaptive ladder above the configured trigger unless a header lowers it', () => {
+  it('arms the aggressive adaptive ladder above the configured trigger unless a header lowers it', async () => {
     const payload = 'unprotected context line\n'.repeat(400);
     const cfg = config('lossless', { autoTriggerEstTokens: 100 });
-    const triggered = compressRequest([msg('user', payload)], { config: cfg, recordStats: false });
+    const triggered = await compressRequest([msg('user', payload)], { config: cfg, recordStats: false });
     expect(triggered.mode).toBe('aggressive');
     expect(triggered.stats.compressedChars).toBeLessThan(triggered.stats.originalChars);
-    const lowered = compressRequest([msg('user', payload)], {
+    const lowered = await compressRequest([msg('user', payload)], {
       config: cfg,
       header: 'lossless',
       recordStats: false,
@@ -349,8 +349,8 @@ describe('compression engines', () => {
     expect(lowered.mode).toBe('lossless');
   });
 
-  it('keeps rolling aggregate stats without retaining request bodies', () => {
-    compressRequest([msg('user', 'hello   \n\n\n\nworld')], { config: config('lossless') });
+  it('keeps rolling aggregate stats without retaining request bodies', async () => {
+    await compressRequest([msg('user', 'hello   \n\n\n\nworld')], { config: config('lossless') });
     const stats = getCompressionStats();
     expect(stats.requests).toBe(1);
     expect(stats.compressedRequests).toBe(1);
@@ -363,10 +363,10 @@ describe('compression engines', () => {
       .not.toBe(computeCacheKey({ model: 'auto', messages, compression: 'lossless:v1' }));
   });
 
-  it('runs the scrubbed coding-agent golden corpus with no lossless gate violations', () => {
+  it('runs the scrubbed coding-agent golden corpus with no lossless gate violations', async () => {
     let savedChars = 0;
     for (const fixture of goldenCorpus) {
-      const result = compressRequest(fixture.messages as ChatMessage[], {
+      const result = await compressRequest(fixture.messages as ChatMessage[], {
         config: config('lossless'),
         recordStats: false,
       });
@@ -388,12 +388,12 @@ describe('compression engines', () => {
   // matrix leg still holds the exact caps.
   const slack = process.env.CI && process.env.COVERAGE !== '1' ? 1 : 3;
 
-  it('stays within the 100 KB synchronous performance budget', () => {
+  it('stays within the 100 KB synchronous performance budget', async () => {
     const payload = `${'plain status line without protected tokens\n'.repeat(2_500)}tail`;
     const samples: number[] = [];
     for (let run = 0; run < 12; run += 1) {
       const started = performance.now();
-      compressRequest([msg('tool', payload)], { config: config('lossless'), recordStats: false });
+      await compressRequest([msg('tool', payload)], { config: config('lossless'), recordStats: false });
       samples.push(performance.now() - started);
     }
     samples.sort((a, b) => a - b);
@@ -408,7 +408,7 @@ describe('compression engines', () => {
 
     const unbalancedJson = '['.repeat(100_000);
     const adversarialStarted = performance.now();
-    compressRequest([msg('tool', unbalancedJson)], {
+    await compressRequest([msg('tool', unbalancedJson)], {
       config: config('lossless'),
       recordStats: false,
     });
@@ -416,28 +416,28 @@ describe('compression engines', () => {
 
     const manyBalancedArrays = '[]'.repeat(50_000);
     const balancedStarted = performance.now();
-    compressRequest([msg('tool', manyBalancedArrays)], {
+    await compressRequest([msg('tool', manyBalancedArrays)], {
       config: config('lossless'),
       recordStats: false,
     });
     expect(performance.now() - balancedStarted).toBeLessThan(25 * slack);
   });
 
-  it('stays linear on protected-token-heavy adversarial payloads', () => {
+  it('stays linear on protected-token-heavy adversarial payloads', async () => {
     // A stack-trace-detected rule skips head/tail trimming, so the char-budget
     // pass sees every line; this payload once made it quadratic.
     const traceLines = ['Traceback (most recent call last)'];
     for (let i = 0; i < 20_000; i += 1) {
       traceLines.push(`processing item alpha beta gamma delta run ${'x'.repeat(20)}${i.toString(36)}`);
     }
-    const call = (content: string) => compressRequest([
+    const call = async (content: string) => await compressRequest([
       msg('assistant', '', {
         tool_calls: [{ id: 'c1', type: 'function', function: { name: 'run_command', arguments: '{"command":"python x.py"}' } }],
       }),
       msg('tool', content, { tool_call_id: 'c1' }),
     ], { config: config('standard'), recordStats: false });
     const traceStarted = performance.now();
-    call(traceLines.join('\n'));
+    await call(traceLines.join('\n'));
     expect(performance.now() - traceStarted).toBeLessThan(250 * slack);
 
     // Distinct numeric literals are the highest-cardinality protected kind;
@@ -445,7 +445,7 @@ describe('compression engines', () => {
     const numberLines: string[] = [];
     for (let i = 0; i < 12_000; i += 1) numberLines.push(`metric row ${i * 7 + 1_000_003} value ok`);
     const numbersStarted = performance.now();
-    call(numberLines.join('\n'));
+    await call(numberLines.join('\n'));
     expect(performance.now() - numbersStarted).toBeLessThan(250 * slack);
   });
 });

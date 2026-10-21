@@ -12,9 +12,10 @@ vi.mock('../../services/health.js', () => ({
   markKeyHealthyFromRequest: vi.fn(),
 }));
 
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { newFallbackState, recordRetryableFailure } from '../../lib/fallback-loop.js';
 import { getAllPenalties, isProviderMomentAttributionEnabled, type RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Distinct keyId AND modelDbId per fake route: the router's penalty map and
 // the cooldown store are module-global, so shared ids would leak state.
@@ -38,21 +39,20 @@ function penaltyFor(modelDbId: number) {
   return getAllPenalties().find(p => p.modelDbId === modelDbId);
 }
 
-function cooldownCount(route: RouteResult): number {
-  return (getDb().prepare('SELECT COUNT(*) AS n FROM rate_limit_cooldowns WHERE key_id = ?')
-    .get(route.keyId) as { n: number }).n;
+async function cooldownCount(route: RouteResult): number {
+  return ((await getDb().get('SELECT COUNT(*) AS n FROM rate_limit_cooldowns WHERE key_id = ?', [route.keyId])) as { n: number }).n;
 }
 
 describe('provider-moment attribution in recordRetryableFailure (#1347 PR 1)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     mockCheckKeyHealth.mockReset();
     mockCheckKeyHealth.mockResolvedValue('invalid');
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
     delete process.env.ROUTER_PROVIDER_MOMENT_ATTRIBUTION;
   });
 
@@ -60,50 +60,50 @@ describe('provider-moment attribution in recordRetryableFailure (#1347 PR 1)', (
     delete process.env.ROUTER_PROVIDER_MOMENT_ATTRIBUTION;
   });
 
-  it('feature ON: a 429 benches the key but leaves the model penalty untouched', () => {
+  it('feature ON: a 429 benches the key but leaves the model penalty untouched', async () => {
     process.env.ROUTER_PROVIDER_MOMENT_ATTRIBUTION = '1';
-    expect(isProviderMomentAttributionEnabled()).toBe(true);
+    expect(await isProviderMomentAttributionEnabled()).toBe(true);
 
     const route = fakeRoute();
-    recordRetryableFailure(route, err429(), newFallbackState());
+    await recordRetryableFailure(route, err429(), newFallbackState());
 
     expect(penaltyFor(route.modelDbId)).toBeUndefined();
-    expect(cooldownCount(route)).toBe(1);
+    expect(await cooldownCount(route)).toBe(1);
   });
 
-  it('feature OFF (default): a 429 still penalizes the model — current behaviour preserved', () => {
+  it('feature OFF (default): a 429 still penalizes the model — current behaviour preserved', async () => {
     const route = fakeRoute();
-    recordRetryableFailure(route, err429(), newFallbackState());
+    await recordRetryableFailure(route, err429(), newFallbackState());
 
     expect(penaltyFor(route.modelDbId)).toBeDefined();
     expect(penaltyFor(route.modelDbId)!.penalty).toBeGreaterThan(0);
   });
 
-  it('feature ON: a timeout benches the key but leaves the model penalty untouched', () => {
+  it('feature ON: a timeout benches the key but leaves the model penalty untouched', async () => {
     process.env.ROUTER_PROVIDER_MOMENT_ATTRIBUTION = '1';
 
     const route = fakeRoute();
-    recordRetryableFailure(route, errTimeout(), newFallbackState());
+    await recordRetryableFailure(route, errTimeout(), newFallbackState());
 
     expect(penaltyFor(route.modelDbId)).toBeUndefined();
-    expect(cooldownCount(route)).toBe(1);
+    expect(await cooldownCount(route)).toBe(1);
   });
 
-  it('feature ON: a 5xx benches the key but leaves the model penalty untouched', () => {
+  it('feature ON: a 5xx benches the key but leaves the model penalty untouched', async () => {
     process.env.ROUTER_PROVIDER_MOMENT_ATTRIBUTION = '1';
 
     const route = fakeRoute();
-    recordRetryableFailure(route, err500(), newFallbackState());
+    await recordRetryableFailure(route, err500(), newFallbackState());
 
     expect(penaltyFor(route.modelDbId)).toBeUndefined();
-    expect(cooldownCount(route)).toBe(1);
+    expect(await cooldownCount(route)).toBe(1);
   });
 
-  it('feature ON: a provider 400 is NOT a provider moment — the model penalty stays', () => {
+  it('feature ON: a provider 400 is NOT a provider moment — the model penalty stays', async () => {
     process.env.ROUTER_PROVIDER_MOMENT_ATTRIBUTION = '1';
 
     const route = fakeRoute();
-    recordRetryableFailure(route, errBadReq(), newFallbackState());
+    await recordRetryableFailure(route, errBadReq(), newFallbackState());
 
     expect(penaltyFor(route.modelDbId)).toBeDefined();
     expect(penaltyFor(route.modelDbId)!.penalty).toBeGreaterThan(0);

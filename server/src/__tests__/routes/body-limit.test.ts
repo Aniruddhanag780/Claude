@@ -2,7 +2,8 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { loadConfig } from '../../lib/config.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function post(app: Express, path: string, body: unknown, key: string) {
   const server = app.listen(0, '127.0.0.1');
@@ -29,9 +30,9 @@ describe('Inference body limits (vision payloads)', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
     key = getUnifiedApiKey();
   });
@@ -70,9 +71,9 @@ describe('Over-limit bodies (configurable ceiling)', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     // Tiny ceiling so the rejection path is testable without a 50MB body.
     app = createApp({ ...loadConfig(), requestBodyLimitBytes: 1024 });
     key = getUnifiedApiKey();
@@ -89,9 +90,7 @@ describe('Over-limit bodies (configurable ceiling)', () => {
 
     // The rejection is visible in request analytics like any failed request,
     // not only in the container log.
-    const row = getDb().prepare(
-      "SELECT platform, model_id, status, error FROM requests WHERE model_id = 'payload-too-large' ORDER BY id DESC LIMIT 1",
-    ).get() as { platform: string; model_id: string; status: string; error: string } | undefined;
+    const row = await getDb().get("SELECT platform, model_id, status, error FROM requests WHERE model_id = 'payload-too-large' ORDER BY id DESC LIMIT 1") as { platform: string; model_id: string; status: string; error: string } | undefined;
     expect(row?.platform).toBe('proxy');
     expect(row?.status).toBe('error');
     expect(row?.error).toContain('Request body too large');

@@ -11,7 +11,7 @@ vi.mock('../../services/health.js', () => ({
   markKeyHealthyFromRequest: vi.fn(),
 }));
 
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import {
   newFallbackState,
@@ -25,18 +25,18 @@ import {
   clearAllPenalties,
 } from '../../services/router.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const PLATFORM = 'groq';
 let keyId = 0;
 let modelSmall: { id: number; model_id: string };
 let modelLarge: { id: number; model_id: string };
 
-function insertKey(label: string): number {
+async function insertKey(label: string): number {
   const { encrypted, iv, authTag } = encrypt(`test-${label}`);
-  const info = getDb().prepare(`
+  const info = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, ?, ?, ?, ?, 'healthy', 1)
-  `).run(PLATFORM, label, encrypted, iv, authTag);
+    VALUES (?, ?, ?, ?, ?, 'healthy', 1) RETURNING id`, [PLATFORM, label, encrypted, iv, authTag]));
   return Number(info.lastInsertRowid);
 }
 
@@ -54,27 +54,25 @@ function routeFor(model: { id: number; model_id: string }, kId: number): RouteRe
   };
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
   const db = getDb();
-  db.prepare('DELETE FROM api_keys').run();
-  keyId = insertKey('key');
+  (await db.run('DELETE FROM api_keys'));
+  keyId = await insertKey('key');
   resetKeyLocalityCache();
   // Pick two Groq models so the rest of the test can pin them in the
   // active chain. The two ids only need to be different.
-  const models = db.prepare(
-    "SELECT id, model_id, tpm_limit FROM models WHERE platform = ? ORDER BY tpm_limit ASC LIMIT 2"
-  ).all(PLATFORM) as { id: number; model_id: string; tpm_limit: number | null }[];
+  const models = (await db.all("SELECT id, model_id, tpm_limit FROM models WHERE platform = ? ORDER BY tpm_limit ASC LIMIT 2", [PLATFORM])) as { id: number; model_id: string; tpm_limit: number | null }[];
   expect(models.length).toBe(2);
   [modelSmall, modelLarge] = models;
 });
 
-beforeEach(() => {
-  getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+beforeEach(async () => {
+  (await getDb().run('DELETE FROM rate_limit_cooldowns'));
   // Drop any learned-limit overrides from earlier cases so the tpm_limit
   // floor isn't carrying state between tests.
-  getDb().prepare('UPDATE models SET tpm_limit = NULL WHERE platform = ?').run(PLATFORM);
+  (await getDb().run('UPDATE models SET tpm_limit = NULL WHERE platform = ?', [PLATFORM]));
   resetModelFailureWindows();
 });
 
@@ -84,14 +82,14 @@ describe('FallbackState.observedTotalTokens (#507)', () => {
     expect(state.observedTotalTokens).toBeUndefined();
   });
 
-  it('stays undefined when a non-size retryable failure runs', () => {
+  it('stays undefined when a non-size retryable failure runs', async () => {
     const state = newFallbackState();
     const err = Object.assign(new Error('Groq API error 500: upstream'), { status: 500 });
-    recordRetryableFailure(routeFor(modelSmall, keyId), err, state);
+    await recordRetryableFailure(routeFor(modelSmall, keyId), err, state);
     expect(state.observedTotalTokens).toBeUndefined();
   });
 
-  it('stays undefined when the size error has no parseable REQUESTED number', () => {
+  it('stays undefined when the size error has no parseable REQUESTED number', async () => {
     const state = newFallbackState();
     // Real Groq body with no "Requested N" — the parser must refuse and the
     // estimate stays at the local input guess.
@@ -99,19 +97,19 @@ describe('FallbackState.observedTotalTokens (#507)', () => {
       new Error('Groq API error 413: Request Entity Too Large'),
       { status: 413 },
     );
-    recordRetryableFailure(routeFor(modelSmall, keyId), err, state);
+    await recordRetryableFailure(routeFor(modelSmall, keyId), err, state);
     expect(state.observedTotalTokens).toBeUndefined();
   });
 
-  it('latches the parsed size from a Groq 413 onto state', () => {
+  it('latches the parsed size from a Groq 413 onto state', async () => {
     const state = newFallbackState();
     const msg = 'Groq API error 413: ... Limit 8000, Requested 36532, please reduce ...';
     const err = Object.assign(new Error(msg), { status: 413 });
-    recordRetryableFailure(routeFor(modelSmall, keyId), err, state);
+    await recordRetryableFailure(routeFor(modelSmall, keyId), err, state);
     expect(state.observedTotalTokens).toBe(36532);
   });
 
-  it('latches the parsed size from an OpenRouter 400 context-length body', () => {
+  it('latches the parsed size from an OpenRouter 400 context-length body', async () => {
     const state = newFallbackState();
     const msg = "OpenRouter API error 400: ... you requested about 68982 tokens ...";
     const err = Object.assign(new Error(msg), { status: 400 });
@@ -119,11 +117,11 @@ describe('FallbackState.observedTotalTokens (#507)', () => {
       ...routeFor(modelSmall, keyId),
       platform: 'openrouter',
     };
-    recordRetryableFailure(openaiRoute, err, state);
+    await recordRetryableFailure(openaiRoute, err, state);
     expect(state.observedTotalTokens).toBe(68982);
   });
 
-  it('latches the parsed size from a Cloudflare 413', () => {
+  it('latches the parsed size from a Cloudflare 413', async () => {
     const state = newFallbackState();
     const msg = 'Cloudflare API error 413: AiError: Ai: The estimated number of input and maximum output tokens (24092) exceeded this model context window limit (24000).';
     const err = Object.assign(new Error(msg), { status: 413 });
@@ -131,11 +129,11 @@ describe('FallbackState.observedTotalTokens (#507)', () => {
       ...routeFor(modelSmall, keyId),
       platform: 'cloudflare',
     };
-    recordRetryableFailure(cfRoute, err, state);
+    await recordRetryableFailure(cfRoute, err, state);
     expect(state.observedTotalTokens).toBe(24092);
   });
 
-  it('does NOT latch github limit-only bodies (parser refuses — see provider-size-parser)', () => {
+  it('does NOT latch github limit-only bodies (parser refuses — see provider-size-parser)', async () => {
     const state = newFallbackState();
     const msg = 'GitHub Models API error 413: Request body too large for gpt-4.1 model. Max size: 8000 tokens.';
     const err = Object.assign(new Error(msg), { status: 413 });
@@ -143,45 +141,45 @@ describe('FallbackState.observedTotalTokens (#507)', () => {
       ...routeFor(modelSmall, keyId),
       platform: 'github',
     };
-    recordRetryableFailure(ghRoute, err, state);
+    await recordRetryableFailure(ghRoute, err, state);
     expect(state.observedTotalTokens).toBeUndefined();
   });
 
-  it('never decreases — max of current and incoming wins', () => {
+  it('never decreases — max of current and incoming wins', async () => {
     const state = newFallbackState();
     state.observedTotalTokens = 50000;
     const smaller = Object.assign(
       new Error('Groq API error 413: ... Requested 10000 ...'),
       { status: 413 },
     );
-    recordRetryableFailure(routeFor(modelSmall, keyId), smaller, state);
+    await recordRetryableFailure(routeFor(modelSmall, keyId), smaller, state);
     expect(state.observedTotalTokens).toBe(50000);
     const larger = Object.assign(
       new Error('Groq API error 413: ... Requested 80000 ...'),
       { status: 413 },
     );
-    recordRetryableFailure(routeFor(modelSmall, keyId), larger, state);
+    await recordRetryableFailure(routeFor(modelSmall, keyId), larger, state);
     expect(state.observedTotalTokens).toBe(80000);
   });
 
-  it('inflates the routing estimate on the next attempt so low-TPM models are skipped', () => {
+  it('inflates the routing estimate on the next attempt so low-TPM models are skipped', async () => {
     // Pin a two-model Groq chain: modelSmall (tpm=5000) and modelLarge
     // (tpm=100000). Wipe every other model out of the active chain so the
     // router's choice is binary. Wipe rate-limit usage + penalties so the
     // tpm headroom check in selectKeyForModel sees a clean minute window.
     const db = getDb();
-    db.prepare('DELETE FROM profile_models').run();
-    db.prepare(`INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
-                SELECT id, ?, 1, 1 FROM profiles WHERE name = 'Default'`).run(modelSmall.id);
-    db.prepare(`INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
-                SELECT id, ?, 2, 1 FROM profiles WHERE name = 'Default'`).run(modelLarge.id);
-    db.prepare('DELETE FROM rate_limit_usage').run();
+    (await db.run('DELETE FROM profile_models'));
+    (await db.run(`INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
+                SELECT id, ?, 1, 1 FROM profiles WHERE name = 'Default' RETURNING id`, [modelSmall.id]));
+    (await db.run(`INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
+                SELECT id, ?, 2, 1 FROM profiles WHERE name = 'Default' RETURNING id`, [modelLarge.id]));
+    (await db.run('DELETE FROM rate_limit_usage'));
     clearAllPenalties();
-    setRoutingStrategy('priority');
+    await setRoutingStrategy('priority');
     const smallTpm = 5000;
     const largeTpm = 100000;
-    db.prepare(`UPDATE models SET tpm_limit = ? WHERE id = ?`).run(smallTpm, modelSmall.id);
-    db.prepare(`UPDATE models SET tpm_limit = ? WHERE id = ?`).run(largeTpm, modelLarge.id);
+    (await db.run(`UPDATE models SET tpm_limit = ? WHERE id = ?`, [smallTpm, modelSmall.id]));
+    (await db.run(`UPDATE models SET tpm_limit = ? WHERE id = ?`, [largeTpm, modelLarge.id]));
 
     const state = newFallbackState();
     // Local estimator undercounts massively: a 3,700-token estimate against
@@ -200,7 +198,7 @@ describe('FallbackState.observedTotalTokens (#507)', () => {
       new Error('Groq API error 413: Request too large for model `llama-3.1-8b-instant` ... Limit 6000, Requested 36532, please reduce ...'),
       { status: 413 },
     );
-    recordRetryableFailure(fakeRoute, err, state);
+    await recordRetryableFailure(fakeRoute, err, state);
     expect(state.observedTotalTokens).toBe(36532);
 
     // The closure formula used by every surface's route() callback:
@@ -239,40 +237,40 @@ describe('FallbackState.observedTotalTokens (#507)', () => {
 });
 
 describe('request-too-large failures', () => {
-  it('skip the model for this request without benching it for smaller ones', () => {
+  it('skip the model for this request without benching it for smaller ones', async () => {
     // An oversized agent turn says nothing about the model's health; a
     // cooldown here made the next ordinary request find the pool rate limited.
     // A key of its own: earlier cases leave in-memory cooldowns on `keyId`.
-    const freshKey = insertKey('size-no-bench');
+    const freshKey = await insertKey('size-no-bench');
     resetKeyLocalityCache();
     const state = newFallbackState();
     const err = Object.assign(new Error('Groq API error 413: Request too large for model `x` on tokens per minute (TPM): Limit 8000, Requested 17679, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing'), { status: 413 });
-    recordRetryableFailure(routeFor(modelSmall, freshKey), err, state);
+    await recordRetryableFailure(routeFor(modelSmall, freshKey), err, state);
     expect(state.skipModels.has(modelSmall.id)).toBe(true);
     expect(state.observedTotalTokens).toBe(17679);
-    expect(isOnCooldown(PLATFORM, modelSmall.model_id, freshKey)).toBe(false);
+    expect(await isOnCooldown(PLATFORM, modelSmall.model_id, freshKey)).toBe(false);
   });
 });
 
 describe('max_tokens above the model output ceiling', () => {
   const msg = 'Groq API error 400: `max_tokens` must be less than or equal to `65536`, the maximum value for `max_tokens` is less than the `context_window` for this model';
 
-  it('retries the same route once the ceiling is learned, then rules the model out if it still rejects', () => {
+  it('retries the same route once the ceiling is learned, then rules the model out if it still rejects', async () => {
     resetLearnedOutputCaps();
-    const freshKey = insertKey('output-cap');
+    const freshKey = await insertKey('output-cap');
     resetKeyLocalityCache();
     const route = routeFor(modelSmall, freshKey);
     const routeKey = `${PLATFORM}:${modelSmall.model_id}:${freshKey}`;
     const state = newFallbackState();
     state.wantsTools = true;
 
-    recordRetryableFailure(route, Object.assign(new Error(msg), { status: 400 }), state);
+    await recordRetryableFailure(route, Object.assign(new Error(msg), { status: 400 }), state);
     expect(state.skipKeys.has(routeKey)).toBe(false);
     expect(state.skipModels.has(modelSmall.id)).toBe(false);
-    expect(isOnCooldown(PLATFORM, modelSmall.model_id, freshKey)).toBe(false);
+    expect(await isOnCooldown(PLATFORM, modelSmall.model_id, freshKey)).toBe(false);
 
-    recordRetryableFailure(route, Object.assign(new Error(msg), { status: 400 }), state);
+    await recordRetryableFailure(route, Object.assign(new Error(msg), { status: 400 }), state);
     expect(state.skipModels.has(modelSmall.id)).toBe(true);
-    expect(isOnCooldown(PLATFORM, modelSmall.model_id, freshKey)).toBe(false);
+    expect(await isOnCooldown(PLATFORM, modelSmall.model_id, freshKey)).toBe(false);
   });
 });

@@ -38,10 +38,9 @@ describe('initDb encryption bootstrapping', () => {
     const firstCryptoModule = await import('../../lib/crypto.js');
     const firstDb = firstDbModule.initDb(dbPath);
     const encrypted = firstCryptoModule.encrypt('provider-secret');
-    firstDb.prepare(`
+    (await firstDb.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('google', 'Google', ?, ?, ?, 'healthy', 1)
-    `).run(encrypted.encrypted, encrypted.iv, encrypted.authTag);
+      VALUES ('google', 'Google', ?, ?, ?, 'healthy', 1) RETURNING id`, [encrypted.encrypted, encrypted.iv, encrypted.authTag]));
     firstDb.close();
 
     process.env.NODE_ENV = 'development';
@@ -49,9 +48,9 @@ describe('initDb encryption bootstrapping', () => {
     const secondDbModule = await import('../../db/index.js');
     const secondCryptoModule = await import('../../lib/crypto.js');
     const secondDb = secondDbModule.initDb(dbPath);
-    const row = secondDb.prepare(`
+    const row = (await secondDb.get(`
       SELECT encrypted_key, iv, auth_tag FROM api_keys WHERE platform = 'google'
-    `).get() as { encrypted_key: string; iv: string; auth_tag: string };
+    `)) as { encrypted_key: string; iv: string; auth_tag: string };
 
     expect(secondCryptoModule.decrypt(row.encrypted_key, row.iv, row.auth_tag)).toBe('provider-secret');
     secondDb.close();

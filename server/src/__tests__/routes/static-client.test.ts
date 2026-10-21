@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../../app.js';
-import { initDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // CLIENT_DIST relocates the built dashboard for embedders (the desktop app
 // ships client/dist in extraResources, out of reach of the default
@@ -11,9 +11,9 @@ import { initDb } from '../../db/index.js';
 describe('CLIENT_DIST override', () => {
   let tmpDir: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'freeapi-client-dist-'));
     fs.writeFileSync(path.join(tmpDir, 'index.html'), '<!doctype html><title>custom-dist</title>');
   });

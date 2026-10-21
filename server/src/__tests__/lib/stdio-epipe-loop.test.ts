@@ -1,10 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { getDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Database from 'better-sqlite3';
 
 // Regression: a server started with stdout/stderr piped to a process that then
 // goes away (a shell tool that returned, a closed terminal) must not turn every
@@ -15,7 +14,6 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const childScript = path.join(here, '..', 'fixtures', 'stdio-epipe-child.ts');
 
 let child: ChildProcess | null = null;
-let dir: string | null = null;
 
 afterEach(async () => {
   const proc = child;
@@ -25,26 +23,19 @@ afterEach(async () => {
     proc.kill();
     await exited;
   }
-  // The child held the DB open; Windows refuses to unlink until it is gone.
-  if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  dir = null;
 });
 
-function countRows(dbPath: string): number {
-  const db = new Database(dbPath, { readonly: true });
-  try {
-    return (db.prepare('SELECT COUNT(*) AS n FROM server_logs').get() as { n: number }).n;
-  } finally {
-    db.close();
-  }
+// The child inherits DATABASE_URL (the per-test clone this file connected to),
+// so its server_logs rows land in the same database this pool reads.
+async function countRows(): Promise<number> {
+  return (await getDb().get('SELECT COUNT(*) AS n FROM server_logs') as { n: number }).n;
 }
 
 describe('dead stdio pipe', () => {
   it('does not feed an EPIPE loop into server_logs, and the process survives', async () => {
-    dir = mkdtempSync(path.join(tmpdir(), 'freellmapi-epipe-'));
-    const dbPath = path.join(dir, 'epipe.db');
+    await initTestDb();
 
-    const proc = spawn(process.execPath, ['--import', 'tsx', childScript, dbPath], {
+    const proc = spawn(process.execPath, ['--import', 'tsx', childScript], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ENCRYPTION_KEY: 'a'.repeat(64) },
     });
@@ -64,12 +55,12 @@ describe('dead stdio pipe', () => {
       proc.once('exit', (code) => reject(new Error(`child exited early (${code}): ${buf}`)));
     });
 
-    const before = countRows(dbPath);
+    const before = await countRows();
     proc.stdout!.destroy();
     proc.stderr!.destroy();
     await new Promise((r) => setTimeout(r, 2500));
 
-    const grown = countRows(dbPath) - before;
+    const grown = await countRows() - before;
     // ~5 legitimate periodic warns in the window; the loop writes thousands.
     expect(grown).toBeLessThan(50);
     expect(proc.exitCode).toBeNull();

@@ -34,7 +34,8 @@ vi.mock('../../services/health.js', () => ({
 }));
 
 const { createApp } = await import('../../app.js');
-const { initDb, getDb, getUnifiedApiKey } = await import('../../db/index.js');
+const { getDb, getUnifiedApiKey } = await import('../../db/index.js');
+const { initTestDb } = await import('../helpers/test-db.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const { setRoutingStrategy } = await import('../../services/router.js');
 
@@ -70,31 +71,30 @@ const platformsUsed = (): string[] => keysUsed().map(k => k.split('-')[0]);
 
 // Two groq models on two groq keys, ranked ahead of one cerebras model: the
 // pre-#788 chain would spend FOUR hops inside groq before reaching cerebras.
-function setup(): void {
+async function setup(): Promise<void> {
   const db = getDb();
   setRoutingStrategy('priority');
-  db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
-  db.prepare('DELETE FROM api_keys').run();
-  db.prepare('DELETE FROM rate_limit_cooldowns').run();
-  db.prepare('DELETE FROM rate_limit_usage').run();
-  db.prepare('UPDATE models SET enabled = 0').run();
+  (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
+  (await db.run('DELETE FROM api_keys'));
+  (await db.run('DELETE FROM rate_limit_cooldowns'));
+  (await db.run('DELETE FROM rate_limit_usage'));
+  (await db.run('UPDATE models SET enabled = 0'));
 
-  const pick = (platform: string, limit: number) => db.prepare(
+  const pick = async (platform: string, limit: number) => db.all(
     'SELECT id FROM models WHERE platform = ? ORDER BY id LIMIT ?',
-  ).all(platform, limit) as { id: number }[];
-  const chain = [...pick('groq', 2), ...pick('cerebras', 1)];
-  const enable = db.prepare(
-    'UPDATE models SET enabled = 1, rpm_limit = NULL, rpd_limit = NULL, tpm_limit = NULL, tpd_limit = NULL WHERE id = ?',
-  );
-  const prioritize = db.prepare('UPDATE fallback_config SET priority = ?, enabled = 1 WHERE model_db_id = ?');
-  chain.forEach((m, i) => { enable.run(m.id); prioritize.run(i + 1, m.id); });
+    [platform, limit],
+  ) as Promise<{ id: number }[]>;
+  const chain = [...await pick('groq', 2), ...await pick('cerebras', 1)];
+  for (const [i, m] of chain.entries()) {
+    (await db.run('UPDATE models SET enabled = 1, rpm_limit = NULL, rpd_limit = NULL, tpm_limit = NULL, tpd_limit = NULL WHERE id = ?', [m.id]));
+    (await db.run('UPDATE fallback_config SET priority = ?, enabled = 1 WHERE model_db_id = ?', [i + 1, m.id]));
+  }
 
   for (const [platform, label] of [['groq', 'a'], ['groq', 'b'], ['cerebras', 'c']] as const) {
     const { encrypted, iv, authTag } = encrypt(`${platform}-${label}`);
-    db.prepare(`
+    (await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, ?, ?, ?, ?, 'healthy', 1)
-    `).run(platform, label, encrypted, iv, authTag);
+      VALUES (?, ?, ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, label, encrypted, iv, authTag]));
   }
 }
 
@@ -102,19 +102,19 @@ describe('provider-level failures skip the whole platform (#788)', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
     key = getUnifiedApiKey();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     chatCompletion.mockReset();
     streamChatCompletion.mockReset();
     mockCheckKeyHealth.mockReset();
     mockCheckKeyHealth.mockResolvedValue('invalid');
-    setup();
+    await setup();
   });
 
   it('a 503 on the first groq key fails over to cerebras, not to groq key b', async () => {

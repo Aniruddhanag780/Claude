@@ -2,8 +2,9 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import express, { type Express } from 'express';
 import { keysRouter } from '../../routes/keys.js';
 import { requireAuth } from '../../middleware/requireAuth.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #786: the desktop build has no user-set password, so reveal/export skip the
 // re-verification there — but only for a caller on the machine itself. The
@@ -55,14 +56,14 @@ async function addKey(): Promise<number> {
 }
 
 describe('Desktop re-auth bypass is loopback-only (#786)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    token = mintDashboardToken();
+    await initTestDb();
+    token = await mintDashboardToken();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
+  beforeEach(async () => {
+    await getDb().run('DELETE FROM api_keys');
     delete process.env.FREEAPI_DESKTOP;
   });
 

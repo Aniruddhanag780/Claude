@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { initDb } from '../../db/index.js';
 import { runFallbackLoop, newFallbackState } from '../../lib/fallback-loop.js';
 import { acquireLease, releaseLease, resetLeases, inFlightForKey } from '../../services/ratelimit.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 /**
  * The loop must free a route's in-flight lease on every exit path. A leak would
@@ -40,8 +40,8 @@ function hooks(overrides: Record<string, unknown> = {}) {
 }
 
 describe('fallback loop releases in-flight leases', () => {
-  beforeEach(() => {
-    initDb(':memory:');
+  beforeEach(async () => {
+    await initTestDb();
     resetLeases();
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});

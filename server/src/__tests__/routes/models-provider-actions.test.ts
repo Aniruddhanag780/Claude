@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 import { getProvider } from '../../providers/index.js';
 import { getCatalogModelTombstone } from '../../services/model-state.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -43,9 +44,9 @@ describe('Model Provider Actions API', () => {
   let app: Express;
 
   beforeAll(async () => {
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   afterEach(() => {
@@ -100,7 +101,7 @@ describe('Model Provider Actions API', () => {
       expect(res.body.model.source).toBe('custom');
 
       // Verify database state
-      const row = db.prepare('SELECT * FROM models WHERE id = ?').get(res.body.id) as any;
+      const row = (await db.get('SELECT * FROM models WHERE id = ?', [res.body.id])) as any;
       expect(row).toBeDefined();
       expect(row.source).toBe('user');
       expect(row.enabled).toBe(1);
@@ -109,12 +110,12 @@ describe('Model Provider Actions API', () => {
       expect(row.supports_tools).toBe(1);
 
       // Verify fallback_config
-      const fb = db.prepare('SELECT * FROM fallback_config WHERE model_db_id = ?').get(res.body.id) as any;
+      const fb = (await db.get('SELECT * FROM fallback_config WHERE model_db_id = ?', [res.body.id])) as any;
       expect(fb).toBeDefined();
       expect(fb.enabled).toBe(1);
 
       // Verify profile_models
-      const pm = db.prepare('SELECT * FROM profile_models WHERE model_db_id = ?').all(res.body.id);
+      const pm = (await db.all('SELECT * FROM profile_models WHERE model_db_id = ?', [res.body.id]));
       expect(pm.length).toBeGreaterThan(0);
     });
 
@@ -140,8 +141,7 @@ describe('Model Provider Actions API', () => {
       const modelId = `relay-model-${Date.now()}`;
       const endpoint = 'http://127.0.0.1:9099/v1';
       const enc = encrypt('custom-test-key');
-      const keyId = Number(db.prepare("INSERT INTO api_keys(platform,label,base_url,encrypted_key,iv,auth_tag,status,enabled) VALUES ('custom','Test relay',?,?,?,?,'healthy',1)")
-        .run(endpoint, enc.encrypted, enc.iv, enc.authTag).lastInsertRowid);
+      const keyId = Number((await db.run("INSERT INTO api_keys(platform,label,base_url,encrypted_key,iv,auth_tag,status,enabled) VALUES ('custom','Test relay',?,?,?,?,'healthy',1) RETURNING id", [endpoint, enc.encrypted, enc.iv, enc.authTag])).lastInsertRowid);
 
       const res = await post(app, '/api/models', {
         platform: 'custom',
@@ -151,7 +151,7 @@ describe('Model Provider Actions API', () => {
       });
 
       expect(res.status).toBe(201);
-      const row = db.prepare('SELECT * FROM models WHERE id = ?').get(res.body.id) as any;
+      const row = (await db.get('SELECT * FROM models WHERE id = ?', [res.body.id])) as any;
       expect(row.platform).toBe('custom');
       expect(row.endpoint_scope).toBe('http://127.0.0.1:9099/v1');
     });
@@ -179,7 +179,7 @@ describe('Model Provider Actions API', () => {
       expect(res2.status).toBe(201);
 
       // Tombstone should be cleared
-      const tomb = getCatalogModelTombstone(db, 'chat', 'groq', modelId);
+      const tomb = await getCatalogModelTombstone(db, 'chat', 'groq', modelId);
       expect(tomb).toBeUndefined();
     });
   });
@@ -196,8 +196,8 @@ describe('Model Provider Actions API', () => {
       const id = createRes.body.id;
 
       // Verify initial setup
-      expect(db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(id)).toBeDefined();
-      expect(db.prepare('SELECT COUNT(*) as c FROM profile_models WHERE model_db_id = ?').get(id)).toBeDefined();
+      expect((await db.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [id]))).toBeDefined();
+      expect((await db.get('SELECT COUNT(*) as c FROM profile_models WHERE model_db_id = ?', [id]))).toBeDefined();
 
       // Delete
       const delRes = await del(app, `/api/models/${id}`);
@@ -205,9 +205,9 @@ describe('Model Provider Actions API', () => {
       expect(delRes.body.success).toBe(true);
 
       // Verify cleanup
-      expect(db.prepare('SELECT 1 FROM models WHERE id = ?').get(id)).toBeUndefined();
-      expect(db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(id)).toBeUndefined();
-      expect(db.prepare('SELECT 1 FROM profile_models WHERE model_db_id = ?').get(id)).toBeUndefined();
+      expect((await db.get('SELECT 1 FROM models WHERE id = ?', [id]))).toBeUndefined();
+      expect((await db.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [id]))).toBeUndefined();
+      expect((await db.get('SELECT 1 FROM profile_models WHERE model_db_id = ?', [id]))).toBeUndefined();
     });
   });
 
@@ -227,7 +227,7 @@ describe('Model Provider Actions API', () => {
 
       // Ensure no keys for cohere
       const db = getDb();
-      db.prepare("DELETE FROM api_keys WHERE platform = 'cohere'").run();
+      (await db.run("DELETE FROM api_keys WHERE platform = 'cohere'"));
 
       const testRes = await post(app, `/api/models/${id}/test`);
       expect(testRes.status).toBe(200);
@@ -246,10 +246,9 @@ describe('Model Provider Actions API', () => {
 
       // Ensure an enabled key for groq
       const enc = encrypt('test-key-groq-secret');
-      db.prepare(`
+      (await db.run(`
         INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, enabled, status)
-        VALUES ('groq', 'Test Groq Key', ?, ?, ?, 1, 'healthy')
-      `).run(enc.encrypted, enc.iv, enc.authTag);
+        VALUES ('groq', 'Test Groq Key', ?, ?, ?, 1, 'healthy') RETURNING id`, [enc.encrypted, enc.iv, enc.authTag]));
 
       const groqProvider = getProvider('groq');
       expect(groqProvider).toBeDefined();
@@ -283,10 +282,9 @@ describe('Model Provider Actions API', () => {
       const modelDbId = createRes.body.id;
 
       const enc = encrypt('test-key-throttle');
-      db.prepare(`
+      (await db.run(`
         INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, enabled, status)
-        VALUES ('groq', 'Throttle Key', ?, ?, ?, 1, 'healthy')
-      `).run(enc.encrypted, enc.iv, enc.authTag);
+        VALUES ('groq', 'Throttle Key', ?, ?, ?, 1, 'healthy') RETURNING id`, [enc.encrypted, enc.iv, enc.authTag]));
 
       const groqProvider = getProvider('groq');
       vi.spyOn(groqProvider!, 'chatCompletion').mockResolvedValue({
@@ -314,10 +312,9 @@ describe('Model Provider Actions API', () => {
       const modelDbId = createRes.body.id;
 
       const enc = encrypt('test-key-leak');
-      db.prepare(`
+      (await db.run(`
         INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, enabled, status)
-        VALUES ('groq', 'Leak Key', ?, ?, ?, 1, 'healthy')
-      `).run(enc.encrypted, enc.iv, enc.authTag);
+        VALUES ('groq', 'Leak Key', ?, ?, ?, 1, 'healthy') RETURNING id`, [enc.encrypted, enc.iv, enc.authTag]));
 
       const groqProvider = getProvider('groq');
       vi.spyOn(groqProvider!, 'chatCompletion').mockRejectedValueOnce(

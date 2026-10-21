@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+import { initTestDb } from '../helpers/test-db.js';
 
-const { initDb, getDb } = await import('../../db/index.js');
+const { getDb } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const {
   computeHealthSnapshot,
@@ -17,23 +18,22 @@ const {
 
 let nextId = 40000;
 
-function seedKey(platform: string, opts: { status?: string; enabled?: number } = {}): number {
+async function seedKey(platform: string, opts: { status?: string; enabled?: number } = {}): number {
   const id = ++nextId;
   const enc = encrypt(`deg-${id}`);
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, enabled, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, platform, `deg-${id}`, enc.encrypted, enc.iv, enc.authTag, opts.enabled ?? 1, opts.status ?? 'healthy');
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`, [id, platform, `deg-${id}`, enc.encrypted, enc.iv, enc.authTag, opts.enabled ?? 1, opts.status ?? 'healthy']));
   return id;
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
-beforeEach(() => {
-  getDb().prepare('DELETE FROM api_keys').run();
+beforeEach(async () => {
+  (await getDb().run('DELETE FROM api_keys'));
   resetDegradationState();
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -41,10 +41,10 @@ beforeEach(() => {
 });
 
 describe('degraded-mode state machine', () => {
-  it('reports normal with all providers healthy', () => {
-    seedKey('groq');
-    seedKey('cloudflare');
-    seedKey('mistral');
+  it('reports normal with all providers healthy', async () => {
+    await seedKey('groq');
+    await seedKey('cloudflare');
+    await seedKey('mistral');
     const s = updateDegradationState(0);
     expect(s.state).toBe('normal');
     expect(s.healthyProviders).toBe(3);
@@ -53,30 +53,30 @@ describe('degraded-mode state machine', () => {
     expect(isDegraded()).toBe(false);
   });
 
-  it('counts unknown-status keys as usable, error keys as not', () => {
-    seedKey('groq', { status: 'unknown' });
-    seedKey('cloudflare', { status: 'healthy' });
-    seedKey('mistral', { status: 'error' });
+  it('counts unknown-status keys as usable, error keys as not', async () => {
+    await seedKey('groq', { status: 'unknown' });
+    await seedKey('cloudflare', { status: 'healthy' });
+    await seedKey('mistral', { status: 'error' });
     const snap = computeHealthSnapshot();
     expect(snap.healthyProviders).toBe(2);
     expect(snap.totalProviders).toBe(3);
     expect(snap.ratio).toBeCloseTo(2 / 3);
   });
 
-  it('ignores disabled keys', () => {
-    seedKey('groq', { enabled: 0, status: 'healthy' });
-    seedKey('cloudflare', { enabled: 0, status: 'healthy' });
-    seedKey('mistral', { enabled: 0, status: 'healthy' });
+  it('ignores disabled keys', async () => {
+    await seedKey('groq', { enabled: 0, status: 'healthy' });
+    await seedKey('cloudflare', { enabled: 0, status: 'healthy' });
+    await seedKey('mistral', { enabled: 0, status: 'healthy' });
     const snap = computeHealthSnapshot();
     expect(snap.totalProviders).toBe(0);
     expect(snap.ratio).toBe(1); // no providers to judge → not degraded
   });
 
-  it('enters degraded mode only after the ratio stays low for the grace period', () => {
-    seedKey('groq', { status: 'healthy' });
-    seedKey('cloudflare', { status: 'error' });
-    seedKey('mistral', { status: 'error' });
-    seedKey('openai', { status: 'error' });
+  it('enters degraded mode only after the ratio stays low for the grace period', async () => {
+    await seedKey('groq', { status: 'healthy' });
+    await seedKey('cloudflare', { status: 'error' });
+    await seedKey('mistral', { status: 'error' });
+    await seedKey('openai', { status: 'error' });
 
     // Below threshold (1/4 = 25% < 50%) but grace period not elapsed yet.
     const early = updateDegradationState(0);
@@ -94,27 +94,27 @@ describe('degraded-mode state machine', () => {
     expect(isDegraded()).toBe(true);
   });
 
-  it('stays normal when the ratio is at or above the threshold', () => {
-    seedKey('groq', { status: 'healthy' });
-    seedKey('cloudflare', { status: 'healthy' });
-    seedKey('mistral', { status: 'error' });
-    seedKey('openai', { status: 'error' });
+  it('stays normal when the ratio is at or above the threshold', async () => {
+    await seedKey('groq', { status: 'healthy' });
+    await seedKey('cloudflare', { status: 'healthy' });
+    await seedKey('mistral', { status: 'error' });
+    await seedKey('openai', { status: 'error' });
     // 2/4 = 50% — exactly at the default threshold → not below.
     const s = updateDegradationState(0);
     expect(s.state).toBe('normal');
   });
 
-  it('exits degraded mode only after recovery grace elapses', () => {
-    seedKey('groq', { status: 'healthy' });
-    seedKey('cloudflare', { status: 'error' });
-    seedKey('mistral', { status: 'error' });
-    seedKey('openai', { status: 'error' });
+  it('exits degraded mode only after recovery grace elapses', async () => {
+    await seedKey('groq', { status: 'healthy' });
+    await seedKey('cloudflare', { status: 'error' });
+    await seedKey('mistral', { status: 'error' });
+    await seedKey('openai', { status: 'error' });
     updateDegradationState(0);
     updateDegradationState(60_000);
     expect(isDegraded()).toBe(true);
 
     // Providers recover, but the exit grace (120s default) hasn't elapsed.
-    getDb().prepare("UPDATE api_keys SET status = 'healthy' WHERE platform IN ('cloudflare', 'mistral', 'openai')").run();
+    (await getDb().run("UPDATE api_keys SET status = 'healthy' WHERE platform IN ('cloudflare', 'mistral', 'openai')"));
     const recovering = updateDegradationState(60_001);
     expect(recovering.state).toBe('degraded'); // still degraded
     expect(isDegraded()).toBe(true);
@@ -126,29 +126,29 @@ describe('degraded-mode state machine', () => {
     expect(isDegraded()).toBe(false);
   });
 
-  it('does not flap: a transient single-pass recovery resets the recovery streak', () => {
-    seedKey('groq', { status: 'healthy' });
-    seedKey('cloudflare', { status: 'error' });
-    seedKey('mistral', { status: 'error' });
-    seedKey('openai', { status: 'error' });
+  it('does not flap: a transient single-pass recovery resets the recovery streak', async () => {
+    await seedKey('groq', { status: 'healthy' });
+    await seedKey('cloudflare', { status: 'error' });
+    await seedKey('mistral', { status: 'error' });
+    await seedKey('openai', { status: 'error' });
     updateDegradationState(0);
     updateDegradationState(60_000);
     expect(isDegraded()).toBe(true);
 
     // One good pass then back down: the recovery streak must reset so the
     // gateway stays degraded instead of exiting early.
-    getDb().prepare("UPDATE api_keys SET status = 'healthy' WHERE platform = 'cloudflare'").run();
+    (await getDb().run("UPDATE api_keys SET status = 'healthy' WHERE platform = 'cloudflare'"));
     updateDegradationState(60_001); // recovered pass starts streak
-    getDb().prepare("UPDATE api_keys SET status = 'error' WHERE platform = 'cloudflare'").run();
+    (await getDb().run("UPDATE api_keys SET status = 'error' WHERE platform = 'cloudflare'"));
     updateDegradationState(60_002); // down again — streak reset
-    getDb().prepare("UPDATE api_keys SET status = 'healthy' WHERE platform IN ('cloudflare', 'mistral', 'openai')").run();
+    (await getDb().run("UPDATE api_keys SET status = 'healthy' WHERE platform IN ('cloudflare', 'mistral', 'openai')"));
     const afterLongRecovery = updateDegradationState(60_002 + 120_000);
     expect(afterLongRecovery.state).toBe('degraded'); // exit streak restarted at 60_002
   });
 
-  it('does not degrade when there are fewer providers than DEGRADED_MIN_PROVIDERS', () => {
-    seedKey('groq', { status: 'healthy' });
-    seedKey('cloudflare', { status: 'error' });
+  it('does not degrade when there are fewer providers than DEGRADED_MIN_PROVIDERS', async () => {
+    await seedKey('groq', { status: 'healthy' });
+    await seedKey('cloudflare', { status: 'error' });
     // Only 2 providers < default min of 3 → never degraded.
     const s = updateDegradationState(0);
     updateDegradationState(60_000);
@@ -156,8 +156,8 @@ describe('degraded-mode state machine', () => {
     expect(isDegraded()).toBe(false);
   });
 
-  it('getDegradationStatus returns the last snapshot without re-querying', () => {
-    seedKey('groq', { status: 'healthy' });
+  it('getDegradationStatus returns the last snapshot without re-querying', async () => {
+    await seedKey('groq', { status: 'healthy' });
     updateDegradationState(0);
     const status = getDegradationStatus();
     expect(status.totalProviders).toBe(1);

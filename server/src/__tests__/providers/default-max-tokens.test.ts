@@ -48,21 +48,21 @@ afterEach(() => {
 });
 
 describe('resolveMaxTokens', () => {
-  it('applies the platform default only when the client omitted max_tokens', () => {
+  it('applies the platform default only when the client omitted max_tokens', async () => {
     const cfDefault = defaultMaxTokensFor('cloudflare');
     expect(cfDefault).toBeGreaterThan(0);
 
-    expect(resolveMaxTokens('cloudflare', undefined)).toBe(cfDefault);
-    expect(resolveMaxTokens('cloudflare', 64)).toBe(64);
+    expect(await resolveMaxTokens('cloudflare', undefined)).toBe(cfDefault);
+    expect(await resolveMaxTokens('cloudflare', 64)).toBe(64);
     // A client value above the default is never clamped down.
-    expect(resolveMaxTokens('cloudflare', 100000)).toBe(100000);
+    expect(await resolveMaxTokens('cloudflare', 100000)).toBe(100000);
   });
 
-  it('leaves platforms without a default untouched', () => {
+  it('leaves platforms without a default untouched', async () => {
     expect(defaultMaxTokensFor('groq')).toBeUndefined();
-    expect(resolveMaxTokens('groq', undefined)).toBeUndefined();
-    expect(resolveMaxTokens('groq', 32)).toBe(32);
-    expect(resolveMaxTokens('unknown-platform', undefined)).toBeUndefined();
+    expect(await resolveMaxTokens('groq', undefined)).toBeUndefined();
+    expect(await resolveMaxTokens('groq', 32)).toBe(32);
+    expect(await resolveMaxTokens('unknown-platform', undefined)).toBeUndefined();
   });
 });
 

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Express } from 'express';
 import { createApp, INLINE_BOOTSTRAP_SHA } from '../../app.js';
-import { initDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // index.html ships one inline <script>: the theme/direction bootstrap that has
 // to run before first paint so dark-mode users do not get a white flash.
@@ -33,9 +33,9 @@ function sha256Directive(source: string): string {
 describe('CSP allows the inline theme bootstrap (#682)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 

@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { clearAllCooldowns } from '../../services/ratelimit.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { seedDecisionModels } from '../helpers/decision-models.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // HTTP surface of decision models: POST /v1/decisions (and the /v1/systemone
 // alias) and GET /v1/decisions/models for API callers, /api/decisions/* for the
@@ -14,12 +15,11 @@ import { seedDecisionModels } from '../helpers/decision-models.js';
 const realFetch = globalThis.fetch;
 let dashToken = '';
 
-function addKey(platform: string, raw: string): number {
+async function addKey(platform: string, raw: string): number {
   const { encrypted, iv, authTag } = encrypt(raw);
-  const row = getDb().prepare(`
+  const row = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'test', ?, ?, ?, 'healthy', 1)
-  `).run(platform, encrypted, iv, authTag);
+    VALUES (?, 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, encrypted, iv, authTag]));
   return Number(row.lastInsertRowid);
 }
 
@@ -30,7 +30,7 @@ async function call(app: Express, method: string, path: string, opts: { body?: u
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const auth = opts.auth === undefined ? (path.startsWith('/api') ? 'dash' : 'api') : opts.auth;
   if (auth === 'dash') headers.Authorization = `Bearer ${dashToken}`;
-  if (auth === 'api') headers.Authorization = `Bearer ${getUnifiedApiKey()}`;
+  if (auth === 'api') headers.Authorization = `Bearer ${await getUnifiedApiKey()}`;
   const res = await realFetch(`http://127.0.0.1:${addr.port}${path}`, {
     method,
     headers,
@@ -50,14 +50,14 @@ const BODY = {
 describe('decision routes', () => {
   let app: Express;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    seedDecisionModels();
-    clearAllCooldowns(Number.MAX_SAFE_INTEGER);
+    await initTestDb();
+    await seedDecisionModels();
+    await clearAllCooldowns(Number.MAX_SAFE_INTEGER);
     app = createApp();
-    dashToken = mintDashboardToken();
-    addKey('cloudflare', 'acct:tok');
+    dashToken = await mintDashboardToken();
+    await addKey('cloudflare', 'acct:tok');
     globalThis.fetch = vi.fn(() => Promise.resolve(new Response(
       JSON.stringify({ success: true, result: { answers: ANSWERS, usage: { input_tokens: 42, output_tokens: 0 } } }),
       { status: 200, headers: { 'content-type': 'application/json' } },

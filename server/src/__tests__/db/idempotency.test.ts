@@ -1,90 +1,81 @@
 import { describe, it, expect } from 'vitest';
-import { initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
+import { runMigrations } from '../../db/migrate/runner.js';
+import { initTestDb } from '../helpers/test-db.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 /**
- * All migrations must be idempotent: running initDb twice on the same
- * physical database file should produce identical state.
+ * All migrations must be idempotent: re-running every migration on the same
+ * physical database must produce identical state (the PG equivalent of the
+ * old dual initDb() on one SQLite file).
  */
 describe('Migration idempotency', () => {
-  it('initDb on a fresh in-memory DB then re-run produces identical row counts', () => {
+  it('re-running migrations on the same database produces identical row counts', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    // Use a single shared file so both inits hit the same DB.
-    const tmpPath = `/tmp/freeapi-idempotency-${Date.now()}.db`;
-
-    const db1 = initDb(tmpPath);
-    const before = {
-      models: (db1.prepare('SELECT COUNT(*) AS c FROM models').get() as { c: number }).c,
-      fallback: (db1.prepare('SELECT COUNT(*) AS c FROM fallback_config').get() as { c: number }).c,
-      enabledModels: (db1.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 1').get() as { c: number }).c,
-      disabledModels: (db1.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 0').get() as { c: number }).c,
-      orphanFallbacks: (db1.prepare(`
+    await initTestDb();
+    const db = getDb();
+    const counts = async () => ({
+      models: (await db.get('SELECT COUNT(*) AS c FROM models') as { c: number }).c,
+      fallback: (await db.get('SELECT COUNT(*) AS c FROM fallback_config') as { c: number }).c,
+      enabledModels: (await db.get('SELECT COUNT(*) AS c FROM models WHERE enabled = 1') as { c: number }).c,
+      disabledModels: (await db.get('SELECT COUNT(*) AS c FROM models WHERE enabled = 0') as { c: number }).c,
+      orphanFallbacks: (await db.get(`
         SELECT COUNT(*) AS c FROM fallback_config f
         LEFT JOIN models m ON f.model_db_id = m.id
         WHERE m.id IS NULL
-      `).get() as { c: number }).c,
-    };
-    db1.close();
+      `) as { c: number }).c,
+    });
 
-    // Re-init the same DB file — V1..V9 should all no-op idempotently.
-    const db2 = initDb(tmpPath);
-    const after = {
-      models: (db2.prepare('SELECT COUNT(*) AS c FROM models').get() as { c: number }).c,
-      fallback: (db2.prepare('SELECT COUNT(*) AS c FROM fallback_config').get() as { c: number }).c,
-      enabledModels: (db2.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 1').get() as { c: number }).c,
-      disabledModels: (db2.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 0').get() as { c: number }).c,
-      orphanFallbacks: (db2.prepare(`
-        SELECT COUNT(*) AS c FROM fallback_config f
-        LEFT JOIN models m ON f.model_db_id = m.id
-        WHERE m.id IS NULL
-      `).get() as { c: number }).c,
-    };
-    db2.close();
+    const before = await counts();
+    // V1..V25 should all no-op idempotently on an already-migrated database.
+    await runMigrations(db, 'up');
+    const after = await counts();
 
     expect(after).toEqual(before);
     expect(after.orphanFallbacks).toBe(0);
   });
 
-  it('every catalog row has exactly one fallback_config entry', () => {
+  it('every catalog row has exactly one fallback_config entry', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    const db = initDb(':memory:');
+    const db = await initTestDb();
 
-    const rows = db.prepare(`
+    const rows = await db.all(`
       SELECT m.id, COUNT(f.id) AS fb_count
         FROM models m
         LEFT JOIN fallback_config f ON m.id = f.model_db_id
        GROUP BY m.id
       HAVING COUNT(f.id) <> 1
-    `).all() as { id: number; fb_count: number }[];
+    `) as { id: number; fb_count: number }[];
 
     expect(rows).toEqual([]);
   });
 
-  it('UNIQUE(platform, model_id) constraint holds — no duplicate catalog rows', () => {
+  it('UNIQUE(platform, model_id) constraint holds — no duplicate catalog rows', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    const db = initDb(':memory:');
+    const db = await initTestDb();
 
-    const dups = db.prepare(`
+    const dups = await db.all(`
       SELECT platform, model_id, COUNT(*) AS c FROM models
        GROUP BY platform, model_id
       HAVING COUNT(*) > 1
-    `).all();
+    `);
 
     expect(dups).toEqual([]);
   });
 
-  it('V12: dead OR :free rows are absent and the four new rows are present', () => {
+  it('V12: dead OR :free rows are absent and the four new rows are present', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    const db = initDb(':memory:');
+    const db = await initTestDb();
 
-    const dead = db.prepare(`
+    const dead = await db.all(`
       SELECT model_id FROM models
        WHERE platform = 'openrouter'
          AND model_id IN ('inclusionai/ling-2.6-1t:free', 'tencent/hy3-preview:free')
-    `).all();
+    `);
     expect(dead).toEqual([]);
 
     // V21 pruned these three after live probing returned 404 "no endpoints found".
-    const pruned = db.prepare(`
+    const pruned = await db.all(`
       SELECT model_id FROM models
        WHERE platform = 'openrouter'
          AND model_id IN (
@@ -92,10 +83,10 @@ describe('Migration idempotency', () => {
            'minimax/minimax-m2.5:free',
            'baidu/cobuddy:free'
          )
-    `).all();
+    `);
     expect(pruned).toEqual([]);
 
-    const live = db.prepare(`
+    const live = await db.all(`
       SELECT model_id FROM models
        WHERE platform = 'openrouter'
          AND model_id IN (
@@ -103,48 +94,48 @@ describe('Migration idempotency', () => {
            'nousresearch/hermes-3-llama-3.1-405b:free'
          )
        ORDER BY model_id
-    `).all() as { model_id: string }[];
+    `) as { model_id: string }[];
     expect(live.map(r => r.model_id)).toEqual([
       'nousresearch/hermes-3-llama-3.1-405b:free',
       'openrouter/owl-alpha',
     ]);
 
-    const widened = db.prepare(`
+    const widened = await db.all(`
       SELECT model_id, context_window FROM models
        WHERE platform = 'openrouter'
          AND model_id IN ('nvidia/nemotron-3-super-120b-a12b:free', 'qwen/qwen3-coder:free')
        ORDER BY model_id
-    `).all() as { model_id: string; context_window: number }[];
+    `) as { model_id: string; context_window: number }[];
     expect(widened).toEqual([
       { model_id: 'nvidia/nemotron-3-super-120b-a12b:free', context_window: 1000000 },
       { model_id: 'qwen/qwen3-coder:free', context_window: 1048576 },
     ]);
   });
 
-  it('V13: cross-provider catalog refresh applies cleanly', () => {
+  it('V13: cross-provider catalog refresh applies cleanly', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    const db = initDb(':memory:');
+    const db = await initTestDb();
 
     // Disables — row kept but enabled=0.
-    const disabled = db.prepare(`
+    const disabled = await db.all(`
       SELECT platform, model_id, enabled FROM models
        WHERE (platform = 'google' AND model_id = 'gemini-3.1-pro-preview')
           OR (platform = 'ollama' AND model_id IN ('kimi-k2-thinking', 'mistral-large-3:675b', 'deepseek-v3.2'))
        ORDER BY platform, model_id
-    `).all() as { platform: string; model_id: string; enabled: number }[];
+    `) as { platform: string; model_id: string; enabled: number }[];
     expect(disabled).toHaveLength(4);
     for (const row of disabled) expect(row.enabled).toBe(0);
 
     // Hard removals — row is gone entirely.
-    const removed = db.prepare(`
+    const removed = await db.all(`
       SELECT model_id FROM models
        WHERE (platform = 'sambanova' AND model_id = 'DeepSeek-V3.1-cb')
           OR (platform = 'cloudflare' AND model_id = '@cf/moonshotai/kimi-k2.5')
-    `).all();
+    `);
     expect(removed).toEqual([]);
 
     // New rows present across providers (incl. new huggingface platform).
-    const additions = db.prepare(`
+    const additions = await db.all(`
       SELECT platform, model_id FROM models
        WHERE (platform, model_id) IN (VALUES
          ('groq',        'openai/gpt-oss-safeguard-20b'),
@@ -163,27 +154,27 @@ describe('Migration idempotency', () => {
          ('huggingface', 'moonshotai/Kimi-K2.6'),
          ('huggingface', 'Qwen/Qwen3-Coder-Next')
        )
-    `).all();
+    `);
     expect(additions).toHaveLength(15);
 
     // Spot-check critical limit/context updates.
-    const cerebrasLimits = db.prepare(`
+    const cerebrasLimits = await db.get(`
       SELECT rpm_limit, rpd_limit, tpm_limit, tpd_limit FROM models
        WHERE platform = 'cerebras' AND model_id = 'qwen-3-235b-a22b-instruct-2507'
-    `).get() as { rpm_limit: number; rpd_limit: number; tpm_limit: number; tpd_limit: number };
+    `) as { rpm_limit: number; rpd_limit: number; tpm_limit: number; tpd_limit: number };
     expect(cerebrasLimits).toEqual({ rpm_limit: 5, rpd_limit: 2400, tpm_limit: 30000, tpd_limit: 1000000 });
 
-    const cfFp8Ctx = (db.prepare(`
+    const cfFp8Ctx = (await db.get(`
       SELECT context_window FROM models WHERE platform = 'cloudflare' AND model_id = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
-    `).get() as { context_window: number }).context_window;
+    `) as { context_window: number }).context_window;
     expect(cfFp8Ctx).toBe(24000);
 
-    const mistralCtx = db.prepare(`
+    const mistralCtx = await db.all(`
       SELECT model_id, context_window FROM models
        WHERE platform = 'mistral'
          AND model_id IN ('codestral-latest', 'devstral-latest', 'magistral-medium-latest', 'mistral-large-latest')
        ORDER BY model_id
-    `).all() as { model_id: string; context_window: number }[];
+    `) as { model_id: string; context_window: number }[];
     expect(mistralCtx).toEqual([
       { model_id: 'codestral-latest',       context_window: 256000 },
       { model_id: 'devstral-latest',        context_window: 262144 },
@@ -192,25 +183,25 @@ describe('Migration idempotency', () => {
     ]);
   });
 
-  it('removes the retired GitHub Models provider (#1557)', () => {
+  it('removes the retired GitHub Models provider (#1557)', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    const db = initDb(':memory:');
+    const db = await initTestDb();
 
     for (const table of ['models', 'embedding_models', 'api_keys']) {
-      expect((db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE platform = 'github'`).get() as { n: number }).n).toBe(0);
+      expect((await db.get(`SELECT COUNT(*) AS n FROM ${table} WHERE platform = 'github'`) as { n: number }).n).toBe(0);
     }
   });
 
-  it('V14: cerebras deprecation disables qwen-3-235b and llama3.1-8b but keeps gpt-oss-120b enabled', () => {
+  it('V14: cerebras deprecation disables qwen-3-235b and llama3.1-8b but keeps gpt-oss-120b enabled', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    const db = initDb(':memory:');
+    const db = await initTestDb();
 
-    const rows = db.prepare(`
+    const rows = await db.all(`
       SELECT model_id, enabled FROM models
        WHERE platform = 'cerebras'
          AND model_id IN ('qwen-3-235b-a22b-instruct-2507', 'llama3.1-8b', 'gpt-oss-120b')
        ORDER BY model_id
-    `).all() as { model_id: string; enabled: number }[];
+    `) as { model_id: string; enabled: number }[];
 
     expect(rows).toEqual([
       { model_id: 'gpt-oss-120b',                    enabled: 1 },
@@ -219,23 +210,19 @@ describe('Migration idempotency', () => {
     ]);
   });
 
-  it('V23: sambanova/chutes are gone; live-verified free additions are present with the right flags', () => {
+  it('V23: sambanova/chutes are gone; live-verified free additions are present with the right flags', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    const db = initDb(':memory:');
+    const db = await initTestDb();
 
     // Platform drops — no model, fallback, or key rows survive.
-    const deadRows = db.prepare(
-      `SELECT COUNT(*) AS n FROM models WHERE platform IN ('sambanova', 'chutes')`
-    ).get() as { n: number };
+    const deadRows = await db.get(`SELECT COUNT(*) AS n FROM models WHERE platform IN ('sambanova', 'chutes')`) as { n: number };
     expect(deadRows.n).toBe(0);
-    const deadKeys = db.prepare(
-      `SELECT COUNT(*) AS n FROM api_keys WHERE platform IN ('sambanova', 'chutes')`
-    ).get() as { n: number };
+    const deadKeys = await db.get(`SELECT COUNT(*) AS n FROM api_keys WHERE platform IN ('sambanova', 'chutes')`) as { n: number };
     expect(deadKeys.n).toBe(0);
 
     // Additions, with the flags the live probe verified (vision/tools come
     // from the V16/V22 rules, so they must hold on a fresh seed too).
-    const added = db.prepare(`
+    const added = await db.all(`
       SELECT platform, model_id, enabled, supports_vision, supports_tools FROM models
        WHERE (platform = 'openrouter' AND model_id IN (
                'moonshotai/kimi-k2.6:free',
@@ -245,7 +232,7 @@ describe('Migration idempotency', () => {
                'cognitivecomputations/dolphin-mistral-24b-venice-edition:free'))
           OR (platform = 'zhipu' AND model_id = 'glm-4.6v-flash')
        ORDER BY platform, model_id
-    `).all() as { model_id: string; enabled: number; supports_vision: number; supports_tools: number }[];
+    `) as { model_id: string; enabled: number; supports_vision: number; supports_tools: number }[];
     expect(added.map(r => [r.model_id, r.enabled, r.supports_vision, r.supports_tools])).toEqual([
       ['cognitivecomputations/dolphin-mistral-24b-venice-edition:free', 1, 0, 0],
       ['meta-llama/llama-3.2-3b-instruct:free',                         1, 0, 0],
@@ -256,15 +243,15 @@ describe('Migration idempotency', () => {
     ]);
   });
 
-  it('V24: Zen roster refresh lands and the hung NIM gemma is paused', () => {
+  it('V24: Zen roster refresh lands and the hung NIM gemma is paused', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    const db = initDb(':memory:');
+    const db = await initTestDb();
 
-    const zen = db.prepare(`
+    const zen = await db.all(`
       SELECT model_id, enabled, supports_tools FROM models
        WHERE platform = 'opencode' AND model_id IN ('nemotron-3-ultra-free', 'minimax-m3-free')
        ORDER BY model_id
-    `).all() as { model_id: string; enabled: number; supports_tools: number }[];
+    `) as { model_id: string; enabled: number; supports_tools: number }[];
     expect(zen.map(r => [r.model_id, r.enabled, r.supports_tools])).toEqual([
       // minimax-m3-free was seeded enabled here in V24, then retired in V25 when
       // its free promo ended (now enabled=0). nemotron-3-ultra-free is still live.
@@ -274,21 +261,21 @@ describe('Migration idempotency', () => {
 
     // The hung NIM gemma route is paused (row kept, enabled=0, re-asserted
     // each boot like the V13 disables).
-    const gemma = db.prepare(`
+    const gemma = await db.get(`
       SELECT enabled FROM models WHERE platform = 'nvidia' AND model_id = 'google/gemma-4-31b-it'
-    `).get() as { enabled: number };
+    `) as { enabled: number };
     expect(gemma.enabled).toBe(0);
   });
 
-  it('V25: dead OpenCode Zen free promos (nemotron-3-super-free, minimax-m3-free) are disabled', () => {
+  it('V25: dead OpenCode Zen free promos (nemotron-3-super-free, minimax-m3-free) are disabled', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    const db = initDb(':memory:');
+    const db = await initTestDb();
 
-    const dead = db.prepare(`
+    const dead = await db.all(`
       SELECT model_id, enabled FROM models
        WHERE platform = 'opencode' AND model_id IN ('nemotron-3-super-free', 'minimax-m3-free')
        ORDER BY model_id
-    `).all() as { model_id: string; enabled: number }[];
+    `) as { model_id: string; enabled: number }[];
     expect(dead.map(r => [r.model_id, r.enabled])).toEqual([
       ['minimax-m3-free',       0],
       ['nemotron-3-super-free', 0],
@@ -297,12 +284,10 @@ describe('Migration idempotency', () => {
 
   it('all enabled catalog platforms have a registered provider', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    const db = initDb(':memory:');
+    const db = await initTestDb();
     const { hasProvider } = await import('../../providers/index.js');
 
-    const platforms = (db.prepare(
-      `SELECT DISTINCT platform FROM models WHERE enabled = 1`
-    ).all() as { platform: any }[]).map(r => r.platform);
+    const platforms = (await db.all(`SELECT DISTINCT platform FROM models WHERE enabled = 1`) as { platform: any }[]).map(r => r.platform);
 
     const missing = platforms.filter(p => !hasProvider(p));
     expect(missing).toEqual([]);

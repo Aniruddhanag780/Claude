@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { effortFromAnthropicThinking } from '../../routes/anthropic.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Request-side reasoning control (reasoning_effort / reasoning:{effort} /
 // Anthropic thinking:{budget_tokens}) and inline <think> extraction, driven
@@ -27,12 +28,12 @@ async function request(app: Express, path: string, body: any, extraHeaders: Reco
   return { status: res.status, text, body: json };
 }
 
-function openaiHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function openaiHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
-function anthropicHeaders() {
-  return { 'x-api-key': getUnifiedApiKey(), 'anthropic-version': '2023-06-01' };
+async function anthropicHeaders() {
+  return { 'x-api-key': await getUnifiedApiKey(), 'anthropic-version': '2023-06-01' };
 }
 
 // Mock Groq's upstream with a canned JSON response and capture the forwarded body.
@@ -108,19 +109,19 @@ function anthropicEvents(text: string): Array<{ event: string; data: any }> {
 describe('request-side reasoning control (end-to-end)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
-    db.prepare('DELETE FROM rate_limit_usage').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
+    (await db.run('DELETE FROM rate_limit_usage'));
     const { status } = await request(app, '/api/keys',
       { platform: 'groq', key: 'gsk_reasoning_control_test', label: 't' },
       { Authorization: `Bearer ${dashToken}` });
@@ -134,7 +135,7 @@ describe('request-side reasoning control (end-to-end)', () => {
     const { status } = await request(app, '/v1/chat/completions', {
       model: 'auto', reasoning_effort: 'low',
       messages: [{ role: 'user', content: 'hi' }],
-    }, openaiHeaders());
+    }, await openaiHeaders());
     expect(status).toBe(200);
     expect(captured.body.reasoning_effort).toBe('low');
   });
@@ -144,7 +145,7 @@ describe('request-side reasoning control (end-to-end)', () => {
     const { status } = await request(app, '/v1/chat/completions', {
       model: 'auto', reasoning: { effort: 'high' },
       messages: [{ role: 'user', content: 'hi' }],
-    }, openaiHeaders());
+    }, await openaiHeaders());
     expect(status).toBe(200);
     expect(captured.body.reasoning_effort).toBe('high');
     expect(captured.body).not.toHaveProperty('reasoning');
@@ -155,7 +156,7 @@ describe('request-side reasoning control (end-to-end)', () => {
     const { status } = await request(app, '/v1/chat/completions', {
       model: 'auto',
       messages: [{ role: 'user', content: 'hi' }],
-    }, openaiHeaders());
+    }, await openaiHeaders());
     expect(status).toBe(200);
     expect(JSON.stringify(captured.body)).not.toContain('reasoning');
   });
@@ -165,7 +166,7 @@ describe('request-side reasoning control (end-to-end)', () => {
     const { status } = await request(app, '/v1/chat/completions', {
       model: 'auto', reasoning_effort: 'max',
       messages: [{ role: 'user', content: 'hi' }],
-    }, openaiHeaders());
+    }, await openaiHeaders());
     expect(status).toBe(200);
     expect(captured.body.reasoning_effort).toBe('high');
   });
@@ -175,7 +176,7 @@ describe('request-side reasoning control (end-to-end)', () => {
     const { status } = await request(app, '/v1/chat/completions', {
       model: 'auto', reasoning_effort: 'turbo-plus',
       messages: [{ role: 'user', content: 'hi' }],
-    }, openaiHeaders());
+    }, await openaiHeaders());
     expect(status).toBe(200);
     expect(captured.body).not.toHaveProperty('reasoning_effort');
   });
@@ -185,7 +186,7 @@ describe('request-side reasoning control (end-to-end)', () => {
     const { status, body } = await request(app, '/v1/chat/completions', {
       model: 'auto',
       messages: [{ role: 'user', content: '2+2?' }],
-    }, openaiHeaders());
+    }, await openaiHeaders());
     expect(status).toBe(200);
     const msg = body.choices[0].message;
     expect(msg.content).toBe('The answer is 4.');
@@ -204,7 +205,7 @@ describe('request-side reasoning control (end-to-end)', () => {
     const { status, text } = await request(app, '/v1/chat/completions', {
       model: 'auto', stream: true,
       messages: [{ role: 'user', content: 'q' }],
-    }, openaiHeaders());
+    }, await openaiHeaders());
     expect(status).toBe(200);
     const frames = sseData(text);
     const reasoning = frames.map(f => f.choices?.[0]?.delta?.reasoning_content ?? '').join('');
@@ -218,19 +219,19 @@ describe('request-side reasoning control (end-to-end)', () => {
 describe('Anthropic surface: thinking knob + thinking blocks', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
-    db.prepare('DELETE FROM rate_limit_usage').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
+    (await db.run('DELETE FROM rate_limit_usage'));
     const { status } = await request(app, '/api/keys',
       { platform: 'groq', key: 'gsk_reasoning_anthropic_test', label: 't' },
       { Authorization: `Bearer ${dashToken}` });
@@ -264,7 +265,7 @@ describe('Anthropic surface: thinking knob + thinking blocks', () => {
       model: 'claude-sonnet-4-5', max_tokens: 64,
       thinking: { type: 'adaptive' },
       messages: [{ role: 'user', content: 'hi' }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(status).toBe(200);
     expect(captured.body).not.toHaveProperty('reasoning_effort');
   });
@@ -275,7 +276,7 @@ describe('Anthropic surface: thinking knob + thinking blocks', () => {
       model: 'claude-sonnet-4-5', max_tokens: 64,
       thinking: { type: 'enabled', budget_tokens: 32000 },
       messages: [{ role: 'user', content: 'hi' }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(status).toBe(200);
     expect(captured.body.reasoning_effort).toBe('high');
   });
@@ -285,7 +286,7 @@ describe('Anthropic surface: thinking knob + thinking blocks', () => {
     const { status } = await request(app, '/v1/messages', {
       model: 'claude-sonnet-4-5', max_tokens: 64,
       messages: [{ role: 'user', content: 'hi' }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(status).toBe(200);
     expect(JSON.stringify(captured.body)).not.toContain('reasoning');
   });
@@ -295,7 +296,7 @@ describe('Anthropic surface: thinking knob + thinking blocks', () => {
     const { status, body } = await request(app, '/v1/messages', {
       model: 'claude-sonnet-4-5', max_tokens: 64,
       messages: [{ role: 'user', content: '2+2?' }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(status).toBe(200);
     expect(body.content).toEqual([
       { type: 'thinking', thinking: 'consider the sum', signature: '' },
@@ -313,7 +314,7 @@ describe('Anthropic surface: thinking knob + thinking blocks', () => {
     const { status, text } = await request(app, '/v1/messages', {
       model: 'claude-sonnet-4-5', max_tokens: 64, stream: true,
       messages: [{ role: 'user', content: 'q' }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(status).toBe(200);
     const events = anthropicEvents(text);
     const starts = events.filter(e => e.event === 'content_block_start');

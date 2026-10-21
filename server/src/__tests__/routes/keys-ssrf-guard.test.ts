@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { proxyFetch } from '../../lib/proxy.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // SSRF guard (#440): the custom-provider base_url is the only user-supplied
 // outbound target. Metadata/link-local addresses must be rejected at save
@@ -31,12 +32,12 @@ async function post(app: Express, path: string, body: unknown) {
 describe('POST /api/keys/custom SSRF guard (#440)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    getDb().prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+    await initTestDb();
+    await getDb().run("DELETE FROM settings WHERE key = 'active_profile_id'");
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   it('rejects an AWS metadata base URL', async () => {

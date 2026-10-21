@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 import { ensureAllModelsInProfiles, ensureModelInProfiles } from '../../services/profile-models.js';
 import { resolveRoutingChain } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Named fallback chains you build by hand (#895). Two things have to hold for
 // a curated chain to survive: creating one must not dump the whole catalog
@@ -29,121 +30,115 @@ async function request(method: string, path: string, body?: unknown) {
   return { status: res.status, body: data };
 }
 
-function chainSize(profileId: number): number {
-  return (getDb().prepare('SELECT COUNT(*) AS n FROM profile_models WHERE profile_id = ?')
-    .get(profileId) as { n: number }).n;
+async function chainSize(profileId: number): number {
+  return ((await getDb().get('SELECT COUNT(*) AS n FROM profile_models WHERE profile_id = ?', [profileId])) as { n: number }).n;
 }
 
 /** Enabled catalog models — what GET /api/fallback lists for any chain. */
-function catalogSize(): number {
-  return (getDb().prepare('SELECT COUNT(*) AS n FROM models WHERE enabled = 1')
-    .get() as { n: number }).n;
+async function catalogSize(): number {
+  return ((await getDb().get('SELECT COUNT(*) AS n FROM models WHERE enabled = 1')) as { n: number }).n;
 }
 
 /** The single global table every chain used to be aliased onto (#1021). */
-function globalConfig(): { model_db_id: number; priority: number; enabled: number }[] {
-  return getDb().prepare(
-    'SELECT model_db_id, priority, enabled FROM fallback_config ORDER BY model_db_id',
-  ).all() as { model_db_id: number; priority: number; enabled: number }[];
+async function globalConfig(): { model_db_id: number; priority: number; enabled: number }[] {
+  return (await getDb().all('SELECT model_db_id, priority, enabled FROM fallback_config ORDER BY model_db_id')) as { model_db_id: number; priority: number; enabled: number }[];
 }
 
-function autoInclude(profileId: number): number {
-  return (getDb().prepare('SELECT auto_include_new_models AS flag FROM profiles WHERE id = ?')
-    .get(profileId) as { flag: number }).flag;
+async function autoInclude(profileId: number): number {
+  return ((await getDb().get('SELECT auto_include_new_models AS flag FROM profiles WHERE id = ?', [profileId])) as { flag: number }).flag;
 }
 
 // A model that arrives after the chains already exist — what a catalog sync
 // produces, and what the backfill would otherwise push into every chain.
-function addCatalogModel(modelId: string): number {
+async function addCatalogModel(modelId: string): number {
   const db = getDb();
-  const inserted = db.prepare(`
+  const inserted = (await db.run(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, enabled)
-    VALUES ('groq', ?, ?, 500, 500, 'Small', 1)
-  `).run(modelId, `Synced ${modelId}`);
+    VALUES ('groq', ?, ?, 500, 500, 'Small', 1) RETURNING id`, [modelId, `Synced ${modelId}`]));
   const id = Number(inserted.lastInsertRowid);
-  db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 500, 1)').run(id);
+  (await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 500, 1) RETURNING id', [id]));
   return id;
 }
 
 describe('named fallback chains', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   it('creates an empty chain that holds nothing (#895)', async () => {
     const { status, body } = await request('POST', '/api/profiles', { name: 'hand-built', empty: true });
     expect(status).toBe(201);
     expect(body.name).toBe('hand-built');
-    expect(chainSize(body.id)).toBe(0);
+    expect(await chainSize(body.id)).toBe(0);
     // An empty chain opts out of the backfill by construction — otherwise the
     // next catalog sync would undo the emptiness.
-    expect(autoInclude(body.id)).toBe(0);
+    expect(await autoInclude(body.id)).toBe(0);
   });
 
   it('still copies the catalog when empty is not asked for', async () => {
     const { status, body } = await request('POST', '/api/profiles', { name: 'inherited' });
     expect(status).toBe(201);
 
-    const catalogSize = (getDb().prepare('SELECT COUNT(*) AS n FROM fallback_config').get() as { n: number }).n;
+    const catalogSize = ((await getDb().get('SELECT COUNT(*) AS n FROM fallback_config')) as { n: number }).n;
     expect(catalogSize).toBeGreaterThan(0);
-    expect(chainSize(body.id)).toBe(catalogSize);
-    expect(autoInclude(body.id)).toBe(1);
+    expect(await chainSize(body.id)).toBe(catalogSize);
+    expect(await autoInclude(body.id)).toBe(1);
   });
 
   it('lets empty win over a source chain to copy from', async () => {
     const source = await request('POST', '/api/profiles', { name: 'source' });
-    expect(chainSize(source.body.id)).toBeGreaterThan(0);
+    expect(await chainSize(source.body.id)).toBeGreaterThan(0);
 
     const { status, body } = await request('POST', '/api/profiles', {
       name: 'empty-clone', empty: true, sourceProfileId: source.body.id,
     });
     expect(status).toBe(201);
-    expect(chainSize(body.id)).toBe(0);
+    expect(await chainSize(body.id)).toBe(0);
   });
 
   it('keeps a curated chain pruned across a catalog backfill (#895)', async () => {
     const curated = (await request('POST', '/api/profiles', { name: 'curated', empty: true })).body;
     const inheriting = (await request('POST', '/api/profiles', { name: 'inheriting' })).body;
-    const inheritingBefore = chainSize(inheriting.id);
+    const inheritingBefore = await chainSize(inheriting.id);
 
-    addCatalogModel('backfill-arrival');
-    ensureAllModelsInProfiles(getDb());
+    await addCatalogModel('backfill-arrival');
+    await ensureAllModelsInProfiles(getDb());
 
     // The chain that opted in grew by the new model; the curated one did not.
-    expect(chainSize(inheriting.id)).toBe(inheritingBefore + 1);
-    expect(chainSize(curated.id)).toBe(0);
+    expect(await chainSize(inheriting.id)).toBe(inheritingBefore + 1);
+    expect(await chainSize(curated.id)).toBe(0);
   });
 
   it('keeps a curated chain pruned when a single model is registered', async () => {
     const curated = (await request('POST', '/api/profiles', { name: 'curated', empty: true })).body;
     const inheriting = (await request('POST', '/api/profiles', { name: 'inheriting' })).body;
-    const inheritingBefore = chainSize(inheriting.id);
+    const inheritingBefore = await chainSize(inheriting.id);
 
     // The per-model path, used when one custom endpoint model is registered.
-    const modelDbId = addCatalogModel('single-arrival');
-    ensureModelInProfiles(getDb(), modelDbId);
+    const modelDbId = await addCatalogModel('single-arrival');
+    await ensureModelInProfiles(getDb(), modelDbId);
 
-    expect(chainSize(inheriting.id)).toBe(inheritingBefore + 1);
-    expect(chainSize(curated.id)).toBe(0);
+    expect(await chainSize(inheriting.id)).toBe(inheritingBefore + 1);
+    expect(await chainSize(curated.id)).toBe(0);
   });
 
   it('lets a chain opt out of the backfill after the fact', async () => {
     const chain = (await request('POST', '/api/profiles', { name: 'settled' })).body;
-    expect(autoInclude(chain.id)).toBe(1);
+    expect(await autoInclude(chain.id)).toBe(1);
 
     // Prune it by hand, then stop new models from being pushed back in.
-    getDb().prepare('DELETE FROM profile_models WHERE profile_id = ?').run(chain.id);
+    (await getDb().run('DELETE FROM profile_models WHERE profile_id = ?', [chain.id]));
     const updated = await request('PUT', `/api/profiles/${chain.id}`, { auto_include_new_models: false });
     expect(updated.status).toBe(200);
     expect(updated.body.auto_include_new_models).toBe(0);
-    expect(autoInclude(chain.id)).toBe(0);
+    expect(await autoInclude(chain.id)).toBe(0);
 
-    addCatalogModel('after-opt-out');
-    ensureAllModelsInProfiles(getDb());
-    expect(chainSize(chain.id)).toBe(0);
+    await addCatalogModel('after-opt-out');
+    await ensureAllModelsInProfiles(getDb());
+    expect(await chainSize(chain.id)).toBe(0);
   });
 
   it('shows an empty active chain as the catalog with nothing turned on (#1021)', async () => {
@@ -156,21 +151,21 @@ describe('named fallback chains', () => {
     // opt-ins, not an empty page — and not one of them is enabled. Before the
     // fix the zero-row chain fell through to the global table and displayed the
     // whole catalog switched ON.
-    expect(body.length).toBe(catalogSize());
+    expect(body.length).toBe(await catalogSize());
     expect(body.every((row: { enabled: boolean }) => row.enabled === false)).toBe(true);
     // Priorities stay monotonic so the table renders in a stable order.
     for (let i = 1; i < body.length; i++) {
       expect(body[i].priority).toBeGreaterThanOrEqual(body[i - 1].priority);
     }
     // Reading the chain never writes to it.
-    expect(chainSize(empty.id)).toBe(0);
+    expect(await chainSize(empty.id)).toBe(0);
   });
 
   it('fills an empty chain on save without touching the global table (#1021)', async () => {
     const chain = (await request('POST', '/api/profiles', { name: 'built', empty: true })).body;
     await request('POST', '/api/profiles/active', { profileId: chain.id });
 
-    const before = globalConfig();
+    const before = await globalConfig();
     const listed = (await request('GET', '/api/fallback')).body as { modelDbId: number }[];
     const picked = [listed[0].modelDbId, listed[1].modelDbId];
     const saved = await request('PUT', '/api/fallback', listed.map((row, index) => ({
@@ -181,12 +176,10 @@ describe('named fallback chains', () => {
     expect(saved.status).toBe(200);
 
     // The two picks landed in THIS chain, enabled...
-    const enabled = getDb().prepare(
-      'SELECT model_db_id FROM profile_models WHERE profile_id = ? AND enabled = 1 ORDER BY priority',
-    ).all(chain.id) as { model_db_id: number }[];
+    const enabled = (await getDb().all('SELECT model_db_id FROM profile_models WHERE profile_id = ? AND enabled = 1 ORDER BY priority', [chain.id])) as { model_db_id: number }[];
     expect(enabled.map(r => r.model_db_id)).toEqual(picked);
     // ...and the global fallback_config every chain used to share is untouched.
-    expect(globalConfig()).toEqual(before);
+    expect(await globalConfig()).toEqual(before);
   });
 
   it('keeps two empty chains from sharing one configuration (#1021)', async () => {
@@ -215,18 +208,16 @@ describe('named fallback chains', () => {
     const chain = (await request('POST', '/api/profiles', { name: 'sorted', empty: true })).body;
     await request('POST', '/api/profiles/active', { profileId: chain.id });
 
-    const before = globalConfig();
+    const before = await globalConfig();
     const sorted = await request('POST', '/api/fallback/sort/speed');
     expect(sorted.status).toBe(200);
 
-    const rows = getDb().prepare(
-      'SELECT model_db_id, priority, enabled FROM profile_models WHERE profile_id = ? ORDER BY priority',
-    ).all(chain.id) as { model_db_id: number; priority: number; enabled: number }[];
+    const rows = (await getDb().all('SELECT model_db_id, priority, enabled FROM profile_models WHERE profile_id = ? ORDER BY priority', [chain.id])) as { model_db_id: number; priority: number; enabled: number }[];
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.map(r => r.priority)).toEqual(rows.map((_, i) => i + 1));
     // A sort orders the list; it must never switch models on behind the operator.
     expect(rows.every(r => r.enabled === 0)).toBe(true);
-    expect(globalConfig()).toEqual(before);
+    expect(await globalConfig()).toEqual(before);
   });
 
   it('reports the flag on the chain listing so the dashboard can show it', async () => {
@@ -254,8 +245,8 @@ describe('named fallback chains', () => {
     expect(renamed.body.name).toBe('new-name');
 
     // The routing side resolves the new name and not the old one.
-    expect(() => resolveRoutingChain('auto:new-name')).not.toThrow();
-    expect(() => resolveRoutingChain('auto:old-name')).toThrow(/not found/i);
+    expect(async () => await resolveRoutingChain('auto:new-name')).not.toThrow();
+    expect(async () => await resolveRoutingChain('auto:old-name')).toThrow(/not found/i);
   });
 
   it('rejects a rename that collides with another chain, case-insensitively', async () => {
@@ -289,7 +280,7 @@ describe('named fallback chains', () => {
 
   it('refuses to rename built-in chains with a clear 403', async () => {
     const db = getDb();
-    const builtin = db.prepare("SELECT id FROM profiles WHERE type != 'custom'").get() as { id: number };
+    const builtin = (await db.get("SELECT id FROM profiles WHERE type != 'custom'")) as { id: number };
 
     const denied = await request('PUT', `/api/profiles/${builtin.id}`, { name: 'clever' });
     expect(denied.status).toBe(403);

@@ -13,7 +13,7 @@ vi.mock('../../services/health.js', () => ({
   markKeyHealthyFromRequest: vi.fn(),
 }));
 
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import {
   runFallbackLoop,
   newFallbackState,
@@ -46,6 +46,7 @@ import {
 import { invalidToolArgumentsError } from '../../lib/tool-validate.js';
 import { getAllPenalties } from '../../services/router.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Distinct keyId AND modelDbId per fake route: the router's penalty map and the
 // cooldown store are module-global, so shared ids would leak state across tests.
@@ -77,15 +78,15 @@ function hooksSkeleton(overrides: Partial<FallbackHooks>): FallbackHooks {
 const authRecord = (n: number): AttemptRecord[] =>
   Array.from({ length: n }, (_, i) => ({ platform: 'fake', modelId: 'm', keyOrdinal: i + 1, errorClass: 'auth' as const }));
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   mockCheckKeyHealth.mockReset();
   mockCheckKeyHealth.mockResolvedValue('invalid');
-  getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+  (await getDb().run('DELETE FROM rate_limit_cooldowns'));
   resetEmptyCompletionStreaks();
   resetTruncationStreaks();
 });
@@ -130,18 +131,18 @@ describe('isDailyQuotaExhaustedError + midnight benching (drift: 90s cooldown on
     expect(msUntilNextPacificMidnight(Date.parse(now))).toBe(Date.parse(reset) - Date.parse(now));
   });
 
-  it('keeps a Gemini daily violation benched past a short RetryInfo delay', () => {
+  it('keeps a Gemini daily violation benched past a short RetryInfo delay', async () => {
     const err = Object.assign(new Error('Quota exceeded'), {
       status: 429, dailyQuotaExhausted: true, retryAfterMs: 17_000,
     });
     expect(isDailyQuotaExhaustedError(err)).toBe(true);
-    const duration = cooldownForError(fakeRoute({ platform: 'google' }), err);
+    const duration = await cooldownForError(fakeRoute({ platform: 'google' }), err);
     expect(Math.abs(duration - msUntilNextPacificMidnight())).toBeLessThan(1_000);
   });
 
-  it('keeps a Gemini per-minute violation on the transient cooldown', () => {
+  it('keeps a Gemini per-minute violation on the transient cooldown', async () => {
     const err = Object.assign(new Error('Quota exceeded'), { status: 429, dailyQuotaExhausted: false, retryAfterMs: 17_000 });
-    expect(cooldownForError(fakeRoute({ platform: 'google' }), err)).toBe(90_000);
+    expect(await cooldownForError(fakeRoute({ platform: 'google' }), err)).toBe(90_000);
   });
 
   it('flags real daily-allocation 429 bodies', () => {
@@ -173,10 +174,10 @@ describe('isDailyQuotaExhaustedError + midnight benching (drift: 90s cooldown on
     expect(isDailyQuotaExhaustedError(perDay)).toBe(true);
   });
 
-  it('cooldownForError benches a daily-allocation 429 until the next UTC midnight', () => {
+  it('cooldownForError benches a daily-allocation 429 until the next UTC midnight', async () => {
     const route = fakeRoute();
     const err = Object.assign(new Error('you have used up your daily free allocation of 10,000 neurons'), { status: 429 });
-    const ms = cooldownForError(route, err);
+    const ms = await cooldownForError(route, err);
     expect(Math.abs(ms - msUntilNextUtcMidnight())).toBeLessThan(5_000);
     expect(ms).toBeGreaterThanOrEqual(60_000);
   });
@@ -186,7 +187,7 @@ describe('isDailyQuotaExhaustedError + midnight benching (drift: 90s cooldown on
     expect(msUntilNextUtcMidnight(justBeforeMidnight)).toBe(60_000);
   });
 
-  it('honors an explicit Retry-After over the midnight bench (rolling daily windows)', () => {
+  it('honors an explicit Retry-After over the midnight bench (rolling daily windows)', async () => {
     // Groq-style rolling RPD: the body names a daily limit AND the response
     // carries Retry-After ("try again in 7m12s"). The provider knows its own
     // reset time; benching to UTC midnight would over-bench by hours.
@@ -196,58 +197,56 @@ describe('isDailyQuotaExhaustedError + midnight benching (drift: 90s cooldown on
       new Error('Groq API error 429: Rate limit reached on requests per day (RPD): Limit 1000. Please try again in 7m12s.'),
       { status: 429, retryAfterMs },
     );
-    expect(cooldownForError(route, err)).toBe(retryAfterMs);
+    expect(await cooldownForError(route, err)).toBe(retryAfterMs);
   });
 });
 
 describe('recordRetryableFailure context-length rejection (#1479)', () => {
-  it('learns the reported window and rules the model out without a cooldown or penalty', () => {
-    const modelDbId = getDb().prepare(
-      `INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, context_window)
-       VALUES ('fake', ?, 'Fake', 50, 50, 1000000)`,
-    ).run(`ctx-${keySeq}`).lastInsertRowid as number;
+  it('learns the reported window and rules the model out without a cooldown or penalty', async () => {
+    const modelDbId = (await getDb().run(`INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, context_window)
+       VALUES ('fake', ?, 'Fake', 50, 50, 1000000) RETURNING id`, [`ctx-${keySeq}`])).lastInsertRowid as number;
     const route = fakeRoute({ modelDbId });
     const state = newFallbackState();
     const err = Object.assign(
       new Error("OpenRouter API error 400: This endpoint's maximum context length is 262144 tokens. However, you requested about 404225 tokens (396033 of text input, 8192 in the output)."),
       { status: 400 },
     );
-    recordRetryableFailure(route, err, state);
+    await recordRetryableFailure(route, err, state);
 
     expect(state.skipModels.has(modelDbId)).toBe(true);
-    const window = (getDb().prepare('SELECT context_window FROM models WHERE id = ?').get(modelDbId) as { context_window: number }).context_window;
+    const window = ((await getDb().get('SELECT context_window FROM models WHERE id = ?', [modelDbId])) as { context_window: number }).context_window;
     expect(window).toBe(262144);
-    const cooldown = getDb().prepare('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?').get('fake', route.keyId);
+    const cooldown = (await getDb().get('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?', ['fake', route.keyId]));
     expect(cooldown).toBeUndefined();
     expect(getAllPenalties().some(p => p.modelDbId === modelDbId)).toBe(false);
   });
 });
 
 describe('recordRetryableFailure skipBench exemption (reasoning truncation)', () => {
-  it('skips cooldown + penalty but still rules the key out for this request', () => {
+  it('skips cooldown + penalty but still rules the key out for this request', async () => {
     const route = fakeRoute();
     const state = newFallbackState();
     const err = Object.assign(new Error(`empty completion from ${route.displayName}`), { skipBench: true });
-    recordRetryableFailure(route, err, state);
+    await recordRetryableFailure(route, err, state);
 
     expect(state.skipKeys.has(`fake:fake-model:${route.keyId}`)).toBe(true);
-    const cooldown = getDb().prepare('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?').get('fake', route.keyId);
+    const cooldown = (await getDb().get('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?', ['fake', route.keyId]));
     expect(cooldown).toBeUndefined();
     expect(getAllPenalties().some(p => p.modelDbId === route.modelDbId)).toBe(false);
   });
 
-  it('control: the same error WITHOUT the flag benches and penalizes as before', () => {
+  it('control: the same error WITHOUT the flag benches and penalizes as before', async () => {
     const route = fakeRoute();
     const state = newFallbackState();
-    recordRetryableFailure(route, new Error(`empty completion from ${route.displayName}`), state);
+    await recordRetryableFailure(route, new Error(`empty completion from ${route.displayName}`), state);
 
-    const cooldown = getDb().prepare('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?').get('fake', route.keyId);
+    const cooldown = (await getDb().get('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?', ['fake', route.keyId]));
     expect(cooldown).toBeDefined();
     // modelDbId 424242 has no sibling key rows, so the penalty fires.
     expect(getAllPenalties().some(p => p.modelDbId === route.modelDbId)).toBe(true);
   });
 
-  it('skipModelForRequest rules out the whole model, not just the key', () => {
+  it('skipModelForRequest rules out the whole model, not just the key', async () => {
     // Format-ignore is MODEL behavior: a sibling key reproduces it exactly, so
     // burning one failover hop per key on the same model was pure waste.
     const route = fakeRoute();
@@ -256,12 +255,12 @@ describe('recordRetryableFailure skipBench exemption (reasoning truncation)', ()
       new Error(`${route.displayName} ignored response_format (returned non-JSON despite json_schema)`),
       { skipBench: true, skipModelForRequest: true },
     );
-    recordRetryableFailure(route, err, state);
+    await recordRetryableFailure(route, err, state);
 
     expect(state.skipModels.has(route.modelDbId)).toBe(true);
     expect(state.skipKeys.has(`fake:fake-model:${route.keyId}`)).toBe(true);
     // skipBench still applies: no cooldown, no penalty.
-    const cooldown = getDb().prepare('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?').get('fake', route.keyId);
+    const cooldown = (await getDb().get('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?', ['fake', route.keyId]));
     expect(cooldown).toBeUndefined();
     expect(getAllPenalties().some(p => p.modelDbId === route.modelDbId)).toBe(false);
   });
@@ -275,60 +274,60 @@ describe('recordRetryableFailure skipBench exemption (reasoning truncation)', ()
 describe('empty-completion streak lifts the skipBench exemption (#751)', () => {
   const emptyLengthErr = (route: RouteResult) =>
     Object.assign(new Error(`empty completion from ${route.displayName}`), { skipBench: true });
-  const cooldownFor = (route: RouteResult) =>
-    getDb().prepare('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?').get('fake', route.keyId);
+  const cooldownFor = async (route: RouteResult) =>
+    (await getDb().get('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?', ['fake', route.keyId]));
 
-  it('benches + penalizes from the Nth consecutive empty completion on the same model+key', () => {
+  it('benches + penalizes from the Nth consecutive empty completion on the same model+key', async () => {
     const route = fakeRoute();
     for (let i = 1; i < EMPTY_COMPLETION_STREAK_LIMIT; i++) {
-      expect(recordRetryableFailure(route, emptyLengthErr(route), newFallbackState())).toBe(true);
-      expect(cooldownFor(route)).toBeUndefined();
+      expect(await recordRetryableFailure(route, emptyLengthErr(route), newFallbackState())).toBe(true);
+      expect(await cooldownFor(route)).toBeUndefined();
     }
     // Streak limit reached: the exemption lifts and the normal path runs.
-    expect(recordRetryableFailure(route, emptyLengthErr(route), newFallbackState())).toBe(false);
-    expect(cooldownFor(route)).toBeDefined();
+    expect(await recordRetryableFailure(route, emptyLengthErr(route), newFallbackState())).toBe(false);
+    expect(await cooldownFor(route)).toBeDefined();
     expect(getAllPenalties().some(p => p.modelDbId === route.modelDbId)).toBe(true);
   });
 
-  it('a success on the model+key resets the streak', () => {
+  it('a success on the model+key resets the streak', async () => {
     const route = fakeRoute();
     for (let i = 1; i < EMPTY_COMPLETION_STREAK_LIMIT; i++) {
-      recordRetryableFailure(route, emptyLengthErr(route), newFallbackState());
+      await recordRetryableFailure(route, emptyLengthErr(route), newFallbackState());
     }
-    recordUpstreamSuccess(route, 0);
+    await recordUpstreamSuccess(route, 0);
     // The full pre-limit run is available again.
     for (let i = 1; i < EMPTY_COMPLETION_STREAK_LIMIT; i++) {
-      expect(recordRetryableFailure(route, emptyLengthErr(route), newFallbackState())).toBe(true);
+      expect(await recordRetryableFailure(route, emptyLengthErr(route), newFallbackState())).toBe(true);
     }
-    expect(cooldownFor(route)).toBeUndefined();
+    expect(await cooldownFor(route)).toBeUndefined();
   });
 
-  it('a normally-penalized failure resets the streak too', () => {
+  it('a normally-penalized failure resets the streak too', async () => {
     const route = fakeRoute();
     for (let i = 1; i < EMPTY_COMPLETION_STREAK_LIMIT; i++) {
-      recordRetryableFailure(route, emptyLengthErr(route), newFallbackState());
+      await recordRetryableFailure(route, emptyLengthErr(route), newFallbackState());
     }
     // A plain 429 takes the cooldown ladder — and breaks the streak.
-    recordRetryableFailure(route, Object.assign(new Error('429 Too Many Requests'), { status: 429 }), newFallbackState());
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+    await recordRetryableFailure(route, Object.assign(new Error('429 Too Many Requests'), { status: 429 }), newFallbackState());
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
     for (let i = 1; i < EMPTY_COMPLETION_STREAK_LIMIT; i++) {
-      expect(recordRetryableFailure(route, emptyLengthErr(route), newFallbackState())).toBe(true);
+      expect(await recordRetryableFailure(route, emptyLengthErr(route), newFallbackState())).toBe(true);
     }
-    expect(cooldownFor(route)).toBeUndefined();
+    expect(await cooldownFor(route)).toBeUndefined();
   });
 
-  it('format violations (skipModelForRequest) stay exempt and never accrue', () => {
+  it('format violations (skipModelForRequest) stay exempt and never accrue', async () => {
     const route = fakeRoute();
     const formatErr = () => Object.assign(
       new Error(`${route.displayName} ignored response_format (returned non-JSON despite json_schema)`),
       { skipBench: true, skipModelForRequest: true },
     );
     for (let i = 0; i < EMPTY_COMPLETION_STREAK_LIMIT * 2; i++) {
-      expect(recordRetryableFailure(route, formatErr(), newFallbackState())).toBe(true);
+      expect(await recordRetryableFailure(route, formatErr(), newFallbackState())).toBe(true);
     }
     // …and they did not pre-charge the empty-completion streak either.
-    expect(recordRetryableFailure(route, emptyLengthErr(route), newFallbackState())).toBe(true);
-    expect(cooldownFor(route)).toBeUndefined();
+    expect(await recordRetryableFailure(route, emptyLengthErr(route), newFallbackState())).toBe(true);
+    expect(await cooldownFor(route)).toBeUndefined();
   });
 
   it('an over-the-limit empty completion counts toward the breaker', async () => {
@@ -349,64 +348,62 @@ describe('empty-completion streak lifts the skipBench exemption (#751)', () => {
 describe('truncated-stream streak benches a sick route (#1218)', () => {
   const truncErr = (name: string) =>
     new Error(`${name} stream ended unexpectedly (no [DONE], no finish_reason) — connection reset or truncated upstream`);
-  const cooldownExpiry = (route: RouteResult): number | undefined => {
-    const row = getDb().prepare(
-      'SELECT expires_at_ms FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?',
-    ).get('fake', route.keyId) as { expires_at_ms: number } | undefined;
+  const cooldownExpiry = async (route: RouteResult): number | undefined => {
+    const row = (await getDb().get('SELECT expires_at_ms FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?', ['fake', route.keyId])) as { expires_at_ms: number } | undefined;
     return row?.expires_at_ms;
   };
 
-  it('a single truncation keeps the ordinary short transient bench', () => {
+  it('a single truncation keeps the ordinary short transient bench', async () => {
     const route = fakeRoute();
-    recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
+    await recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
     // The retryable ladder already benches briefly; the streak adds nothing yet.
-    const expiry = cooldownExpiry(route);
+    const expiry = await cooldownExpiry(route);
     expect(expiry).toBeDefined();
     expect(expiry! - Date.now()).toBeLessThan(TRUNCATION_BENCH_MS);
   });
 
-  it(`extends the bench to TRUNCATION_BENCH_MS from the Nth consecutive truncation on the same model+key`, () => {
+  it(`extends the bench to TRUNCATION_BENCH_MS from the Nth consecutive truncation on the same model+key`, async () => {
     const route = fakeRoute();
     for (let i = 1; i < TRUNCATION_STREAK_LIMIT; i++) {
-      recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
-      expect(cooldownExpiry(route)! - Date.now()).toBeLessThan(TRUNCATION_BENCH_MS);
+      await recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
+      expect(await cooldownExpiry(route)! - Date.now()).toBeLessThan(TRUNCATION_BENCH_MS);
     }
     // Streak limit reached: the bench is now the full truncation window.
-    recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
-    expect(cooldownExpiry(route)! - Date.now()).toBeGreaterThanOrEqual(TRUNCATION_BENCH_MS - 1000);
+    await recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
+    expect(await cooldownExpiry(route)! - Date.now()).toBeGreaterThanOrEqual(TRUNCATION_BENCH_MS - 1000);
   });
 
-  it('a success on the route resets the streak', () => {
+  it('a success on the route resets the streak', async () => {
     const route = fakeRoute();
     for (let i = 1; i < TRUNCATION_STREAK_LIMIT; i++) {
-      recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
+      await recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
     }
-    recordUpstreamSuccess(route, 0);
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+    await recordUpstreamSuccess(route, 0);
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
     for (let i = 1; i < TRUNCATION_STREAK_LIMIT; i++) {
-      recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
+      await recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
     }
-    expect(cooldownExpiry(route)! - Date.now()).toBeLessThan(TRUNCATION_BENCH_MS);
+    expect(await cooldownExpiry(route)! - Date.now()).toBeLessThan(TRUNCATION_BENCH_MS);
   });
 
-  it('a differently-classified failure on the route breaks the streak', () => {
+  it('a differently-classified failure on the route breaks the streak', async () => {
     const route = fakeRoute();
     for (let i = 1; i < TRUNCATION_STREAK_LIMIT; i++) {
-      recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
+      await recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
     }
     // A 429 takes the cooldown ladder — and breaks the truncation streak.
-    recordRetryableFailure(route, Object.assign(new Error('429 Too Many Requests'), { status: 429 }), newFallbackState());
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+    await recordRetryableFailure(route, Object.assign(new Error('429 Too Many Requests'), { status: 429 }), newFallbackState());
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
     for (let i = 1; i < TRUNCATION_STREAK_LIMIT; i++) {
-      recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
+      await recordRetryableFailure(route, truncErr(route.displayName), newFallbackState());
     }
-    expect(cooldownExpiry(route)! - Date.now()).toBeLessThan(TRUNCATION_BENCH_MS);
+    expect(await cooldownExpiry(route)! - Date.now()).toBeLessThan(TRUNCATION_BENCH_MS);
   });
 });
 
 describe('exhaustedRetryError attempt trail + auth exhaustion', () => {
-  it('all-auth attempts produce a distinct 502 provider_error body, not a rate-limit 429', () => {
-    const body = exhaustedRetryError(new Error('Groq API error 401: Invalid API Key'), 20, { attempts: authRecord(3) });
+  it('all-auth attempts produce a distinct 502 provider_error body, not a rate-limit 429', async () => {
+    const body = await exhaustedRetryError(new Error('Groq API error 401: Invalid API Key'), 20, { attempts: authRecord(3) });
     expect(body.kind).toBe('auth');
     expect(body.status).toBe(502);
     expect(body.type).toBe('provider_error');
@@ -415,12 +412,12 @@ describe('exhaustedRetryError attempt trail + auth exhaustion', () => {
     expect(body.message).not.toContain('rate-limited');
   });
 
-  it('mixed attempts keep the rate-limit body and carry the trail + attempt count', () => {
+  it('mixed attempts keep the rate-limit body and carry the trail + attempt count', async () => {
     const attempts: AttemptRecord[] = [
       { platform: 'groq', modelId: 'llama-3.3-70b', keyOrdinal: 1, errorClass: 'rate_limited' },
       { platform: 'cloudflare', modelId: 'qwen', keyOrdinal: 2, errorClass: 'daily_quota_exhausted' },
     ];
-    const body = exhaustedRetryError(new Error('429 Too Many Requests'), 20, { attempts });
+    const body = await exhaustedRetryError(new Error('429 Too Many Requests'), 20, { attempts });
     expect(body.kind).toBe('rate_limit');
     expect(body.status).toBe(429);
     expect(body.message).toContain('after 2 attempts');
@@ -428,14 +425,14 @@ describe('exhaustedRetryError attempt trail + auth exhaustion', () => {
     expect(body.message).toContain('cloudflare/qwen key2: daily_quota_exhausted');
   });
 
-  it('a timed-out loop says so in the body', () => {
-    const body = exhaustedRetryError(new Error('429'), 20, { attempts: authRecord(1), timedOut: true, budgetMs: 45000 });
+  it('a timed-out loop says so in the body', async () => {
+    const body = await exhaustedRetryError(new Error('429'), 20, { attempts: authRecord(1), timedOut: true, budgetMs: 45000 });
     expect(body.message).toContain('retry time budget 45s exceeded');
   });
 
-  it('provider-invalid exhaustion keeps the 400 invalid_request body (unchanged contract)', () => {
+  it('provider-invalid exhaustion keeps the 400 invalid_request body (unchanged contract)', async () => {
     const err = Object.assign(new Error('Google API error 400: Invalid JSON payload received'), { status: 400 });
-    const body = exhaustedRetryError(err, 20, {
+    const body = await exhaustedRetryError(err, 20, {
       attempts: [{ platform: 'google', modelId: 'gemini', keyOrdinal: 1, errorClass: 'provider_bad_request' }],
     });
     expect(body.status).toBe(400);
@@ -482,7 +479,7 @@ describe('runFallbackLoop: auth rotation (401 is key-fatal, not request-fatal)',
     expect(state.skipKeys.has(`fake:fake-model:${badRoute.keyId}`)).toBe(true);
     expect(mockCheckKeyHealth).toHaveBeenCalledWith(badRoute.keyId);
     // Benched to cover the window until revalidation flips the key status.
-    const row = getDb().prepare('SELECT expires_at_ms FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?').get('fake', badRoute.keyId) as { expires_at_ms: number };
+    const row = (await getDb().get('SELECT expires_at_ms FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?', ['fake', badRoute.keyId])) as { expires_at_ms: number };
     expect(row.expires_at_ms - Date.now()).toBeGreaterThan(AUTH_FAILURE_COOLDOWN_MS - 10_000);
     // A key problem is not a model problem: no model penalty.
     expect(getAllPenalties().some(p => p.modelDbId === badRoute.modelDbId)).toBe(false);
@@ -532,17 +529,17 @@ describe('runFallbackLoop: wall-clock retry budget', () => {
     expect(onExhausted.mock.calls[0][1].timedOut).toBe(false);
   });
 
-  it('getFallbackTimeBudgetMs: env var wins over the default; setting wins over env', () => {
+  it('getFallbackTimeBudgetMs: env var wins over the default; setting wins over env', async () => {
     const original = process.env.FALLBACK_TIME_BUDGET_MS;
     try {
       delete process.env.FALLBACK_TIME_BUDGET_MS;
-      expect(getFallbackTimeBudgetMs()).toBe(DEFAULT_FALLBACK_TIME_BUDGET_MS);
+      expect(await getFallbackTimeBudgetMs()).toBe(DEFAULT_FALLBACK_TIME_BUDGET_MS);
       process.env.FALLBACK_TIME_BUDGET_MS = '12345';
-      expect(getFallbackTimeBudgetMs()).toBe(12345);
-      getDb().prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('fallback_time_budget_ms', '999')").run();
-      expect(getFallbackTimeBudgetMs()).toBe(999);
+      expect(await getFallbackTimeBudgetMs()).toBe(12345);
+      (await getDb().run("INSERT INTO settings (key, value) VALUES ('fallback_time_budget_ms', '999') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"));
+      expect(await getFallbackTimeBudgetMs()).toBe(999);
     } finally {
-      getDb().prepare("DELETE FROM settings WHERE key = 'fallback_time_budget_ms'").run();
+      (await getDb().run("DELETE FROM settings WHERE key = 'fallback_time_budget_ms'"));
       if (original === undefined) delete process.env.FALLBACK_TIME_BUDGET_MS;
       else process.env.FALLBACK_TIME_BUDGET_MS = original;
     }

@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #705: the dashboard only ever renders a masked key, and reading one back meant
 // exporting every key to a file. Revealing ONE key is the same privilege, so it
@@ -38,15 +39,15 @@ async function addKey(key = 'gsk_testkey123') {
 }
 
 describe('Reveal one key — password re-verification (#705)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    token = mintDashboardToken();
+    token = await mintDashboardToken();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
+  beforeEach(async () => {
+    await getDb().run('DELETE FROM api_keys');
   });
 
   it('returns the plaintext key for the right password', async () => {

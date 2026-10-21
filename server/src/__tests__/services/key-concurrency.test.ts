@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { initDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 import {
   acquireLease,
   releaseLease,
@@ -16,8 +16,8 @@ import {
  * concurrency per credential.
  */
 describe('in-flight leases', () => {
-  beforeEach(() => {
-    initDb(':memory:');
+  beforeEach(async () => {
+    await initTestDb();
     resetLeases();
   });
 
@@ -64,8 +64,8 @@ describe('in-flight leases', () => {
 });
 
 describe('per-key concurrency cap', () => {
-  beforeEach(() => {
-    initDb(':memory:');
+  beforeEach(async () => {
+    await initTestDb();
     resetLeases();
   });
 

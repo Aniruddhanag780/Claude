@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Server } from 'node:http';
 import { createApp } from '../../app.js';
-import { initDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Raw node:http (not global fetch): undici transparently decompresses gzip and
 // hides Content-Encoding, which would make the compression assertions below
@@ -47,7 +47,7 @@ describe('static SPA: gzip compression + asset cache headers', () => {
 
   beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
 
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'freeapi-static-cache-'));
     fs.mkdirSync(path.join(tmpDir, 'assets'), { recursive: true });

@@ -12,7 +12,7 @@ vi.mock('../../services/health.js', () => ({
   markKeyHealthyFromRequest: vi.fn(),
 }));
 
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import {
   newFallbackState,
@@ -31,18 +31,18 @@ import {
   PAYMENT_REQUIRED_COOLDOWN_MS,
 } from '../../services/ratelimit.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const PLATFORM = 'groq';
 let keyA = 0;
 let keyB = 0;
 let models: { id: number; model_id: string }[] = [];
 
-function insertKey(label: string): number {
+async function insertKey(label: string): number {
   const { encrypted, iv, authTag } = encrypt(`test-${label}`);
-  const info = getDb().prepare(`
+  const info = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, ?, ?, ?, ?, 'healthy', 1)
-  `).run(PLATFORM, label, encrypted, iv, authTag);
+    VALUES (?, ?, ?, ?, ?, 'healthy', 1) RETURNING id`, [PLATFORM, label, encrypted, iv, authTag]));
   return Number(info.lastInsertRowid);
 }
 
@@ -71,17 +71,15 @@ const TIER_403 = () => Object.assign(
   { status: 403 },
 );
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
   const db = getDb();
-  db.prepare('DELETE FROM api_keys').run();
-  keyA = insertKey('key-a');
-  keyB = insertKey('key-b');
+  (await db.run('DELETE FROM api_keys'));
+  keyA = await insertKey('key-a');
+  keyB = await insertKey('key-b');
   resetKeyLocalityCache();
-  models = db.prepare(
-    'SELECT id, model_id FROM models WHERE platform = ? AND enabled = 1 ORDER BY id'
-  ).all(PLATFORM) as { id: number; model_id: string }[];
+  models = (await db.all('SELECT id, model_id FROM models WHERE platform = ? AND enabled = 1 ORDER BY id', [PLATFORM])) as { id: number; model_id: string }[];
   expect(models.length).toBeGreaterThanOrEqual(3);
 });
 

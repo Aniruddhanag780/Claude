@@ -1,9 +1,10 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { logRequest } from '../../lib/request-log.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -22,11 +23,10 @@ async function request(app: Express, path: string) {
   return { status: res.status, body: data };
 }
 
-function insertCall(createdAt: string, clientIp: string | null, clientUserAgent: string | null, status = 'success', platform = 'test') {
-  getDb().prepare(`
+async function insertCall(createdAt: string, clientIp: string | null, clientUserAgent: string | null, status = 'success', platform = 'test') {
+  (await getDb().run(`
     INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, error, created_at, client_ip, client_user_agent)
-    VALUES (?, 'test-model', ?, 10, 5, 42, NULL, ?, ?, ?)
-  `).run(platform, status, createdAt, clientIp, clientUserAgent);
+    VALUES (?, 'test-model', ?, 10, 5, 42, NULL, ?, ?, ?) RETURNING id`, [platform, status, createdAt, clientIp, clientUserAgent]));
 }
 
 function recentUtcTimestamp(hour: number) {
@@ -41,21 +41,21 @@ function recentUtcTimestamp(hour: number) {
 describe('GET /api/analytics/requests', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM requests').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM requests'));
   });
 
   it('returns one row per call, newest first, with caller identity', async () => {
-    insertCall(recentUtcTimestamp(10).sql, '192.168.0.3', 'curl/8.6.0');
-    insertCall(recentUtcTimestamp(11).sql, '192.168.0.15', 'python-httpx/0.27');
-    insertCall(recentUtcTimestamp(12).sql, null, null);
+    await insertCall(recentUtcTimestamp(10).sql, '192.168.0.3', 'curl/8.6.0');
+    await insertCall(recentUtcTimestamp(11).sql, '192.168.0.15', 'python-httpx/0.27');
+    await insertCall(recentUtcTimestamp(12).sql, null, null);
 
     const { status, body } = await request(app, '/api/analytics/requests?range=7d');
     expect(status).toBe(200);
@@ -76,7 +76,7 @@ describe('GET /api/analytics/requests', () => {
   });
 
   it('paginates with limit/offset and clamps limit to 500', async () => {
-    for (let i = 0; i < 5; i++) insertCall(recentUtcTimestamp(i).sql, '10.0.0.1', 'ua');
+    for (let i = 0; i < 5; i++) await insertCall(recentUtcTimestamp(i).sql, '10.0.0.1', 'ua');
 
     const page = await request(app, '/api/analytics/requests?range=7d&limit=2&offset=2');
     expect(page.body.total).toBe(5);
@@ -88,9 +88,9 @@ describe('GET /api/analytics/requests', () => {
   });
 
   it('filters by status, keeping total consistent with the filter', async () => {
-    insertCall(recentUtcTimestamp(8).sql, '10.0.0.1', 'ua', 'success');
-    insertCall(recentUtcTimestamp(9).sql, '10.0.0.1', 'ua', 'error');
-    insertCall(recentUtcTimestamp(10).sql, '10.0.0.1', 'ua', 'error');
+    await insertCall(recentUtcTimestamp(8).sql, '10.0.0.1', 'ua', 'success');
+    await insertCall(recentUtcTimestamp(9).sql, '10.0.0.1', 'ua', 'error');
+    await insertCall(recentUtcTimestamp(10).sql, '10.0.0.1', 'ua', 'error');
 
     const errors = await request(app, '/api/analytics/requests?range=7d&status=error');
     expect(errors.status).toBe(200);
@@ -103,8 +103,8 @@ describe('GET /api/analytics/requests', () => {
   });
 
   it("filters by the 'canceled' status (#752)", async () => {
-    insertCall(recentUtcTimestamp(8).sql, '10.0.0.1', 'ua', 'success');
-    insertCall(recentUtcTimestamp(9).sql, '10.0.0.1', 'ua', 'canceled');
+    await insertCall(recentUtcTimestamp(8).sql, '10.0.0.1', 'ua', 'success');
+    await insertCall(recentUtcTimestamp(9).sql, '10.0.0.1', 'ua', 'canceled');
 
     const canceled = await request(app, '/api/analytics/requests?range=7d&status=canceled');
     expect(canceled.status).toBe(200);
@@ -115,9 +115,9 @@ describe('GET /api/analytics/requests', () => {
   });
 
   it('filters by platform, and combines with the status filter', async () => {
-    insertCall(recentUtcTimestamp(8).sql, '10.0.0.1', 'ua', 'success', 'groq');
-    insertCall(recentUtcTimestamp(9).sql, '10.0.0.1', 'ua', 'error', 'groq');
-    insertCall(recentUtcTimestamp(10).sql, '10.0.0.1', 'ua', 'error', 'google');
+    await insertCall(recentUtcTimestamp(8).sql, '10.0.0.1', 'ua', 'success', 'groq');
+    await insertCall(recentUtcTimestamp(9).sql, '10.0.0.1', 'ua', 'error', 'groq');
+    await insertCall(recentUtcTimestamp(10).sql, '10.0.0.1', 'ua', 'error', 'google');
 
     const groq = await request(app, '/api/analytics/requests?range=7d&platform=groq');
     expect(groq.status).toBe(200);
@@ -131,7 +131,7 @@ describe('GET /api/analytics/requests', () => {
   });
 
   it('rejects invalid status/platform filter values with 400', async () => {
-    insertCall(recentUtcTimestamp(8).sql, '10.0.0.1', 'ua');
+    await insertCall(recentUtcTimestamp(8).sql, '10.0.0.1', 'ua');
 
     expect((await request(app, '/api/analytics/requests?range=7d&status=weird')).status).toBe(400);
     expect((await request(app, '/api/analytics/requests?range=7d&platform=' + encodeURIComponent('a b;--'))).status).toBe(400);
@@ -143,13 +143,13 @@ describe('GET /api/analytics/requests', () => {
     const { clientContextMiddleware } = await import('../../lib/client-context.js');
     const req = { headers: { 'user-agent': 'vitest-client/1.0' }, socket: { remoteAddress: '192.168.0.99' } } as any;
     await new Promise<void>(resolve => {
-      clientContextMiddleware(req, {} as any, () => {
-        logRequest('test', 'test-model', 1, 'success', 1, 2, 3, null);
+      clientContextMiddleware(req, {} as any, async () => {
+        await logRequest('test', 'test-model', 1, 'success', 1, 2, 3, null);
         resolve();
       });
     });
 
-    const row = getDb().prepare('SELECT client_ip, client_user_agent FROM requests ORDER BY id DESC LIMIT 1').get() as any;
+    const row = (await getDb().get('SELECT client_ip, client_user_agent FROM requests ORDER BY id DESC LIMIT 1')) as any;
     expect(row).toEqual({ client_ip: '192.168.0.99', client_user_agent: 'vitest-client/1.0' });
   });
 });

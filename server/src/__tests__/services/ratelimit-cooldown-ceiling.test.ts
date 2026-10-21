@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 // caps the escalation ladder and the day-long 402/403 benches, but must never
 // shorten a provider-stated retry time — that one is a fact, not a guess.
 
-import { initDb, getSetting, setSetting } from '../../db/index.js';
+import { getSetting, setSetting } from '../../db/index.js';
 import { cooldownDecisionForError } from '../../lib/fallback-loop.js';
 import {
   getNextCooldownDuration,
@@ -20,6 +20,7 @@ import {
   MODEL_FORBIDDEN_COOLDOWN_MS,
 } from '../../services/ratelimit.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -37,68 +38,68 @@ function route(): RouteResult {
 const err402 = () => Object.assign(new Error('402 Payment Required: insufficient balance'), { status: 402 });
 const err403 = () => Object.assign(new Error('403 Forbidden: model not available on your tier'), { status: 403 });
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
-beforeEach(() => setCooldownCeilingMs(null));
-afterEach(() => setCooldownCeilingMs(null));
+beforeEach(async () => await setCooldownCeilingMs(null));
+afterEach(async () => await setCooldownCeilingMs(null));
 
 describe('cooldown ceiling (#952)', () => {
-  it('is unset by default and leaves the ladder and day benches untouched', () => {
-    expect(getCooldownCeilingMs()).toBeNull();
+  it('is unset by default and leaves the ladder and day benches untouched', async () => {
+    expect(await getCooldownCeilingMs()).toBeNull();
     const r = route();
-    expect(getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(2 * MINUTE);
-    expect(getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(10 * MINUTE);
-    expect(getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(HOUR);
-    expect(getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(DAY);
-    expect(getPaymentRequiredCooldownMs()).toBe(PAYMENT_REQUIRED_COOLDOWN_MS);
-    expect(getModelForbiddenCooldownMs()).toBe(MODEL_FORBIDDEN_COOLDOWN_MS);
+    expect(await getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(2 * MINUTE);
+    expect(await getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(10 * MINUTE);
+    expect(await getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(HOUR);
+    expect(await getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(DAY);
+    expect(await getPaymentRequiredCooldownMs()).toBe(PAYMENT_REQUIRED_COOLDOWN_MS);
+    expect(await getModelForbiddenCooldownMs()).toBe(MODEL_FORBIDDEN_COOLDOWN_MS);
   });
 
-  it('caps the escalation ladder at the ceiling', () => {
-    setCooldownCeilingMs(10 * MINUTE);
-    expect(getCooldownCeilingMs()).toBe(10 * MINUTE);
+  it('caps the escalation ladder at the ceiling', async () => {
+    await setCooldownCeilingMs(10 * MINUTE);
+    expect(await getCooldownCeilingMs()).toBe(10 * MINUTE);
     const r = route();
-    expect(getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(2 * MINUTE);
-    expect(getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(10 * MINUTE);
+    expect(await getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(2 * MINUTE);
+    expect(await getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(10 * MINUTE);
     // 3rd and 4th hits would be 1h and 24h; the ceiling holds them at 10 min.
-    expect(getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(10 * MINUTE);
-    expect(getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(10 * MINUTE);
+    expect(await getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(10 * MINUTE);
+    expect(await getNextCooldownDuration(r.platform, r.modelId, r.keyId)).toBe(10 * MINUTE);
   });
 
-  it('caps the 402 and 403 day-long benches, keeping their provenance', () => {
-    setCooldownCeilingMs(6 * HOUR);
-    const credit = cooldownDecisionForError(route(), err402());
+  it('caps the 402 and 403 day-long benches, keeping their provenance', async () => {
+    await setCooldownCeilingMs(6 * HOUR);
+    const credit = await cooldownDecisionForError(route(), err402());
     expect(credit).toEqual({ durationMs: 6 * HOUR, source: 'credit' });
-    const tier = cooldownDecisionForError(route(), err403());
+    const tier = await cooldownDecisionForError(route(), err403());
     expect(tier).toEqual({ durationMs: 6 * HOUR, source: 'tier' });
   });
 
-  it('never shortens a provider-stated Retry-After', () => {
-    setCooldownCeilingMs(10 * MINUTE);
+  it('never shortens a provider-stated Retry-After', async () => {
+    await setCooldownCeilingMs(10 * MINUTE);
     const r = route();
     const err = Object.assign(new Error('429 Too Many Requests'), { status: 429, retryAfterMs: 3 * HOUR });
-    const decision = cooldownDecisionForError(r, err);
+    const decision = await cooldownDecisionForError(r, err);
     expect(decision.source).toBe('authoritative');
     expect(decision.durationMs).toBe(3 * HOUR);
   });
 
-  it('clears back to no cap with null and rejects out-of-range values', () => {
-    setCooldownCeilingMs(HOUR);
-    expect(getSetting(COOLDOWN_CEILING_KEY)).toBe(String(HOUR));
-    setCooldownCeilingMs(null);
-    expect(getSetting(COOLDOWN_CEILING_KEY)).toBeUndefined();
-    expect(getCooldownCeilingMs()).toBeNull();
-    expect(() => setCooldownCeilingMs(30_000)).toThrow(/between/);
-    expect(() => setCooldownCeilingMs(DAY + 1)).toThrow(/between/);
-    expect(() => setCooldownCeilingMs(90.5)).toThrow(/between/);
-    expect(capCooldownMs(DAY)).toBe(DAY);
+  it('clears back to no cap with null and rejects out-of-range values', async () => {
+    await setCooldownCeilingMs(HOUR);
+    expect(await getSetting(COOLDOWN_CEILING_KEY)).toBe(String(HOUR));
+    await setCooldownCeilingMs(null);
+    expect(await getSetting(COOLDOWN_CEILING_KEY)).toBeUndefined();
+    expect(await getCooldownCeilingMs()).toBeNull();
+    expect(async () => await setCooldownCeilingMs(30_000)).toThrow(/between/);
+    expect(async () => await setCooldownCeilingMs(DAY + 1)).toThrow(/between/);
+    expect(async () => await setCooldownCeilingMs(90.5)).toThrow(/between/);
+    expect(await capCooldownMs(DAY)).toBe(DAY);
   });
 
-  it('treats a hand-edited invalid setting as no cap', () => {
-    setSetting(COOLDOWN_CEILING_KEY, 'forever');
-    expect(getCooldownCeilingMs()).toBeNull();
-    expect(capCooldownMs(DAY)).toBe(DAY);
+  it('treats a hand-edited invalid setting as no cap', async () => {
+    await setSetting(COOLDOWN_CEILING_KEY, 'forever');
+    expect(await getCooldownCeilingMs()).toBeNull();
+    expect(await capCooldownMs(DAY)).toBe(DAY);
   });
 });

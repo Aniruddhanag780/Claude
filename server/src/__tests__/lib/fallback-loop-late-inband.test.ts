@@ -16,7 +16,7 @@ vi.mock('../../services/health.js', () => ({
   markKeyHealthyFromRequest: vi.fn(),
 }));
 
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import {
   newFallbackState,
@@ -26,6 +26,7 @@ import {
 } from '../../lib/fallback-loop.js';
 import { isOnCooldown, clearCooldownsForKey, resetKeyLocalityCache } from '../../services/ratelimit.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const PLATFORM = 'groq';
 let keyA = 0;
@@ -34,12 +35,11 @@ let keyB = 0;
 const inBandError = () => new Error('in-band provider error from Nvidia: Service temporarily overloaded');
 const fastInBandError = () => new Error('in-band provider error from Groq: tool_use_failed');
 
-function insertKey(label: string): number {
+async function insertKey(label: string): number {
   const { encrypted, iv, authTag } = encrypt(`test-${label}`);
-  const info = getDb().prepare(`
+  const info = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, ?, ?, ?, ?, 'healthy', 1)
-  `).run(PLATFORM, label, encrypted, iv, authTag);
+    VALUES (?, ?, ?, ?, ?, 'healthy', 1) RETURNING id`, [PLATFORM, label, encrypted, iv, authTag]));
   return Number(info.lastInsertRowid);
 }
 
@@ -71,20 +71,20 @@ function hooks(overrides: Partial<FallbackHooks>): FallbackHooks {
   };
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
   process.env.NODE_ENV = 'test';
-  initDb(':memory:');
+  await initTestDb();
   const db = getDb();
-  db.prepare('DELETE FROM api_keys').run();
-  keyA = insertKey('key-a');
-  keyB = insertKey('key-b');
+  (await db.run('DELETE FROM api_keys'));
+  keyA = await insertKey('key-a');
+  keyB = await insertKey('key-b');
   resetKeyLocalityCache();
 });
 
-beforeEach(() => {
-  clearCooldownsForKey(PLATFORM, keyA);
-  clearCooldownsForKey(PLATFORM, keyB);
+beforeEach(async () => {
+  await clearCooldownsForKey(PLATFORM, keyA);
+  await clearCooldownsForKey(PLATFORM, keyB);
 });
 
 // The wall clock is what decides "late" — these tests use a tiny budget and a
@@ -114,7 +114,7 @@ describe('late in-band provider error benches the route (#1218 Gap 3)', () => {
     // The bench is the truncation-grade window (~5 min), not the light ~90s
     // transient bench an ordinary retryable failure gets. The route must still
     // be out of commission well past the transient window's expiry.
-    expect(isOnCooldown(PLATFORM, 'llama-3.3-70b', keyA)).toBe(true);
+    expect(await isOnCooldown(PLATFORM, 'llama-3.3-70b', keyA)).toBe(true);
   });
 
   it('an in-band error that arrives EARLY gets only the ordinary transient bench, not the truncation-grade one', async () => {
@@ -141,7 +141,7 @@ describe('late in-band provider error benches the route (#1218 Gap 3)', () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(Date.now() + 200 * 1000); // past any ~90s transient bench
-      expect(isOnCooldown(PLATFORM, 'llama-3.3-70b', keyA)).toBe(false);
+      expect(await isOnCooldown(PLATFORM, 'llama-3.3-70b', keyA)).toBe(false);
     } finally {
       vi.useRealTimers();
     }

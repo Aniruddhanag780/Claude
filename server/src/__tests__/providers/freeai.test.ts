@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FreeAiProvider, freeAiAudioUrl } from '../../providers/freeai.js';
 import { hasProvider } from '../../providers/index.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { checkKeyHealth } from '../../services/health.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const audioUrl = 'https://api.free.ai/static/outputs/1bcc722e-4ddf-4e15-995a-b274000f99e5.wav';
 
@@ -31,12 +32,12 @@ describe('Free.ai', () => {
 
   it('keeps an unverified configured key routable during health checks without falsely validating it', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     const { encrypted, iv, authTag } = encrypt('test-key');
-    const id = Number(getDb().prepare("INSERT INTO api_keys (platform,label,encrypted_key,iv,auth_tag,status,enabled) VALUES ('freeai','test',?,?,?,'unknown',1)").run(encrypted, iv, authTag).lastInsertRowid);
+    const id = Number((await getDb().run("INSERT INTO api_keys (platform,label,encrypted_key,iv,auth_tag,status,enabled) VALUES ('freeai','test',?,?,?,'unknown',1) RETURNING id", [encrypted, iv, authTag])).lastInsertRowid);
     const fetch = vi.spyOn(globalThis, 'fetch');
-    await expect(checkKeyHealth(id)).resolves.toBe('unknown');
-    expect(getDb().prepare('SELECT status, enabled, last_health_error FROM api_keys WHERE id=?').get(id)).toMatchObject({
+    await expect(await checkKeyHealth(id)).resolves.toBe('unknown');
+    expect((await getDb().get('SELECT status, enabled, last_health_error FROM api_keys WHERE id=?', [id]))).toMatchObject({
       status: 'unknown', enabled: 1, last_health_error: expect.stringContaining('key validity is unknown'),
     });
     expect(fetch).not.toHaveBeenCalled();

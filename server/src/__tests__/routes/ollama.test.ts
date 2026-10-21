@@ -1,10 +1,11 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getDb, getUnifiedApiKey, initDb, setSetting } from '../../db/index.js';
+import { getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { isLoopback } from '../../routes/ollama.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(
   app: Express,
@@ -28,39 +29,38 @@ async function request(
   return { status: response.status, text, body: json, headers: response.headers };
 }
 
-function seedGroq(): void {
+async function seedGroq(): void {
   const key = encrypt('gsk_ollama_surface_test');
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES ('groq', 'ollama-test', ?, ?, ?, 'healthy', 1)
-  `).run(key.encrypted, key.iv, key.authTag);
+    VALUES ('groq', 'ollama-test', ?, ?, ?, 'healthy', 1) RETURNING id`, [key.encrypted, key.iv, key.authTag]));
 }
 
 describe('Ollama emulation', () => {
   let app: Express;
   let dashboardToken: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashboardToken = mintDashboardToken();
+    dashboardToken = await mintDashboardToken();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
-    getDb().prepare('DELETE FROM requests').run();
-    getDb().prepare('DELETE FROM rate_limit_usage').run();
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
-    setSetting('ollama_emulation', 'off');
-    seedGroq();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM api_keys'));
+    (await getDb().run('DELETE FROM requests'));
+    (await getDb().run('DELETE FROM rate_limit_usage'));
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
+    await setSetting('ollama_emulation', 'off');
+    await seedGroq();
   });
 
   afterEach(() => vi.restoreAllMocks());
 
   it('is closed by default and opens without auth only on loopback', async () => {
     expect((await request(app, 'GET', '/api/tags')).status).toBe(404);
-    setSetting('ollama_emulation', 'open-loopback');
+    await setSetting('ollama_emulation', 'open-loopback');
     const tags = await request(app, 'GET', '/api/tags');
     expect(tags.status).toBe(200);
     expect(tags.body.models.length).toBeGreaterThan(0);
@@ -70,7 +70,7 @@ describe('Ollama emulation', () => {
   });
 
   it('advertises auto plus only available models, and accepts :latest names', async () => {
-    setSetting('ollama_emulation', 'open-loopback');
+    await setSetting('ollama_emulation', 'open-loopback');
     const tags = await request(app, 'GET', '/api/tags');
     expect(tags.status).toBe(200);
     expect(tags.body.models[0].name).toBe('auto');
@@ -80,7 +80,7 @@ describe('Ollama emulation', () => {
   });
 
   it('answers load/unload probes without calling any provider', async () => {
-    setSetting('ollama_emulation', 'open-loopback');
+    await setSetting('ollama_emulation', 'open-loopback');
     const fetchSpy = vi.spyOn(global, 'fetch');
     const load = await request(app, 'POST', '/api/chat', { model: 'auto', messages: [] });
     expect(load.status).toBe(200);
@@ -94,7 +94,7 @@ describe('Ollama emulation', () => {
   });
 
   it('streams generate frames with a generate-shaped terminal frame', async () => {
-    setSetting('ollama_emulation', 'open-loopback');
+    await setSetting('ollama_emulation', 'open-loopback');
     const originalFetch = global.fetch;
     vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
       if (String(url).includes('api.groq.com/openai/v1/chat/completions')) {
@@ -121,7 +121,7 @@ describe('Ollama emulation', () => {
   });
 
   it('accepts the real legacy embeddings body ({model, prompt})', async () => {
-    setSetting('ollama_emulation', 'open-loopback');
+    await setSetting('ollama_emulation', 'open-loopback');
     const response = await request(app, 'POST', '/api/embeddings', { model: 'auto', prompt: 'embed me' });
     // No embedding provider is seeded, so upstream fails — but the request
     // must pass validation (not 400 invalid request).
@@ -129,7 +129,7 @@ describe('Ollama emulation', () => {
   });
 
   it('returns 401 for a stale dashboard session on the shared embeddings path', async () => {
-    setSetting('ollama_emulation', 'off');
+    await setSetting('ollama_emulation', 'off');
     const response = await request(app, 'POST', '/api/embeddings', {}, {
       Authorization: 'Bearer stale-session-token',
     });
@@ -151,7 +151,7 @@ describe('Ollama emulation', () => {
   });
 
   it('emits Ollama-compatible NDJSON chat frames', async () => {
-    setSetting('ollama_emulation', 'open-loopback');
+    await setSetting('ollama_emulation', 'open-loopback');
     const originalFetch = global.fetch;
     vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
       if (String(url).includes('api.groq.com/openai/v1/chat/completions')) {
@@ -178,7 +178,7 @@ describe('Ollama emulation', () => {
   });
 
   it('correlates Ollama tool results with the preceding OpenAI tool call', async () => {
-    setSetting('ollama_emulation', 'open-loopback');
+    await setSetting('ollama_emulation', 'open-loopback');
     let upstreamBody: any;
     const originalFetch = global.fetch;
     vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
@@ -234,15 +234,15 @@ describe('Ollama emulation', () => {
   });
 
   it('requires the unified bearer key in key-required mode', async () => {
-    setSetting('ollama_emulation', 'key-required');
+    await setSetting('ollama_emulation', 'key-required');
     expect((await request(app, 'GET', '/api/tags')).status).toBe(401);
     expect((await request(app, 'GET', '/api/tags', undefined, {
-      Authorization: `Bearer ${getUnifiedApiKey()}`,
+      Authorization: `Bearer ${await getUnifiedApiKey()}`,
     })).status).toBe(200);
   });
 
   it('preserves the dashboard side of the legacy embeddings path collision', async () => {
-    setSetting('ollama_emulation', 'open-loopback');
+    await setSetting('ollama_emulation', 'open-loopback');
     const ollama = await request(app, 'POST', '/api/embeddings', {});
     expect(ollama.status).toBe(400);
     expect(ollama.body.error).toContain('invalid request');

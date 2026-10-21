@@ -2,8 +2,9 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vite
 import dns from 'node:dns';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Moonshot's assistant `partial: true` prefill flag (#1038) must survive the
 // whole proxy path — request schema → message build → provider body — when the
@@ -32,8 +33,8 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, body: json };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 /** Stub the upstream chat call and capture what reached it. */
@@ -75,10 +76,10 @@ describe('Moonshot `partial` prefill round trip (#1038)', () => {
 
   beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    getDb().prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+    await initTestDb();
+    (await getDb().run("DELETE FROM settings WHERE key = 'active_profile_id'"));
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
 
     // The custom-platform SSRF guard resolves public hosts at save time and on
     // every request; answer with a public address so no real DNS is needed.
@@ -113,7 +114,7 @@ describe('Moonshot `partial` prefill round trip (#1038)', () => {
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       model: 'kimi-k2-0905-preview',
       messages: conversation,
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(body.choices[0].message.content).toBe(' 42.');
@@ -129,7 +130,7 @@ describe('Moonshot `partial` prefill round trip (#1038)', () => {
     const { status } = await request(app, 'POST', '/v1/chat/completions', {
       model: 'kimi-k2:1t-cloud',
       messages: conversation,
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(upstream.url()).toBe('http://127.0.0.1:11434/v1/chat/completions');
@@ -142,7 +143,7 @@ describe('Moonshot `partial` prefill round trip (#1038)', () => {
     const { status } = await request(app, 'POST', '/v1/chat/completions', {
       model: 'kimi-k2-0905-preview',
       messages: [conversation[0], { role: 'assistant', content: 'The answer is', partial: 'yes' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).toBe(400);
   });
 });

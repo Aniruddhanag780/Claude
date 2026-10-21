@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { getAppVersion, resetAppVersionCache } from '../../lib/app-version.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #703: the dashboard had no way to show which release it is. The number users
 // know the app by lives in desktop/package.json — server/package.json (0.2.x)
@@ -66,11 +66,11 @@ describe('GET /api/settings/version', () => {
   let app: Express;
   let token = '';
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    token = mintDashboardToken();
+    token = await mintDashboardToken();
   });
 
   async function get(headers: Record<string, string>) {

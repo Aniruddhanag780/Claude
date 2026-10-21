@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getSetting, initDb } from '../../db/index.js';
+import { getSetting } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { applyFetchRelayToken, applyProxyMode, applyProxyUrl } from '../../lib/proxy.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #838 falls back to the OS-wide proxy (scutil/reg/gsettings) when nothing is
 // configured in the DB or the env, so on a machine whose system proxy is set
@@ -37,15 +38,15 @@ describe('PUT /api/settings/proxy scheme validation', () => {
   let app: Express;
   let token: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     for (const name of ['PROXY_MODE', 'PROXY_URL', 'FETCH_RELAY_TOKEN', 'ALL_PROXY', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY']) {
       delete process.env[name];
       delete process.env[name.toLowerCase()];
     }
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    token = mintDashboardToken();
+    token = await mintDashboardToken();
   });
 
   afterAll(() => {

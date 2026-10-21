@@ -2,8 +2,8 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { createAdminRateLimiter } from '../../middleware/rateLimit.js';
-import { initDb } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(app: Express, path: string, token?: string) {
   const server = app.listen(0, '127.0.0.1');
@@ -25,12 +25,12 @@ describe('Admin API rate limiter', () => {
   let app: Express;
   let token: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
 
-    token = mintDashboardToken();
+    token = await mintDashboardToken();
   });
 
   it('sets X-RateLimit headers on admin API responses', async () => {

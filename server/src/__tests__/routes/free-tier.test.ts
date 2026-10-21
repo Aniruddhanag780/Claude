@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -19,12 +20,10 @@ async function get(app: Express, path: string) {
   return { status: res.status, body };
 }
 
-function insertKey(platform: string, label: string): number {
+async function insertKey(platform: string, label: string): number {
   const db = getDb();
   const enc = encrypt(`${platform}-${label}`);
-  const info = db.prepare(
-    "INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES (?,?,?,?,?,'healthy',1)",
-  ).run(platform, label, enc.encrypted, enc.iv, enc.authTag);
+  const info = (await db.run("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES (?,?,?,?,?,'healthy',1) RETURNING id", [platform, label, enc.encrypted, enc.iv, enc.authTag]));
   return Number(info.lastInsertRowid);
 }
 
@@ -32,15 +31,15 @@ function future(minutes: number): string {
   return new Date(Date.now() + minutes * 60_000).toISOString();
 }
 
-function observe(row: {
+async function observe(row: {
   platform: string; keyId: number; pool: string; metric: string;
   limit: number | null; remaining: number | null; resetAt: string | null; observedAt: string;
 }) {
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO provider_quota_state
       (platform, key_id, quota_pool_key, metric, limit_value, remaining_value, reset_at, reset_strategy, source, confidence, observed_at, updated_at)
     VALUES (?,?,?,?,?,?,?, 'provider_reported', 'header', 1, ?, ?)
-  `).run(row.platform, row.keyId, row.pool, row.metric, row.limit, row.remaining, row.resetAt, row.observedAt, row.observedAt);
+  `, [row.platform, row.keyId, row.pool, row.metric, row.limit, row.remaining, row.resetAt, row.observedAt, row.observedAt]));
 }
 
 // GET /api/free-tier reports one budget per provider pool (#905). The pools it
@@ -54,52 +53,50 @@ describe('free-tier pool overview (#905)', () => {
   let cerebrasA = 0;
   let cerebrasB = 0;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
     const db = getDb();
 
     // Narrow the catalog down to a handful of rows across three platforms.
-    db.prepare('UPDATE models SET enabled = 0').run();
-    const groq = db.prepare("SELECT id, model_id FROM models WHERE platform = 'groq' ORDER BY id LIMIT 3").all() as { id: number; model_id: string }[];
-    const cerebras = db.prepare("SELECT id FROM models WHERE platform = 'cerebras' ORDER BY id LIMIT 2").all() as { id: number }[];
-    const google = db.prepare("SELECT id FROM models WHERE platform = 'google' ORDER BY id LIMIT 1").all() as { id: number }[];
-    const on = db.prepare('UPDATE models SET enabled = 1 WHERE id = ?');
-    for (const m of [...groq, ...cerebras, ...google]) on.run(m.id);
+    (await db.run('UPDATE models SET enabled = 0'));
+    const groq = (await db.all("SELECT id, model_id FROM models WHERE platform = 'groq' ORDER BY id LIMIT 3")) as { id: number; model_id: string }[];
+    const cerebras = (await db.all("SELECT id FROM models WHERE platform = 'cerebras' ORDER BY id LIMIT 2")) as { id: number }[];
+    const google = (await db.all("SELECT id FROM models WHERE platform = 'google' ORDER BY id LIMIT 1")) as { id: number }[];
+    for (const m of [...groq, ...cerebras, ...google]) (await db.run('UPDATE models SET enabled = 1 WHERE id = ?', [m.id]));
 
     // Three groq models in ONE pool with different labels: the pool takes the
     // largest documented budget once, never the sum of the three.
-    const budget = db.prepare('UPDATE models SET monthly_token_budget = ? WHERE id = ?');
-    budget.run('~6M', groq[0].id);
-    budget.run('~15M', groq[1].id);
-    budget.run('~6M', groq[2].id);
-    budget.run('~30M', cerebras[0].id);
-    budget.run('credits-based', cerebras[1].id);
-    budget.run('~3M', google[0].id);
+    (await db.run('UPDATE models SET monthly_token_budget = ? WHERE id = ?', ['~6M', groq[0].id]));
+    (await db.run('UPDATE models SET monthly_token_budget = ? WHERE id = ?', ['~15M', groq[1].id]));
+    (await db.run('UPDATE models SET monthly_token_budget = ? WHERE id = ?', ['~6M', groq[2].id]));
+    (await db.run('UPDATE models SET monthly_token_budget = ? WHERE id = ?', ['~30M', cerebras[0].id]));
+    (await db.run('UPDATE models SET monthly_token_budget = ? WHERE id = ?', ['credits-based', cerebras[1].id]));
+    (await db.run('UPDATE models SET monthly_token_budget = ? WHERE id = ?', ['~3M', google[0].id]));
 
     // One groq row is switched off in the chain: it still shares the provider
     // allowance, so it stays in the pool and is only marked.
     // (initDb activates a Default profile, so the chain in play is
     // profile_models; keep both in sync the way the dashboard does.)
-    db.prepare('UPDATE fallback_config SET enabled = 1').run();
-    db.prepare('UPDATE profile_models SET enabled = 1').run();
-    db.prepare('UPDATE fallback_config SET enabled = 0 WHERE model_db_id = ?').run(groq[2].id);
-    db.prepare('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?').run(groq[2].id);
+    (await db.run('UPDATE fallback_config SET enabled = 1'));
+    (await db.run('UPDATE profile_models SET enabled = 1'));
+    (await db.run('UPDATE fallback_config SET enabled = 0 WHERE model_db_id = ?', [groq[2].id]));
+    (await db.run('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?', [groq[2].id]));
 
-    groqKey = insertKey('groq', 'groq-main');
-    cerebrasA = insertKey('cerebras', 'cerebras-a');
-    cerebrasB = insertKey('cerebras', 'cerebras-b');
+    groqKey = await insertKey('groq', 'groq-main');
+    cerebrasA = await insertKey('cerebras', 'cerebras-a');
+    cerebrasB = await insertKey('cerebras', 'cerebras-b');
     // google is deliberately left keyless.
 
     // groq: an older `tokens` reading and a newer `requests` one (a 429 writes
     // exactly this). Latest-wins would report 5,000 requests as the headroom.
-    observe({ platform: 'groq', keyId: groqKey, pool: 'groq::account', metric: 'tokens', limit: 15_000_000, remaining: 12_400_000, resetAt: future(600), observedAt: '2026-01-01 00:00:00' });
-    observe({ platform: 'groq', keyId: groqKey, pool: 'groq::account', metric: 'requests', limit: 14_400, remaining: 5_000, resetAt: future(120), observedAt: '2026-01-02 00:00:00' });
+    await observe({ platform: 'groq', keyId: groqKey, pool: 'groq::account', metric: 'tokens', limit: 15_000_000, remaining: 12_400_000, resetAt: future(600), observedAt: '2026-01-01 00:00:00' });
+    await observe({ platform: 'groq', keyId: groqKey, pool: 'groq::account', metric: 'requests', limit: 14_400, remaining: 5_000, resetAt: future(120), observedAt: '2026-01-02 00:00:00' });
     // cerebras: the same pool seen through two keys — two accounts, two allowances.
-    observe({ platform: 'cerebras', keyId: cerebrasA, pool: 'cerebras::shared', metric: 'tokens', limit: 30_000_000, remaining: 20_000_000, resetAt: future(300), observedAt: '2026-01-01 00:00:00' });
-    observe({ platform: 'cerebras', keyId: cerebrasB, pool: 'cerebras::shared', metric: 'tokens', limit: 30_000_000, remaining: 8_000_000, resetAt: future(180), observedAt: '2026-01-03 00:00:00' });
+    await observe({ platform: 'cerebras', keyId: cerebrasA, pool: 'cerebras::shared', metric: 'tokens', limit: 30_000_000, remaining: 20_000_000, resetAt: future(300), observedAt: '2026-01-01 00:00:00' });
+    await observe({ platform: 'cerebras', keyId: cerebrasB, pool: 'cerebras::shared', metric: 'tokens', limit: 30_000_000, remaining: 8_000_000, resetAt: future(180), observedAt: '2026-01-03 00:00:00' });
   });
 
   it('reports one row per pool with a single deduped budget', async () => {

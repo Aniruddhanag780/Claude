@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { addToActiveChain } from '../helpers/chain.js';
 import { encrypt } from '../../lib/crypto.js';
 import { setUnifyEnabled, setUnifyOverrides } from '../../services/model-groups.js';
 import { getRoutingStrategy, setRoutingStrategy, type RoutingStrategy } from '../../services/router.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Anthropic-compatible Messages API (`POST /v1/messages`). These tests drive
 // the route end-to-end through a mocked Groq upstream and assert the Anthropic
@@ -48,8 +49,8 @@ async function send(app: Express, method: string, path: string, body?: any, extr
   return { status: res.status, headers: res.headers, text, body: json };
 }
 
-function anthropicHeaders() {
-  return { 'x-api-key': getUnifiedApiKey(), 'anthropic-version': '2023-06-01' };
+async function anthropicHeaders() {
+  return { 'x-api-key': await getUnifiedApiKey(), 'anthropic-version': '2023-06-01' };
 }
 
 /** Parse an SSE body into ordered {event, data} pairs. */
@@ -135,25 +136,25 @@ const WEATHER_TOOL = {
 describe('Anthropic-compatible /v1/messages', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
-    db.prepare('DELETE FROM rate_limit_usage').run();
-    db.prepare("DELETE FROM settings WHERE key = 'anthropic_model_map'").run();
-    db.prepare(`
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
+    (await db.run('DELETE FROM rate_limit_usage'));
+    (await db.run("DELETE FROM settings WHERE key = 'anthropic_model_map'"));
+    (await db.run(`
       INSERT INTO settings (key, value)
       VALUES ('expose_cc_discovery_aliases', '0')
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run();
+    `));
     const { status } = await request(app, '/api/keys',
       { platform: 'groq', key: 'gsk_anthropic_test', label: 't' },
       { Authorization: `Bearer ${dashToken}` });
@@ -176,7 +177,7 @@ describe('Anthropic-compatible /v1/messages', () => {
     const { status, body, headers } = await request(app, '/v1/messages', {
       model: 'claude-3-5-sonnet-20241022', max_tokens: 64,
       messages: [{ role: 'user', content: 'hi' }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(status).toBe(200);
     expect(body.type).toBe('message');
@@ -197,7 +198,7 @@ describe('Anthropic-compatible /v1/messages', () => {
       messages: [{ role: 'user', content: 'weather in Karachi?' }],
       tools: [WEATHER_TOOL],
       tool_choice: { type: 'auto' },
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(status).toBe(200);
     // Inbound translation: system → system message, tool input_schema → parameters.
@@ -223,7 +224,7 @@ describe('Anthropic-compatible /v1/messages', () => {
         { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_abc', content: 'Sunny, 35C' }] },
       ],
       tools: [WEATHER_TOOL],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(status).toBe(200);
     const msgs = captured.body.messages;
@@ -236,7 +237,7 @@ describe('Anthropic-compatible /v1/messages', () => {
 
   it('preserves Gemini thought_signature across an Anthropic tool loop (#487)', async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
+    (await db.run('DELETE FROM api_keys'));
     const addGoogle = await request(app, '/api/keys',
       { platform: 'google', key: 'google_anthropic_thought_signature_test', label: 'g' },
       { Authorization: `Bearer ${dashToken}` });
@@ -269,7 +270,7 @@ describe('Anthropic-compatible /v1/messages', () => {
       model: 'gemini-3.5-flash', max_tokens: 128,
       messages: [{ role: 'user', content: 'weather in Dublin?' }],
       tools: [WEATHER_TOOL],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(first.status).toBe(200);
     const toolUse = first.body.content.find((b: any) => b.type === 'tool_use');
@@ -288,7 +289,7 @@ describe('Anthropic-compatible /v1/messages', () => {
         { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUse.id, content: '{"temp":12,"condition":"rain"}' }] },
       ],
       tools: [WEATHER_TOOL],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(second.status).toBe(200);
     expect(second.body.content).toEqual([{ type: 'text', text: 'Rainy, 12C.' }]);
@@ -310,7 +311,7 @@ describe('Anthropic-compatible /v1/messages', () => {
           { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
         ],
       }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     // Schema accepts the image block (not a 400). If routing reached the mock,
     // the image was translated to an OpenAI image_url block.
@@ -335,7 +336,7 @@ describe('Anthropic-compatible /v1/messages', () => {
     const { status, headers, text } = await request(app, '/v1/messages', {
       model: 'claude-sonnet-4-5', max_tokens: 64, stream: true,
       messages: [{ role: 'user', content: 'hi' }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(status).toBe(200);
     expect(headers.get('content-type')).toMatch(/text\/event-stream/);
@@ -369,7 +370,7 @@ describe('Anthropic-compatible /v1/messages', () => {
       model: 'claude-sonnet-4-5', max_tokens: 64, stream: true,
       messages: [{ role: 'user', content: 'weather?' }],
       tools: [WEATHER_TOOL],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
 
     expect(status).toBe(200);
     const events = sseEvents(text);
@@ -385,26 +386,26 @@ describe('Anthropic-compatible /v1/messages', () => {
     const { status, body } = await request(app, '/v1/messages/count_tokens', {
       model: 'claude-sonnet-4-5',
       messages: [{ role: 'user', content: 'count these tokens please' }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(status).toBe(200);
     expect(body.input_tokens).toBeGreaterThan(0);
   });
 
   it('counts tool schemas in /v1/messages/count_tokens', async () => {
     const messages = [{ role: 'user', content: 'count these tokens please' }];
-    const bare = await request(app, '/v1/messages/count_tokens', { model: 'claude-sonnet-4-5', messages }, anthropicHeaders());
+    const bare = await request(app, '/v1/messages/count_tokens', { model: 'claude-sonnet-4-5', messages }, await anthropicHeaders());
     const withTools = await request(app, '/v1/messages/count_tokens', {
       model: 'claude-sonnet-4-5',
       messages,
       tools: [{ name: 'Read', description: 'r'.repeat(4000), input_schema: { type: 'object', properties: {} } }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(withTools.body.input_tokens).toBeGreaterThan(bare.body.input_tokens + 1000);
   });
 
   it('returns an Anthropic invalid_request_error on a malformed body', async () => {
     const { status, body } = await request(app, '/v1/messages', {
       model: 'claude-sonnet-4-5', messages: [],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(status).toBe(400);
     expect(body.type).toBe('error');
     expect(body.error.type).toBe('invalid_request_error');
@@ -419,14 +420,14 @@ describe('Anthropic-compatible /v1/messages', () => {
         { role: 'system', content: 'You are concise.' },
         { role: 'user', content: [{ type: 'text', text: 'continue' }] },
       ],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(status).toBe(200); // previously 400: "messages.1.role ... received 'system'"
     const sys = captured.body.messages.filter((m: any) => m.role === 'system')
     expect(sys.some((m: any) => m.content === 'You are concise.')).toBe(true);
   });
 
   it('GET /v1/models returns the Anthropic shape for Anthropic clients', async () => {
-    const { status, body } = await send(app, 'GET', '/v1/models', undefined, anthropicHeaders());
+    const { status, body } = await send(app, 'GET', '/v1/models', undefined, await anthropicHeaders());
     expect(status).toBe(200);
     expect(Array.isArray(body.data)).toBe(true);
     expect(body.has_more).toBe(false);
@@ -443,7 +444,7 @@ describe('Anthropic-compatible /v1/messages', () => {
   // reported "found 0 models", because it only accepts Claude-family ids. The
   // listing now carries one id per family, and each one routes.
   it('GET /v1/models lists a Claude-family id that /v1/messages then serves', async () => {
-    const { body } = await send(app, 'GET', '/v1/models', undefined, anthropicHeaders());
+    const { body } = await send(app, 'GET', '/v1/models', undefined, await anthropicHeaders());
     const sonnet = body.data.find((m: any) => m.id === 'claude-sonnet-4-5');
     expect(sonnet).toBeTruthy();
     expect(sonnet.type).toBe('model');
@@ -457,13 +458,13 @@ describe('Anthropic-compatible /v1/messages', () => {
     const captured = mockJson(textCompletion('family slot routed'));
     const response = await request(app, '/v1/messages', {
       model: sonnet.id, max_tokens: 32, messages: [{ role: 'user', content: 'hello' }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(response.status).toBe(200);
     expect(captured.body).toBeTruthy();
   });
 
   it('gates Claude Code discovery aliases and routes a selected alias', async () => {
-    const hidden = await send(app, 'GET', '/v1/models', undefined, anthropicHeaders());
+    const hidden = await send(app, 'GET', '/v1/models', undefined, await anthropicHeaders());
     expect(hidden.body.data.some((model: any) => model.id.startsWith('claude/'))).toBe(false);
 
     const enabled = await send(
@@ -475,7 +476,7 @@ describe('Anthropic-compatible /v1/messages', () => {
     );
     expect(enabled.status).toBe(200);
 
-    const discovered = await send(app, 'GET', '/v1/models', undefined, anthropicHeaders());
+    const discovered = await send(app, 'GET', '/v1/models', undefined, await anthropicHeaders());
     const alias = discovered.body.data.find((model: any) => model.id.startsWith('claude/'));
     expect(alias).toBeTruthy();
 
@@ -484,14 +485,14 @@ describe('Anthropic-compatible /v1/messages', () => {
       model: alias.id,
       max_tokens: 32,
       messages: [{ role: 'user', content: 'hello' }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(response.status).toBe(200);
     expect(response.body.model).toBe(alias.id);
     expect(captured.body.model).not.toContain('claude/');
   });
 
   it('GET /v1/models falls through to the OpenAI shape without anthropic-version', async () => {
-    const { status, body } = await send(app, 'GET', '/v1/models', undefined, { Authorization: `Bearer ${getUnifiedApiKey()}` });
+    const { status, body } = await send(app, 'GET', '/v1/models', undefined, { Authorization: `Bearer ${await getUnifiedApiKey()}` });
     expect(status).toBe(200);
     expect(body.object).toBe('list'); // OpenAI envelope, served by proxyRouter
     expect(body.data[0].id).toBe('auto');
@@ -500,7 +501,7 @@ describe('Anthropic-compatible /v1/messages', () => {
 
   it('maps a Claude family to a pinned catalog model via the settings API', async () => {
     // Pick a real enabled groq model to pin "sonnet" to.
-    const groqModel = (getDb().prepare("SELECT model_id FROM models WHERE platform = 'groq' AND enabled = 1 ORDER BY intelligence_rank LIMIT 1").get() as { model_id: string }).model_id;
+    const groqModel = ((await getDb().get("SELECT model_id FROM models WHERE platform = 'groq' AND enabled = 1 ORDER BY intelligence_rank LIMIT 1")) as { model_id: string }).model_id;
 
     const put = await send(app, 'PUT', '/api/settings/anthropic-map', { sonnet: groqModel }, { Authorization: `Bearer ${dashToken}` });
     expect(put.status).toBe(200);
@@ -512,7 +513,7 @@ describe('Anthropic-compatible /v1/messages', () => {
     const { status, headers } = await request(app, '/v1/messages', {
       model: 'claude-sonnet-4-5-20250929', max_tokens: 32,
       messages: [{ role: 'user', content: 'hi' }],
-    }, anthropicHeaders());
+    }, await anthropicHeaders());
     expect(status).toBe(200);
     expect(captured.body.model).toBe(groqModel);
     expect(headers.get('x-routed-via')).toBe(`groq/${groqModel}`);
@@ -538,59 +539,57 @@ describe('Anthropic-compatible /v1/messages', () => {
     let strategyBefore: RoutingStrategy;
 
     // A catalog row + its fallback_config entry, returning the model db id.
-    function addModel(platform: string, modelId: string, displayName: string, priority: number): number {
+    async function addModel(platform: string, modelId: string, displayName: string, priority: number): number {
       const db = getDb();
-      const info = db.prepare(`
+      const info = (await db.run(`
         INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
                             rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, supports_vision)
-        VALUES (?, ?, ?, 5, 5, 'Large', 100, NULL, NULL, NULL, '~10M', 131072, 1, 0)
-      `).run(platform, modelId, displayName);
+        VALUES (?, ?, ?, 5, 5, 'Large', 100, NULL, NULL, NULL, '~10M', 131072, 1, 0) RETURNING id`, [platform, modelId, displayName]));
       const id = Number(info.lastInsertRowid);
-      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, priority);
-      addToActiveChain(id, priority);
+      (await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1) RETURNING id', [id, priority]));
+      await addToActiveChain(id, priority);
       return id;
     }
 
-    function addKey(platform: string): void {
+    async function addKey(platform: string): void {
       const { encrypted, iv, authTag } = encrypt(`test-key-${platform}`);
-      getDb().prepare(`
+      (await getDb().run(`
         INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-        VALUES (?, ?, ?, ?, ?, 'healthy', 1)
-      `).run(platform, `${platform}-key`, encrypted, iv, authTag);
+        VALUES (?, ?, ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, `${platform}-key`, encrypted, iv, authTag]));
     }
 
-    beforeEach(() => {
+    beforeEach(async () => {
       const db = getDb();
-      strategyBefore = getRoutingStrategy();
-      setRoutingStrategy('priority');
-      setUnifyEnabled(true);
-      setUnifyOverrides({ merges: [], splits: [] });
+      strategyBefore = await getRoutingStrategy();
+      await setRoutingStrategy('priority');
+      await setUnifyEnabled(true);
+      await setUnifyOverrides({ merges: [], splits: [] });
       // Isolate the catalog: only the three rows below can be routed to, so
       // "served by an unrelated model" is unambiguous.
-      enabledBefore = (db.prepare('SELECT id FROM models WHERE enabled = 1').all() as { id: number }[]).map(r => r.id);
-      db.prepare('UPDATE models SET enabled = 0').run();
+      enabledBefore = ((await db.all('SELECT id FROM models WHERE enabled = 1')) as { id: number }[]).map(r => r.id);
+      (await db.run('UPDATE models SET enabled = 0'));
       addedIds = [
         // The SAME model_id served by two platforms. Groq is tried first
         // (priority 10 < 20) and is the one that fails.
-        addModel('groq', SHARED, 'Shared Fallback Model', 10),
-        addModel('cerebras', SHARED, 'Shared Fallback Model', 20),
+        await addModel('groq', SHARED, 'Shared Fallback Model', 10),
+        await addModel('cerebras', SHARED, 'Shared Fallback Model', 20),
         // A different model on the healthy platform, with the BEST priority in
         // the catalog — before the fix this is what answered the request.
-        addModel('cerebras', UNRELATED, 'Unrelated Test Model', 1),
+        await addModel('cerebras', UNRELATED, 'Unrelated Test Model', 1),
       ];
-      addKey('cerebras'); // the groq key is created by the outer beforeEach
+      await addKey('cerebras'); // the groq key is created by the outer beforeEach
     });
 
-    afterEach(() => {
+    afterEach(async () => {
       const db = getDb();
       for (const id of addedIds) {
-        db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?').run(id);
-        db.prepare('DELETE FROM models WHERE id = ?').run(id);
+        (await db.run('DELETE FROM fallback_config WHERE model_db_id = ?', [id]));
+        (await db.run('DELETE FROM models WHERE id = ?', [id]));
       }
       if (enabledBefore.length) {
-        db.prepare(`UPDATE models SET enabled = 1 WHERE id IN (${enabledBefore.map(() => '?').join(',')})`).run(...enabledBefore);
+        (await db.run(`UPDATE models SET enabled = 1 WHERE id IN (${enabledBefore.map(() => '?').join(',')})`, [...enabledBefore]));
       }
-      setRoutingStrategy(strategyBefore);
+      await setRoutingStrategy(strategyBefore);
     });
 
     // Records every upstream the router actually dispatched to, as
@@ -622,7 +621,7 @@ describe('Anthropic-compatible /v1/messages', () => {
 
       const { status, body, headers } = await request(app, '/v1/messages', {
         model: SHARED, max_tokens: 64, messages: [{ role: 'user', content: 'hi' }],
-      }, anthropicHeaders());
+      }, await anthropicHeaders());
 
       expect(status).toBe(200);
       // Same model, second provider — not the better-priority unrelated model.
@@ -647,7 +646,7 @@ describe('Anthropic-compatible /v1/messages', () => {
 
       const { status } = await request(app, '/v1/messages', {
         model: SHARED, max_tokens: 64, messages: [{ role: 'user', content: 'hi' }],
-      }, anthropicHeaders());
+      }, await anthropicHeaders());
 
       expect(status).toBeGreaterThanOrEqual(400);
       expect(seen.every(s => s.endsWith(`/${SHARED}`))).toBe(true);
@@ -663,7 +662,7 @@ describe('Anthropic-compatible /v1/messages', () => {
 
       const { status, headers } = await request(app, '/v1/messages', {
         model: 'claude-sonnet-4-5', max_tokens: 64, messages: [{ role: 'user', content: 'hi' }],
-      }, anthropicHeaders());
+      }, await anthropicHeaders());
 
       expect(status).toBe(200);
       expect(headers.get('x-routed-via')).toBe(`cerebras/${UNRELATED}`);

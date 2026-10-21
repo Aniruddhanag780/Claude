@@ -12,11 +12,12 @@ vi.mock('../../services/health.js', () => ({
   markKeyHealthyFromRequest: vi.fn(),
 }));
 
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { runFallbackLoop, newFallbackState, type FallbackHooks } from '../../lib/fallback-loop.js';
 import { logRequest } from '../../lib/request-log.js';
 import { pruneRequestAnalytics } from '../../services/request-retention.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Distinct keyId AND modelDbId per fake route: the router's penalty map and the
 // cooldown store are module-global, so shared ids would leak state across tests.
@@ -58,24 +59,22 @@ interface AttemptRow {
   error_summary: string | null;
 }
 
-function allAttempts(): AttemptRow[] {
-  return getDb().prepare(
-    'SELECT request_id, ordinal, platform, model_id, key_ordinal, key_label, outcome, start_offset_ms, duration_ms, error_summary FROM request_attempts ORDER BY ordinal',
-  ).all() as AttemptRow[];
+async function allAttempts(): AttemptRow[] {
+  return (await getDb().all('SELECT request_id, ordinal, platform, model_id, key_ordinal, key_label, outcome, start_offset_ms, duration_ms, error_summary FROM request_attempts ORDER BY ordinal')) as AttemptRow[];
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   mockCheckKeyHealth.mockReset();
   mockCheckKeyHealth.mockResolvedValue('invalid');
   const db = getDb();
-  db.prepare('DELETE FROM request_attempts').run();
-  db.prepare('DELETE FROM requests').run();
-  db.prepare('DELETE FROM rate_limit_cooldowns').run();
+  (await db.run('DELETE FROM request_attempts'));
+  (await db.run('DELETE FROM requests'));
+  (await db.run('DELETE FROM rate_limit_cooldowns'));
 });
 
 describe('per-attempt routing traces', () => {
@@ -92,15 +91,15 @@ describe('per-attempt routing traces', () => {
         await new Promise(r => setTimeout(r, 10));
         if (attempt === 0) throw Object.assign(new Error('429 Too Many Requests'), { status: 429 });
         if (attempt === 1) throw new Error('upstream timeout after 10000ms');
-        logRequest(route.platform, route.modelId, route.keyId, 'success', 10, 5, 42, null);
+        await logRequest(route.platform, route.modelId, route.keyId, 'success', 10, 5, 42, null);
         return 'done';
       },
-      logFailure: (route, err) =>
-        logRequest(route.platform, route.modelId, route.keyId, 'error', 10, 0, 5, err.message),
+      logFailure: async (route, err) =>
+        await logRequest(route.platform, route.modelId, route.keyId, 'error', 10, 0, 5, err.message),
     }));
 
-    const successRow = getDb().prepare("SELECT id FROM requests WHERE status = 'success'").get() as { id: number };
-    const rows = allAttempts();
+    const successRow = (await getDb().get("SELECT id FROM requests WHERE status = 'success'")) as { id: number };
+    const rows = await allAttempts();
 
     expect(rows).toHaveLength(3);
     expect(rows.map(r => r.ordinal)).toEqual([0, 1, 2]);
@@ -120,10 +119,10 @@ describe('per-attempt routing traces', () => {
     for (const r of rows) expect(r.duration_ms).toBeGreaterThanOrEqual(5);
 
     // The mid-ladder failure rows carry no children of their own.
-    const errorIds = getDb().prepare("SELECT id FROM requests WHERE status = 'error'").all() as { id: number }[];
+    const errorIds = (await getDb().all("SELECT id FROM requests WHERE status = 'error'")) as { id: number }[];
     expect(errorIds).toHaveLength(2);
     for (const { id } of errorIds) {
-      const c = getDb().prepare('SELECT COUNT(*) as c FROM request_attempts WHERE request_id = ?').get(id) as { c: number };
+      const c = (await getDb().get('SELECT COUNT(*) as c FROM request_attempts WHERE request_id = ?', [id])) as { c: number };
       expect(c.c).toBe(0);
     }
   });
@@ -139,14 +138,14 @@ describe('per-attempt routing traces', () => {
       route: (attempt) => routes[Math.min(attempt, routes.length - 1)],
       dispatch: async (route, attempt) => {
         if (attempt < 2) throw Object.assign(new Error('429 Too Many Requests'), { status: 429 });
-        logRequest(route.platform, route.modelId, route.keyId, 'success', 10, 5, 42, null);
+        await logRequest(route.platform, route.modelId, route.keyId, 'success', 10, 5, 42, null);
         return 'done';
       },
-      logFailure: (route, err) =>
-        logRequest(route.platform, route.modelId, route.keyId, 'error', 10, 0, 5, err.message),
+      logFailure: async (route, err) =>
+        await logRequest(route.platform, route.modelId, route.keyId, 'error', 10, 0, 5, err.message),
     }));
 
-    const rows = allAttempts();
+    const rows = await allAttempts();
     expect(rows.map(r => r.key_label)).toEqual(['work laptop', null, 'billing account']);
     // The label is the operator's own name for the key, never the internal key
     // id and never the credential.
@@ -169,14 +168,14 @@ describe('per-attempt routing traces', () => {
             { status: 429 },
           );
         }
-        logRequest(route.platform, route.modelId, route.keyId, 'success', 10, 5, 42, null);
+        await logRequest(route.platform, route.modelId, route.keyId, 'success', 10, 5, 42, null);
         return 'done';
       },
-      logFailure: (route, err) =>
-        logRequest(route.platform, route.modelId, route.keyId, 'error', 10, 0, 5, err.message),
+      logFailure: async (route, err) =>
+        await logRequest(route.platform, route.modelId, route.keyId, 'error', 10, 0, 5, err.message),
     }));
 
-    const rows = allAttempts();
+    const rows = await allAttempts();
     expect(rows).toHaveLength(2);
     expect(rows.map(r => r.outcome)).toEqual(['rate_limited', 'ok']);
 
@@ -196,13 +195,13 @@ describe('per-attempt routing traces', () => {
     await runFallbackLoop(hooksSkeleton({
       route: () => route,
       dispatch: async () => {
-        logRequest(route.platform, route.modelId, route.keyId, 'success', 3, 7, 11, null);
+        await logRequest(route.platform, route.modelId, route.keyId, 'success', 3, 7, 11, null);
         return 'done';
       },
     }));
 
-    const parent = getDb().prepare("SELECT id FROM requests WHERE status = 'success'").get() as { id: number };
-    const rows = allAttempts();
+    const parent = (await getDb().get("SELECT id FROM requests WHERE status = 'success'")) as { id: number };
+    const rows = await allAttempts();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       request_id: parent.id,
@@ -227,34 +226,32 @@ describe('per-attempt routing traces', () => {
       dispatch: async () => {
         throw Object.assign(new Error('429 Too Many Requests'), { status: 429 });
       },
-      logFailure: (route, err) =>
-        logRequest(route.platform, route.modelId, route.keyId, 'error', 1, 0, 5, err.message),
+      logFailure: async (route, err) =>
+        await logRequest(route.platform, route.modelId, route.keyId, 'error', 1, 0, 5, err.message),
       onExhausted: () => {},
     }));
 
-    const lastErrorRow = getDb().prepare('SELECT id FROM requests ORDER BY id DESC LIMIT 1').get() as { id: number };
-    const rows = allAttempts();
+    const lastErrorRow = (await getDb().get('SELECT id FROM requests ORDER BY id DESC LIMIT 1')) as { id: number };
+    const rows = await allAttempts();
     expect(rows).toHaveLength(2);
     expect(rows.map(r => r.outcome)).toEqual(['rate_limited', 'rate_limited']);
     expect(new Set(rows.map(r => r.request_id))).toEqual(new Set([lastErrorRow.id]));
   });
 
-  it('prunes request_attempts rows with their parent requests rows (retention)', () => {
+  it('prunes request_attempts rows with their parent requests rows (retention)', async () => {
     const db = getDb();
-    db.prepare(`
+    (await db.run(`
       INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, error, created_at)
-      VALUES ('test', 'old-model', 'success', 1, 1, 1, NULL, '2020-01-01 00:00:00')
-    `).run();
-    const parent = db.prepare('SELECT id FROM requests ORDER BY id DESC LIMIT 1').get() as { id: number };
-    db.prepare(`
+      VALUES ('test', 'old-model', 'success', 1, 1, 1, NULL, '2020-01-01 00:00:00') RETURNING id`));
+    const parent = (await db.get('SELECT id FROM requests ORDER BY id DESC LIMIT 1')) as { id: number };
+    (await db.run(`
       INSERT INTO request_attempts (request_id, ordinal, platform, model_id, key_ordinal, outcome, start_offset_ms, duration_ms)
-      VALUES (?, 0, 'test', 'old-model', 1, 'rate_limited', 0, 12), (?, 1, 'test', 'old-model', 2, 'ok', 20, 30)
-    `).run(parent.id, parent.id);
-    expect(allAttempts()).toHaveLength(2);
+      VALUES (?, 0, 'test', 'old-model', 1, 'rate_limited', 0, 12), (?, 1, 'test', 'old-model', 2, 'ok', 20, 30) RETURNING id`, [parent.id, parent.id]));
+    expect(await allAttempts()).toHaveLength(2);
 
-    const { deleted } = pruneRequestAnalytics({ force: true });
+    const { deleted } = await pruneRequestAnalytics({ force: true });
     expect(deleted).toBeGreaterThanOrEqual(1);
-    expect(db.prepare('SELECT COUNT(*) as c FROM requests WHERE id = ?').get(parent.id)).toEqual({ c: 0 });
-    expect(allAttempts()).toHaveLength(0);
+    expect((await db.get('SELECT COUNT(*) as c FROM requests WHERE id = ?', [parent.id]))).toEqual({ c: 0 });
+    expect(await allAttempts()).toHaveLength(0);
   });
 });

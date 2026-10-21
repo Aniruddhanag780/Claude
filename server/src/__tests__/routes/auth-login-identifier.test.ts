@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import express, { type Express } from 'express';
 import { authRouter } from '../../routes/auth.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { createUser } from '../../services/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // The desktop app seeds its hidden account as `desktop@localhost`
 // (desktop/src/server-host.ts). That address has no TLD, so while /login shared
@@ -33,24 +34,24 @@ async function postLogin(body: unknown) {
 }
 
 describe('login accepts the identifier the desktop app actually seeds', () => {
-  beforeAll(() => {
-    initDb(':memory:');
+  beforeAll(async () => {
+    await initTestDb();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM sessions').run();
-    getDb().prepare('DELETE FROM users').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM sessions'));
+    (await getDb().run('DELETE FROM users'));
   });
 
   it('signs in an account whose email has no TLD', async () => {
-    createUser('desktop@localhost', 'a-long-random-password');
+    await createUser('desktop@localhost', 'a-long-random-password');
     const res = await postLogin({ email: 'desktop@localhost', password: 'a-long-random-password' });
     expect(res.status).toBe(200);
     expect(res.body.token).toBeTruthy();
   });
 
   it('still rejects the wrong password for that account, with the credential error', async () => {
-    createUser('desktop@localhost', 'a-long-random-password');
+    await createUser('desktop@localhost', 'a-long-random-password');
     const res = await postLogin({ email: 'desktop@localhost', password: 'not-the-password' });
     expect(res.status).toBe(401);
     // Not a 400 about the address shape — the address was fine, the password was not.
@@ -58,7 +59,7 @@ describe('login accepts the identifier the desktop app actually seeds', () => {
   });
 
   it('signs in an account created under an older, shorter password policy', async () => {
-    createUser('someone@example.com', 'short');
+    await createUser('someone@example.com', 'short');
     const res = await postLogin({ email: 'someone@example.com', password: 'short' });
     expect(res.status).toBe(200);
   });

@@ -1,9 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getDb, getUnifiedApiKey, initDb } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(
   app: Express,
@@ -31,24 +32,23 @@ describe('revocable URL-token aliases', () => {
   let app: Express;
   let dashboardToken: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashboardToken = mintDashboardToken();
+    dashboardToken = await mintDashboardToken();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM url_tokens').run();
-    getDb().prepare('DELETE FROM api_keys').run();
-    getDb().prepare('DELETE FROM requests').run();
-    getDb().prepare('DELETE FROM rate_limit_usage').run();
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM url_tokens'));
+    (await getDb().run('DELETE FROM api_keys'));
+    (await getDb().run('DELETE FROM requests'));
+    (await getDb().run('DELETE FROM rate_limit_usage'));
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
     const key = encrypt('gsk_url_token_test');
-    getDb().prepare(`
+    (await getDb().run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('groq', 'url-token-test', ?, ?, ?, 'healthy', 1)
-    `).run(key.encrypted, key.iv, key.authTag);
+      VALUES ('groq', 'url-token-test', ?, ?, ?, 'healthy', 1) RETURNING id`, [key.encrypted, key.iv, key.authTag]));
   });
 
   afterEach(() => vi.restoreAllMocks());
@@ -113,7 +113,7 @@ describe('revocable URL-token aliases', () => {
   });
 
   it('never accepts the unified API key as a URL credential', async () => {
-    const response = await request(app, 'GET', `/v1/t/${getUnifiedApiKey()}/models`);
+    const response = await request(app, 'GET', `/v1/t/${await getUnifiedApiKey()}/models`);
     expect(response.status).toBe(401);
   });
 });

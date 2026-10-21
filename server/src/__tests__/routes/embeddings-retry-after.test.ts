@@ -7,8 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { once } from 'node:events';
 import type { Server } from 'node:http';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
+import { getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const realFetch = globalThis.fetch;
 
@@ -18,17 +19,16 @@ let token: string;
 
 beforeEach(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
   const db = getDb();
   const secret = encrypt('embed-rate-test-key');
-  const keyId = Number(db.prepare(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, enabled, status, base_url)
-    VALUES ('custom', 'embed-rate', ?, ?, ?, 1, 'healthy', 'http://embeddings.test/v1')`)
-    .run(secret.encrypted, secret.iv, secret.authTag).lastInsertRowid);
-  db.prepare(`INSERT INTO embedding_models (family, platform, model_id, display_name, dimensions, priority, enabled, quota_label, key_id)
-    VALUES ('rate-embed', 'custom', 'rate-embed', 'Rate embed', 2, 1, 1, '', ?)`).run(keyId);
-  token = getUnifiedApiKey();
+  const keyId = Number((await db.run(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, enabled, status, base_url)
+    VALUES ('custom', 'embed-rate', ?, ?, ?, 1, 'healthy', 'http://embeddings.test/v1') RETURNING id`, [secret.encrypted, secret.iv, secret.authTag])).lastInsertRowid);
+  (await db.run(`INSERT INTO embedding_models (family, platform, model_id, display_name, dimensions, priority, enabled, quota_label, key_id)
+    VALUES ('rate-embed', 'custom', 'rate-embed', 'Rate embed', 2, 1, 1, '', ?) RETURNING id`, [keyId]));
+  token = await getUnifiedApiKey();
   // Ollama emulation is opt-in; /api/embed 404s until it's on.
-  setSetting('ollama_emulation', 'key-required');
+  await setSetting('ollama_emulation', 'key-required');
   server = createApp().listen(0, '127.0.0.1');
   await once(server, 'listening');
   baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -78,11 +78,10 @@ describe('embedding rate-limit Retry-After propagation', () => {
     // A second provider in the same family that answers fine.
     const db = getDb();
     const secret = encrypt('embed-ok-key');
-    const okKey = Number(db.prepare(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, enabled, status, base_url)
-      VALUES ('custom', 'embed-ok', ?, ?, ?, 1, 'healthy', 'http://embeddings-ok.test/v1')`)
-      .run(secret.encrypted, secret.iv, secret.authTag).lastInsertRowid);
-    db.prepare(`INSERT INTO embedding_models (family, platform, model_id, display_name, dimensions, priority, enabled, quota_label, key_id)
-      VALUES ('rate-embed', 'custom', 'rate-embed-ok', 'Rate embed ok', 2, 2, 1, '', ?)`).run(okKey);
+    const okKey = Number((await db.run(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, enabled, status, base_url)
+      VALUES ('custom', 'embed-ok', ?, ?, ?, 1, 'healthy', 'http://embeddings-ok.test/v1') RETURNING id`, [secret.encrypted, secret.iv, secret.authTag])).lastInsertRowid);
+    (await db.run(`INSERT INTO embedding_models (family, platform, model_id, display_name, dimensions, priority, enabled, quota_label, key_id)
+      VALUES ('rate-embed', 'custom', 'rate-embed-ok', 'Rate embed ok', 2, 2, 1, '', ?) RETURNING id`, [okKey]));
     globalThis.fetch = vi.fn(async (url: string) => String(url).includes('embeddings-ok.test')
       ? new Response(JSON.stringify({ data: [{ index: 0, embedding: [0.1, 0.2] }] }), { status: 200, headers: { 'content-type': 'application/json' } })
       : rateLimited('17')) as unknown as typeof fetch;

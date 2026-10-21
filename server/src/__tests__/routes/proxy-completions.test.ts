@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { setRoutingStrategy } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(app: Express, method: string, path: string, body?: any, headers: Record<string, string> = {}) {
   const server = app.listen(0, '127.0.0.1');
@@ -26,35 +27,34 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, body: json, headers: res.headers, raw: data };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
-function seedGroqKey() {
+async function seedGroqKey() {
   const db = getDb();
   const key = encrypt('gsk_completion_test');
-  db.prepare(`
+  (await db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES ('groq', 'completion-test', ?, ?, ?, 'healthy', 1)
-  `).run(key.encrypted, key.iv, key.authTag);
+    VALUES ('groq', 'completion-test', ?, ?, ?, 'healthy', 1) RETURNING id`, [key.encrypted, key.iv, key.authTag]));
 }
 
 describe('POST /v1/completions', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     const db = getDb();
-    setRoutingStrategy('priority');
-    db.prepare('DELETE FROM rate_limit_cooldowns').run();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
-    seedGroqKey();
+    await setRoutingStrategy('priority');
+    (await db.run('DELETE FROM rate_limit_cooldowns'));
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
+    await seedGroqKey();
   });
 
   afterEach(() => {
@@ -96,7 +96,7 @@ describe('POST /v1/completions', () => {
       max_tokens: 12,
       temperature: 0.2,
       stop: ['\n\n'],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(headers.get('x-routed-via')).toContain('groq/');
@@ -146,7 +146,7 @@ describe('POST /v1/completions', () => {
       model: 'auto',
       prompt: 'const answer',
       max_tokens: 12,
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(body.usage).not.toBeNull();
@@ -189,7 +189,7 @@ describe('POST /v1/completions', () => {
       prompt: 'function demo() {',
       max_tokens: 16,
       stop: ['\n', '}', ';', '<|end|>', '<|fim_suffix|>', '<|fim_middle|>'],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(body.choices[0].text).toBe('suggestion');
@@ -227,7 +227,7 @@ describe('POST /v1/completions', () => {
       model: 'auto',
       prompt: '',
       stream: true,
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(headers.get('content-type')).toContain('text/event-stream');
@@ -269,7 +269,7 @@ describe('POST /v1/completions', () => {
       model: 'auto',
       messages: [{ role: 'user', content: 'hi' }],
       stop: ['a', 'b', 'c', 'd', 'e'],
-    }, authHeaders());
+    }, await authHeaders());
 
     expect(status).toBe(200);
     expect(body.choices[0].message.content).toBe('done');

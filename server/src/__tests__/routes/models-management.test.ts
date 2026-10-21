@@ -1,10 +1,11 @@
 import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getSetting, setSetting, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getSetting, setSetting, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 import { applyAllModelOverrides } from '../../services/model-state.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -48,7 +49,7 @@ async function request(app: Express, method: string, path: string, body?: any) {
     headers: {
       ...(body ? { 'Content-Type': 'application/json' } : {}),
       ...(isGatedApiPath(path) ? { Authorization: `Bearer ${dashToken}` } : {}),
-      ...(isV1 ? { Authorization: `Bearer ${getUnifiedApiKey()}` } : {}),
+      ...(isV1 ? { Authorization: `Bearer ${await getUnifiedApiKey()}` } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -61,11 +62,11 @@ async function request(app: Express, method: string, path: string, body?: any) {
 describe('Model management API', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
   afterEach(() => {
@@ -73,17 +74,16 @@ describe('Model management API', () => {
   });
 
   it('updates catalog model metadata and records durable overrides', async () => {
-    const target = getDb().prepare(`
+    const target = (await getDb().get(`
       SELECT id FROM models
        WHERE platform = 'groq' AND key_id IS NULL
        ORDER BY id LIMIT 1
-    `).get() as { id: number };
+    `)) as { id: number };
 
     // Only an actual divergence is recorded as an override now (#1178): a
     // capability write that restates the catalog value is a no-op. So flip
     // the tool flag to the opposite of whatever the catalog ships.
-    const currentTools = (getDb().prepare('SELECT supports_tools FROM models WHERE id = ?')
-      .get(target.id) as { supports_tools: number }).supports_tools === 1;
+    const currentTools = ((await getDb().get('SELECT supports_tools FROM models WHERE id = ?', [target.id])) as { supports_tools: number }).supports_tools === 1;
     const flippedTools = !currentTools;
 
     const { status, body } = await request(app, 'PATCH', `/api/models/${target.id}`, {
@@ -95,12 +95,12 @@ describe('Model management API', () => {
     expect(status).toBe(200);
     expect(body.success).toBe(true);
 
-    const row = getDb().prepare(`
+    const row = (await getDb().get(`
       SELECT m.display_name, m.supports_tools, m.context_window, fc.enabled AS fallback_enabled
         FROM models m
         JOIN fallback_config fc ON fc.model_db_id = m.id
        WHERE m.id = ?
-    `).get(target.id) as { display_name: string; supports_tools: number; context_window: number; fallback_enabled: number };
+    `, [target.id])) as { display_name: string; supports_tools: number; context_window: number; fallback_enabled: number };
     expect(row).toEqual({
       display_name: 'Locally tuned model',
       supports_tools: flippedTools ? 1 : 0,
@@ -108,8 +108,7 @@ describe('Model management API', () => {
       fallback_enabled: 0,
     });
 
-    const override = getDb().prepare('SELECT overrides_json FROM model_overrides WHERE model_id = (SELECT model_id FROM models WHERE id = ?)')
-      .get(target.id) as { overrides_json: string };
+    const override = (await getDb().get('SELECT overrides_json FROM model_overrides WHERE model_id = (SELECT model_id FROM models WHERE id = ?)', [target.id])) as { overrides_json: string };
     expect(JSON.parse(override.overrides_json)).toMatchObject({
       displayName: 'Locally tuned model',
       supportsTools: flippedTools,
@@ -126,36 +125,32 @@ describe('Model management API', () => {
     const db = getDb();
     // A fresh catalog-managed row: supports_vision defaults to 0, so that is
     // the baseline the override is measured against.
-    const insert = db.prepare(INSERT_MODEL_SQL).run(
-      TEST_MODEL_PLATFORM, 'override-heal-model', 'Override Heal Model', 9005, 9005, TEST_MODEL_SIZE_LABEL,
-    );
+    const insert = (await db.run(INSERT_MODEL_SQL, [TEST_MODEL_PLATFORM, 'override-heal-model', 'Override Heal Model', 9005, 9005, TEST_MODEL_SIZE_LABEL]));
     const id = Number(insert.lastInsertRowid);
-    const blob = () => {
-      const row = db.prepare(
-        "SELECT overrides_json FROM model_overrides WHERE platform = 'groq' AND model_id = 'override-heal-model'",
-      ).get() as { overrides_json: string } | undefined;
+    const blob = async () => {
+      const row = (await db.get("SELECT overrides_json FROM model_overrides WHERE platform = 'groq' AND model_id = 'override-heal-model'")) as { overrides_json: string } | undefined;
       return row ? JSON.parse(row.overrides_json) : undefined;
     };
 
     // Flip vision ON: recorded as a durable override, badge on.
     expect((await request(app, 'PATCH', `/api/models/${id}`, { supportsVision: true })).status).toBe(200);
-    expect(blob()).toMatchObject({ supportsVision: true });
+    expect(await blob()).toMatchObject({ supportsVision: true });
     let listed = await request(app, 'GET', '/api/models');
     expect(listed.body.find((m: any) => m.id === id).hasOverrides).toBe(true);
 
     // Flipping it back OFF drops the override entirely: the effective value is
     // the catalog's again, so the badge must go, not stay stuck on (#1178).
     expect((await request(app, 'PATCH', `/api/models/${id}`, { supportsVision: false })).status).toBe(200);
-    expect(blob()).toBeUndefined();
+    expect(await blob()).toBeUndefined();
     listed = await request(app, 'GET', '/api/models');
     expect(listed.body.find((m: any) => m.id === id).hasOverrides).toBe(false);
 
     // A fresh divergence re-records the override, and it still survives a
     // catalog re-apply.
     expect((await request(app, 'PATCH', `/api/models/${id}`, { supportsVision: true })).status).toBe(200);
-    expect(blob()).toMatchObject({ supportsVision: true });
-    applyAllModelOverrides(db);
-    const row = db.prepare('SELECT supports_vision FROM models WHERE id = ?').get(id) as { supports_vision: number };
+    expect(await blob()).toMatchObject({ supportsVision: true });
+    await applyAllModelOverrides(db);
+    const row = (await db.get('SELECT supports_vision FROM models WHERE id = ?', [id])) as { supports_vision: number };
     expect(row.supports_vision).toBe(1);
   });
 
@@ -176,44 +171,29 @@ describe('Model management API', () => {
     expect(status).toBe(200);
     expect(body.success).toBe(true);
 
-    const row = getDb().prepare('SELECT supports_vision, supports_tools FROM models WHERE id = ?')
-      .get(modelDbId) as { supports_vision: number; supports_tools: number };
+    const row = (await getDb().get('SELECT supports_vision, supports_tools FROM models WHERE id = ?', [modelDbId])) as { supports_vision: number; supports_tools: number };
     expect(row).toEqual({ supports_vision: 1, supports_tools: 0 });
 
-    const override = getDb().prepare("SELECT 1 FROM model_overrides WHERE platform = 'custom' AND model_id = 'cap-edit-model'").get();
+    const override = (await getDb().get("SELECT 1 FROM model_overrides WHERE platform = 'custom' AND model_id = 'cap-edit-model'"));
     expect(override).toBeUndefined();
   });
 
   it('disabling a model also clears its fallback/profile/fusion selection (#499)', async () => {
     const db = getDb();
-    const profile = db.prepare(ACTIVE_PROFILE_SQL).get() as { id: number };
-    const targetInsert = db.prepare(INSERT_MODEL_SQL).run(
-      TEST_MODEL_PLATFORM,
-      TARGET_MODEL_ID,
-      TARGET_DISPLAY_NAME,
-      TEST_MODEL_INTELLIGENCE_RANK,
-      TEST_MODEL_SPEED_RANK,
-      TEST_MODEL_SIZE_LABEL,
-    );
-    const retainedInsert = db.prepare(INSERT_MODEL_SQL).run(
-      TEST_MODEL_PLATFORM,
-      RETAINED_MODEL_ID,
-      RETAINED_DISPLAY_NAME,
-      TEST_MODEL_INTELLIGENCE_RANK + 1,
-      TEST_MODEL_SPEED_RANK + 1,
-      TEST_MODEL_SIZE_LABEL,
-    );
+    const profile = (await db.get(ACTIVE_PROFILE_SQL)) as { id: number };
+    const targetInsert = (await db.run(INSERT_MODEL_SQL, [TEST_MODEL_PLATFORM, TARGET_MODEL_ID, TARGET_DISPLAY_NAME, TEST_MODEL_INTELLIGENCE_RANK, TEST_MODEL_SPEED_RANK, TEST_MODEL_SIZE_LABEL]));
+    const retainedInsert = (await db.run(INSERT_MODEL_SQL, [TEST_MODEL_PLATFORM, RETAINED_MODEL_ID, RETAINED_DISPLAY_NAME, TEST_MODEL_INTELLIGENCE_RANK + 1, TEST_MODEL_SPEED_RANK + 1, TEST_MODEL_SIZE_LABEL]));
     const target = {
       profile_id: profile.id,
       model_db_id: Number(targetInsert.lastInsertRowid),
       model_id: TARGET_MODEL_ID,
     };
     const retainedModelDbId = Number(retainedInsert.lastInsertRowid);
-    db.prepare(INSERT_FALLBACK_SQL).run(target.model_db_id, TARGET_MODEL_PRIORITY);
-    db.prepare(INSERT_FALLBACK_SQL).run(retainedModelDbId, RETAINED_MODEL_PRIORITY);
-    db.prepare(INSERT_PROFILE_MODEL_SQL).run(profile.id, target.model_db_id, TARGET_MODEL_PRIORITY);
-    db.prepare(INSERT_PROFILE_MODEL_SQL).run(profile.id, retainedModelDbId, RETAINED_MODEL_PRIORITY);
-    setSetting(FUSION_CONFIG_SETTING, JSON.stringify({
+    (await db.run(INSERT_FALLBACK_SQL, [target.model_db_id, TARGET_MODEL_PRIORITY]));
+    (await db.run(INSERT_FALLBACK_SQL, [retainedModelDbId, RETAINED_MODEL_PRIORITY]));
+    (await db.run(INSERT_PROFILE_MODEL_SQL, [profile.id, target.model_db_id, TARGET_MODEL_PRIORITY]));
+    (await db.run(INSERT_PROFILE_MODEL_SQL, [profile.id, retainedModelDbId, RETAINED_MODEL_PRIORITY]));
+    await setSetting(FUSION_CONFIG_SETTING, JSON.stringify({
       mode: 'explicit',
       models: [target.model_id, TARGET_CANONICAL_ID, RETAINED_CANONICAL_ID],
       judge: TARGET_CANONICAL_ID,
@@ -229,26 +209,24 @@ describe('Model management API', () => {
     expect(status).toBe(200);
     expect(body.success).toBe(true);
 
-    const profileSelection = db.prepare(PROFILE_SELECTION_SQL)
-      .get(target.profile_id, target.model_db_id) as { enabled: number };
-    const fallbackSelection = db.prepare(FALLBACK_SELECTION_SQL)
-      .get(target.model_db_id) as { enabled: number };
+    const profileSelection = (await db.get(PROFILE_SELECTION_SQL, [target.profile_id, target.model_db_id])) as { enabled: number };
+    const fallbackSelection = (await db.get(FALLBACK_SELECTION_SQL, [target.model_db_id])) as { enabled: number };
 
     expect(profileSelection.enabled).toBe(0);
     expect(fallbackSelection.enabled).toBe(0);
 
-    const savedFusionConfig = JSON.parse(getSetting(FUSION_CONFIG_SETTING)!);
+    const savedFusionConfig = JSON.parse(await getSetting(FUSION_CONFIG_SETTING)!);
     expect(savedFusionConfig.models).toEqual([RETAINED_CANONICAL_ID]);
     expect(savedFusionConfig.judge).toBeNull();
   });
 
   it('persists rank and rate-limit edits as overrides that survive a catalog re-apply (#551)', async () => {
-    const target = getDb().prepare(`
+    const target = (await getDb().get(`
       SELECT m.id, m.platform, m.model_id FROM models m
         JOIN fallback_config fc ON fc.model_db_id = m.id
        WHERE m.platform = 'groq' AND m.key_id IS NULL AND m.source != 'user'
        ORDER BY m.id DESC LIMIT 1
-    `).get() as { id: number; platform: string; model_id: string };
+    `)) as { id: number; platform: string; model_id: string };
 
     const edits = {
       intelligenceRank: 7,
@@ -261,29 +239,28 @@ describe('Model management API', () => {
     const { status } = await request(app, 'PATCH', `/api/models/${target.id}`, edits);
     expect(status).toBe(200);
 
-    const readColumns = () => getDb().prepare(`
+    const readColumns = async () => (await getDb().get(`
       SELECT intelligence_rank, speed_rank, rpm_limit, rpd_limit, tpm_limit, tpd_limit
         FROM models WHERE id = ?
-    `).get(target.id);
+    `, [target.id]));
     const expectedColumns = {
       intelligence_rank: 7, speed_rank: 11,
       rpm_limit: 13, rpd_limit: 17, tpm_limit: 19, tpd_limit: 23,
     };
-    expect(readColumns()).toEqual(expectedColumns);
+    expect(await readColumns()).toEqual(expectedColumns);
 
-    const override = getDb().prepare('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?')
-      .get(target.platform, target.model_id) as { overrides_json: string };
+    const override = (await getDb().get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [target.platform, target.model_id])) as { overrides_json: string };
     expect(JSON.parse(override.overrides_json)).toMatchObject(edits);
 
     // A catalog sync rewrites every catalog-owned column before the overrides
     // are re-applied, so simulate the rewrite and check the edits come back.
-    getDb().prepare(`
+    (await getDb().run(`
       UPDATE models SET intelligence_rank = 500, speed_rank = 500, rpm_limit = NULL,
                         rpd_limit = NULL, tpm_limit = NULL, tpd_limit = NULL
        WHERE id = ?
-    `).run(target.id);
-    expect(applyAllModelOverrides(getDb())).toBeGreaterThan(0);
-    expect(readColumns()).toEqual(expectedColumns);
+    `, [target.id]));
+    expect(await applyAllModelOverrides(getDb())).toBeGreaterThan(0);
+    expect(await readColumns()).toEqual(expectedColumns);
 
     // Per-field provenance, so the model page can mark the overridden inputs.
     const listed = await request(app, 'GET', '/api/models');
@@ -300,57 +277,55 @@ describe('Model management API', () => {
   });
 
   it('clears a rate limit back to unlimited with an explicit null (#551)', async () => {
-    const target = getDb().prepare(`
+    const target = (await getDb().get(`
       SELECT m.id, m.platform, m.model_id FROM models m
        WHERE m.platform = 'cerebras' AND m.key_id IS NULL AND m.source != 'user'
        ORDER BY m.id LIMIT 1
-    `).get() as { id: number; platform: string; model_id: string };
+    `)) as { id: number; platform: string; model_id: string };
 
     expect((await request(app, 'PATCH', `/api/models/${target.id}`, { rpmLimit: 41 })).status).toBe(200);
     expect((await request(app, 'PATCH', `/api/models/${target.id}`, { rpmLimit: null })).status).toBe(200);
 
-    const row = getDb().prepare('SELECT rpm_limit FROM models WHERE id = ?').get(target.id) as { rpm_limit: number | null };
+    const row = (await getDb().get('SELECT rpm_limit FROM models WHERE id = ?', [target.id])) as { rpm_limit: number | null };
     expect(row.rpm_limit).toBeNull();
 
     // The null has to be stored too, or the next catalog sync would put the
     // catalog's limit back.
-    const override = getDb().prepare('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?')
-      .get(target.platform, target.model_id) as { overrides_json: string };
+    const override = (await getDb().get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [target.platform, target.model_id])) as { overrides_json: string };
     expect(JSON.parse(override.overrides_json).rpmLimit).toBeNull();
 
-    getDb().prepare('UPDATE models SET rpm_limit = 99 WHERE id = ?').run(target.id);
-    applyAllModelOverrides(getDb());
-    expect((getDb().prepare('SELECT rpm_limit FROM models WHERE id = ?').get(target.id) as any).rpm_limit).toBeNull();
+    (await getDb().run('UPDATE models SET rpm_limit = 99 WHERE id = ?', [target.id]));
+    await applyAllModelOverrides(getDb());
+    expect(((await getDb().get('SELECT rpm_limit FROM models WHERE id = ?', [target.id])) as any).rpm_limit).toBeNull();
   });
 
   it("clears the capability tier back to unscored with an empty sizeLabel (#685)", async () => {
-    const target = getDb().prepare(`
+    const target = (await getDb().get(`
       SELECT m.id, m.platform, m.model_id FROM models m
        WHERE m.platform = 'groq' AND m.key_id IS NULL AND m.source != 'user'
        ORDER BY m.id LIMIT 1
-    `).get() as { id: number; platform: string; model_id: string };
+    `)) as { id: number; platform: string; model_id: string };
 
     expect((await request(app, 'PATCH', `/api/models/${target.id}`, { sizeLabel: 'Frontier' })).status).toBe(200);
     expect((await request(app, 'PATCH', `/api/models/${target.id}`, { sizeLabel: '' })).status).toBe(200);
 
-    const row = getDb().prepare('SELECT size_label FROM models WHERE id = ?').get(target.id) as { size_label: string };
+    const row = (await getDb().get('SELECT size_label FROM models WHERE id = ?', [target.id])) as { size_label: string };
     expect(row.size_label).toBe('');
 
     // The '' has to be stored as an override too, or the next catalog sync
     // would put the catalog's tier back.
-    const override = getDb().prepare('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?')
-      .get(target.platform, target.model_id) as { overrides_json: string };
+    const override = (await getDb().get('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?', [target.platform, target.model_id])) as { overrides_json: string };
     expect(JSON.parse(override.overrides_json).sizeLabel).toBe('');
 
-    getDb().prepare("UPDATE models SET size_label = 'Large' WHERE id = ?").run(target.id);
-    applyAllModelOverrides(getDb());
-    expect((getDb().prepare('SELECT size_label FROM models WHERE id = ?').get(target.id) as any).size_label).toBe('');
+    (await getDb().run("UPDATE models SET size_label = 'Large' WHERE id = ?", [target.id]));
+    await applyAllModelOverrides(getDb());
+    expect(((await getDb().get('SELECT size_label FROM models WHERE id = ?', [target.id])) as any).size_label).toBe('');
   });
 
   it('rejects an out-of-range intelligence rank (#551)', async () => {
-    const target = getDb().prepare(`
+    const target = (await getDb().get(`
       SELECT id FROM models WHERE platform = 'groq' AND key_id IS NULL ORDER BY id LIMIT 1
-    `).get() as { id: number };
+    `)) as { id: number };
 
     expect((await request(app, 'PATCH', `/api/models/${target.id}`, { intelligenceRank: 0 })).status).toBe(400);
     expect((await request(app, 'PATCH', `/api/models/${target.id}`, { speedRank: 1001 })).status).toBe(400);
@@ -358,69 +333,65 @@ describe('Model management API', () => {
   });
 
   it('deletes a catalog model with a tombstone', async () => {
-    const target = getDb().prepare(`
+    const target = (await getDb().get(`
       SELECT id, platform, model_id FROM models
        WHERE platform = 'openrouter' AND key_id IS NULL
        ORDER BY id LIMIT 1
-    `).get() as { id: number; platform: string; model_id: string };
+    `)) as { id: number; platform: string; model_id: string };
 
     const { status, body } = await request(app, 'DELETE', `/api/models/${target.id}`);
     expect(status).toBe(200);
     expect(body).toEqual({ success: true, tombstoned: true });
 
-    expect(getDb().prepare('SELECT id FROM models WHERE id = ?').get(target.id)).toBeUndefined();
-    expect(getDb().prepare(`
+    expect((await getDb().get('SELECT id FROM models WHERE id = ?', [target.id]))).toBeUndefined();
+    expect((await getDb().get(`
       SELECT 1 FROM catalog_model_tombstones
        WHERE kind = 'chat' AND platform = ? AND model_id = ?
-    `).get(target.platform, target.model_id)).toBeDefined();
+    `, [target.platform, target.model_id]))).toBeDefined();
   });
 
   // The named-chain listing and routing tests below need a live groq key: a
   // chain is only "available" when one of its members can serve a request now.
-  function seedGroqKey(): void {
+  async function seedGroqKey(): void {
     const secret = encrypt('gsk_named_chain_test');
-    getDb().prepare(`
+    (await getDb().run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('groq', 'named-chain', ?, ?, ?, 'healthy', 1)
-    `).run(secret.encrypted, secret.iv, secret.authTag);
+      VALUES ('groq', 'named-chain', ?, ?, ?, 'healthy', 1) RETURNING id`, [secret.encrypted, secret.iv, secret.authTag]));
   }
 
   // A model that exists ONLY inside the custom profile, so "the served model is
   // this one" proves the request went through the named chain rather than the
   // active/default chain.
-  function seedChainOnlyModel(modelId: string, contextWindow: number): number {
-    const inserted = getDb().prepare(`
+  async function seedChainOnlyModel(modelId: string, contextWindow: number): number {
+    const inserted = (await getDb().run(`
       INSERT INTO models (
         platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
         context_window, enabled, supports_tools
-      ) VALUES ('groq', ?, ?, 100, 100, 'Small', ?, 1, 1)
-    `).run(modelId, `Named chain ${modelId}`, contextWindow);
+      ) VALUES ('groq', ?, ?, 100, 100, 'Small', ?, 1, 1) RETURNING id`, [modelId, `Named chain ${modelId}`, contextWindow]));
     return Number(inserted.lastInsertRowid);
   }
 
-  function newProfile(name: string, sortOrder: number): number {
-    const inserted = getDb().prepare(`
-      INSERT INTO profiles (name, emoji, color, type, sort_order) VALUES (?, '', '#6366f1', 'custom', ?)
-    `).run(name, sortOrder);
+  async function newProfile(name: string, sortOrder: number): number {
+    const inserted = (await getDb().run(`
+      INSERT INTO profiles (name, emoji, color, type, sort_order) VALUES (?, '', '#6366f1', 'custom', ?) RETURNING id`, [name, sortOrder]));
     return Number(inserted.lastInsertRowid);
   }
 
-  function addToProfile(profileId: number, modelDbId: number, enabled = 1): void {
-    getDb().prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, 1, ?)')
-      .run(profileId, modelDbId, enabled);
+  async function addToProfile(profileId: number, modelDbId: number, enabled = 1): void {
+    (await getDb().run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, 1, ?) RETURNING id', [profileId, modelDbId, enabled]));
   }
 
   it('exposes custom profiles as auto:<name> chains in /v1/models (#960/#895)', async () => {
-    seedGroqKey();
+    await seedGroqKey();
 
     // A chain whose single member is enabled and backed by an enabled key.
-    const servableId = seedChainOnlyModel('named-chain-servable', 111000);
-    addToProfile(newProfile('my-group', 5), servableId);
+    const servableId = await seedChainOnlyModel('named-chain-servable', 111000);
+    await addToProfile(await newProfile('my-group', 5), servableId);
 
     // A chain whose single member is switched off in the chain: nothing in it
     // can serve a request, so the entry must say so rather than claim ready.
-    const prunedId = seedChainOnlyModel('named-chain-pruned', 222000);
-    addToProfile(newProfile('off-group', 6), prunedId, 0);
+    const prunedId = await seedChainOnlyModel('named-chain-pruned', 222000);
+    await addToProfile(await newProfile('off-group', 6), prunedId, 0);
 
     const listed = await request(app, 'GET', '/v1/models');
     expect(listed.status).toBe(200);
@@ -471,8 +442,8 @@ describe('Model management API', () => {
   });
 
   it('routes a request to model auto:<name> through that named chain (#960/#895)', async () => {
-    const chainOnlyId = seedChainOnlyModel('named-chain-routed', 128000);
-    addToProfile(newProfile('route-group', 7), chainOnlyId);
+    const chainOnlyId = await seedChainOnlyModel('named-chain-routed', 128000);
+    await addToProfile(await newProfile('route-group', 7), chainOnlyId);
 
     const origFetch = global.fetch;
     vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
@@ -501,8 +472,7 @@ describe('Model management API', () => {
 
     // The served model is the one that exists ONLY in this profile, so the
     // request really went down the named chain and not the active one.
-    const served = getDb().prepare('SELECT model_id FROM requests ORDER BY id DESC LIMIT 1')
-      .get() as { model_id: string } | undefined;
+    const served = (await getDb().get('SELECT model_id FROM requests ORDER BY id DESC LIMIT 1')) as { model_id: string } | undefined;
     expect(served?.model_id).toBe('named-chain-routed');
 
     // An unknown chain name must fail loudly, not silently fall back to the
@@ -535,15 +505,14 @@ describe('Model management API', () => {
     });
   }
 
-  function lastServedModel(): string | undefined {
-    return (getDb().prepare('SELECT model_id FROM requests ORDER BY id DESC LIMIT 1')
-      .get() as { model_id: string } | undefined)?.model_id;
+  async function lastServedModel(): string | undefined {
+    return ((await getDb().get('SELECT model_id FROM requests ORDER BY id DESC LIMIT 1')) as { model_id: string } | undefined)?.model_id;
   }
 
   it('routes /v1/messages to model auto:<name> through that named chain (#1170)', async () => {
-    seedGroqKey();
-    const chainOnlyId = seedChainOnlyModel('named-chain-messages', 128000);
-    addToProfile(newProfile('messages-group', 8), chainOnlyId);
+    await seedGroqKey();
+    const chainOnlyId = await seedChainOnlyModel('named-chain-messages', 128000);
+    await addToProfile(await newProfile('messages-group', 8), chainOnlyId);
     mockGroqChat('named-chain-messages', 'routed via messages-group');
 
     const routed = await request(app, 'POST', '/v1/messages', {
@@ -552,11 +521,11 @@ describe('Model management API', () => {
       messages: [{ role: 'user', content: 'hi' }],
     });
     expect(routed.status).toBe(200);
-    expect(lastServedModel()).toBe('named-chain-messages');
+    expect(await lastServedModel()).toBe('named-chain-messages');
   });
 
   it('rejects unknown auto:<name> on /v1/messages with 400 (#1170)', async () => {
-    seedGroqKey();
+    await seedGroqKey();
     mockGroqChat('should-not-serve', 'silent pool fallback');
 
     const missing = await request(app, 'POST', '/v1/messages', {
@@ -569,9 +538,9 @@ describe('Model management API', () => {
   });
 
   it('routes /v1/responses to model auto:<name> through that named chain (#1170)', async () => {
-    seedGroqKey();
-    const chainOnlyId = seedChainOnlyModel('named-chain-responses', 128000);
-    addToProfile(newProfile('responses-group', 9), chainOnlyId);
+    await seedGroqKey();
+    const chainOnlyId = await seedChainOnlyModel('named-chain-responses', 128000);
+    await addToProfile(await newProfile('responses-group', 9), chainOnlyId);
     mockGroqChat('named-chain-responses', 'routed via responses-group');
 
     const routed = await request(app, 'POST', '/v1/responses', {
@@ -579,11 +548,11 @@ describe('Model management API', () => {
       input: 'hi',
     });
     expect(routed.status).toBe(200);
-    expect(lastServedModel()).toBe('named-chain-responses');
+    expect(await lastServedModel()).toBe('named-chain-responses');
   });
 
   it('rejects unknown auto:<name> on /v1/responses with 400 (#1170)', async () => {
-    seedGroqKey();
+    await seedGroqKey();
     mockGroqChat('should-not-serve', 'silent pool fallback');
 
     const missing = await request(app, 'POST', '/v1/responses', {

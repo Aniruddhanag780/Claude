@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -26,15 +27,15 @@ async function request(app: Express, method: string, path: string, body?: unknow
 describe('GET /api/keys monthly budget usage', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM api_keys'));
   });
 
   it('exposes caps, current-month usage and the reset timestamp per key', async () => {
@@ -52,10 +53,8 @@ describe('GET /api/keys monthly budget usage', () => {
 
     // One successful request this month → the durable usage ledger (trigger)
     // must show up alongside the caps.
-    getDb().prepare(
-      `INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms)
-       VALUES ('groq', 'llama-3.3-70b', ?, 'success', 120, 80, 42)`,
-    ).run(keyId);
+    (await getDb().run(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms)
+       VALUES ('groq', 'llama-3.3-70b', ?, 'success', 120, 80, 42) RETURNING id`, [keyId]));
 
     const { status, body } = await request(app, 'GET', '/api/keys');
     expect(status).toBe(200);
@@ -91,10 +90,8 @@ describe('GET /api/keys monthly budget usage', () => {
       platform: 'groq',
       key: 'gsk_usage_test_key_failed',
     });
-    getDb().prepare(
-      `INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms)
-       VALUES ('groq', 'llama-3.3-70b', ?, 'error', 0, 0, 10)`,
-    ).run(created.body.id);
+    (await getDb().run(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms)
+       VALUES ('groq', 'llama-3.3-70b', ?, 'error', 0, 0, 10) RETURNING id`, [created.body.id]));
     const { body } = await request(app, 'GET', '/api/keys');
     const row = body.find((k: { id: number }) => k.id === created.body.id);
     expect(row.monthlyUsage.requests).toBe(0);

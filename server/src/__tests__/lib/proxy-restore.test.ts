@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
-import { initDb, getDb, setSetting } from '../../db/index.js';
+import { getDb, setSetting } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 import {
   restoreProxySettings,
   getProxyUrl,
@@ -64,37 +65,37 @@ afterAll(() => {
 });
 
 describe('restoreProxySettings (desktop embedder hydration, #949)', () => {
-  it('loads a saved proxy URL, enabled flag and bypass list from the settings table', () => {
+  it('loads a saved proxy URL, enabled flag and bypass list from the settings table', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    setSetting('proxy_url', 'socks5h://127.0.0.1:9050');
-    setSetting('proxy_enabled', '1');
-    setSetting('proxy_bypass', 'groq,openrouter');
+    await initTestDb();
+    await setSetting('proxy_url', 'socks5h://127.0.0.1:9050');
+    await setSetting('proxy_enabled', '1');
+    await setSetting('proxy_bypass', 'groq,openrouter');
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('socks5h://127.0.0.1:9050');
     expect(isProxyEnabled()).toBe(true);
     expect(getProxyBypassPlatforms()).toEqual(['groq', 'openrouter']);
   });
 
-  it('respects a disabled proxy saved across a restart', () => {
+  it('respects a disabled proxy saved across a restart', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    setSetting('proxy_url', 'http://127.0.0.1:3128');
-    setSetting('proxy_enabled', '0');
+    await initTestDb();
+    await setSetting('proxy_url', 'http://127.0.0.1:3128');
+    await setSetting('proxy_enabled', '0');
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('http://127.0.0.1:3128');
     expect(isProxyEnabled()).toBe(false);
   });
 
-  it('keeps the defaults when nothing was ever saved', () => {
+  it('keeps the defaults when nothing was ever saved', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('');
     expect(getProxyMode()).toBe('forward');
@@ -102,50 +103,50 @@ describe('restoreProxySettings (desktop embedder hydration, #949)', () => {
     expect(getProxyBypassPlatforms()).toEqual([]);
   });
 
-  it('lets the PROXY_URL env var outrank the saved value, as before', () => {
+  it('lets the PROXY_URL env var outrank the saved value, as before', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    setSetting('proxy_url', 'http://saved:3128');
+    await initTestDb();
+    await setSetting('proxy_url', 'http://saved:3128');
     process.env.PROXY_URL = 'http://env:8080';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('http://env:8080');
     expect(getProxyMode()).toBe('forward');
   });
 
-  it('restores an explicitly saved Fetch Relay mode', () => {
+  it('restores an explicitly saved Fetch Relay mode', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    setSetting('proxy_url', 'https://relay.example.test/secret');
-    setSetting('proxy_mode', 'fetch-relay');
+    await initTestDb();
+    await setSetting('proxy_url', 'https://relay.example.test/secret');
+    await setSetting('proxy_mode', 'fetch-relay');
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('https://relay.example.test/secret');
     expect(getProxyMode()).toBe('fetch-relay');
   });
 
-  it('restores a saved Relay token and lets FETCH_RELAY_TOKEN override it', () => {
+  it('restores a saved Relay token and lets FETCH_RELAY_TOKEN override it', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
-    setSetting('fetch_relay_token', encodeFetchRelayToken('saved-token'));
+    await initTestDb();
+    await setSetting('fetch_relay_token', encodeFetchRelayToken('saved-token'));
 
-    restoreProxySettings();
+    await restoreProxySettings();
     expect(getFetchRelayToken()).toBe('saved-token');
 
     process.env.FETCH_RELAY_TOKEN = 'environment-token';
-    restoreProxySettings();
+    await restoreProxySettings();
     expect(getFetchRelayToken()).toBe('environment-token');
   });
 
-  it('lets PROXY_MODE opt an environment PROXY_URL into Fetch Relay', () => {
+  it('lets PROXY_MODE opt an environment PROXY_URL into Fetch Relay', async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     process.env.PROXY_URL = 'https://relay.example.test/secret';
     process.env.PROXY_MODE = 'fetch-relay';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyMode()).toBe('fetch-relay');
   });
@@ -156,84 +157,84 @@ describe('restoreProxySettings (desktop embedder hydration, #949)', () => {
 // once and then nothing re-reads the environment. A regression that skipped a
 // tier here would strand a user who has only ever exported HTTPS_PROXY.
 describe('restoreProxySettings + the standard env fallbacks (#353 x #949)', () => {
-  function freshDb(): void {
+  async function freshDb(): void {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   }
 
-  it('falls back to ALL_PROXY when nothing was saved in the dashboard', () => {
-    freshDb();
+  it('falls back to ALL_PROXY when nothing was saved in the dashboard', async () => {
+    await freshDb();
     process.env.ALL_PROXY = 'socks5://all:1080';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('socks5://all:1080');
   });
 
-  it('falls back to HTTPS_PROXY', () => {
-    freshDb();
+  it('falls back to HTTPS_PROXY', async () => {
+    await freshDb();
     process.env.HTTPS_PROXY = 'http://https-tier:8443';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('http://https-tier:8443');
   });
 
-  it('falls back to HTTP_PROXY', () => {
-    freshDb();
+  it('falls back to HTTP_PROXY', async () => {
+    await freshDb();
     process.env.HTTP_PROXY = 'http://http-tier:8080';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('http://http-tier:8080');
   });
 
-  it('prefers ALL_PROXY, then HTTPS_PROXY, then HTTP_PROXY', () => {
-    freshDb();
+  it('prefers ALL_PROXY, then HTTPS_PROXY, then HTTP_PROXY', async () => {
+    await freshDb();
     process.env.ALL_PROXY = 'http://all:1';
     process.env.HTTPS_PROXY = 'http://https:2';
     process.env.HTTP_PROXY = 'http://http:3';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('http://all:1');
   });
 
-  it('reads the lower-case spelling too — the one curl/git users actually export', () => {
-    freshDb();
+  it('reads the lower-case spelling too — the one curl/git users actually export', async () => {
+    await freshDb();
     process.env.https_proxy = 'http://lower:8443';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('http://lower:8443');
   });
 
-  it('does NOT let the ambient env override a proxy the user typed into the dashboard', () => {
-    freshDb();
-    setSetting('proxy_url', 'http://saved:3128');
+  it('does NOT let the ambient env override a proxy the user typed into the dashboard', async () => {
+    await freshDb();
+    await setSetting('proxy_url', 'http://saved:3128');
     process.env.ALL_PROXY = 'http://ambient:1080';
     process.env.HTTPS_PROXY = 'http://ambient:8443';
     process.env.HTTP_PROXY = 'http://ambient:8080';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('http://saved:3128');
   });
 
-  it('still lets PROXY_URL outrank the ambient vars', () => {
-    freshDb();
+  it('still lets PROXY_URL outrank the ambient vars', async () => {
+    await freshDb();
     process.env.PROXY_URL = 'http://explicit:9090';
     process.env.ALL_PROXY = 'http://ambient:1080';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('http://explicit:9090');
   });
 
-  it('leaves the proxy empty when neither the DB nor any env var has one', () => {
-    freshDb();
+  it('leaves the proxy empty when neither the DB nor any env var has one', async () => {
+    await freshDb();
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('');
   });
@@ -244,61 +245,61 @@ describe('restoreProxySettings + the standard env fallbacks (#353 x #949)', () =
 // going through applyProxyUrl the saved URL might still land while the direct
 // list silently emptied, quietly proxying hosts the user excluded.
 describe('restoreProxySettings + NO_PROXY (#949)', () => {
-  function freshDb(): void {
+  async function freshDb(): void {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   }
 
-  it('parses NO_PROXY at restore time, lower-cased and trimmed', () => {
-    freshDb();
-    setSetting('proxy_url', 'http://127.0.0.1:3128');
+  it('parses NO_PROXY at restore time, lower-cased and trimmed', async () => {
+    await freshDb();
+    await setSetting('proxy_url', 'http://127.0.0.1:3128');
     process.env.NO_PROXY = 'localhost, .Internal.Corp ,, 10.0.0.1';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getNoProxyRules()).toEqual(['localhost', '.internal.corp', '10.0.0.1']);
   });
 
-  it('normalises the `*.domain` spelling to the leading-dot form', () => {
-    freshDb();
-    setSetting('proxy_url', 'http://127.0.0.1:3128');
+  it('normalises the `*.domain` spelling to the leading-dot form', async () => {
+    await freshDb();
+    await setSetting('proxy_url', 'http://127.0.0.1:3128');
     process.env.NO_PROXY = '*.example.com';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getNoProxyRules()).toEqual(['.example.com']);
   });
 
-  it('honours the lower-case no_proxy spelling', () => {
-    freshDb();
-    setSetting('proxy_url', 'http://127.0.0.1:3128');
+  it('honours the lower-case no_proxy spelling', async () => {
+    await freshDb();
+    await setSetting('proxy_url', 'http://127.0.0.1:3128');
     process.env.no_proxy = 'example.com';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getNoProxyRules()).toEqual(['example.com']);
   });
 
-  it('applies NO_PROXY even when the proxy itself came from the env tier', () => {
-    freshDb();
+  it('applies NO_PROXY even when the proxy itself came from the env tier', async () => {
+    await freshDb();
     process.env.HTTPS_PROXY = 'http://ambient:8443';
     process.env.NO_PROXY = 'internal.corp';
 
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getProxyUrl()).toBe('http://ambient:8443');
     expect(getNoProxyRules()).toEqual(['internal.corp']);
   });
 
-  it('clears stale rules when the env no longer sets NO_PROXY', () => {
-    freshDb();
-    setSetting('proxy_url', 'http://127.0.0.1:3128');
+  it('clears stale rules when the env no longer sets NO_PROXY', async () => {
+    await freshDb();
+    await setSetting('proxy_url', 'http://127.0.0.1:3128');
     process.env.NO_PROXY = 'example.com';
-    restoreProxySettings();
+    await restoreProxySettings();
     expect(getNoProxyRules()).toEqual(['example.com']);
 
     delete process.env.NO_PROXY;
-    restoreProxySettings();
+    await restoreProxySettings();
 
     expect(getNoProxyRules()).toEqual([]);
   });

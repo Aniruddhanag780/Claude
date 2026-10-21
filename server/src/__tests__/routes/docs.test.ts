@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb } from '../../db/index.js';
 import { openapiSpec } from '../../docs/openapi.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(app: Express, method: string, path: string, headers: Record<string, string> = {}) {
   const server = app.listen(0, '127.0.0.1');
@@ -18,9 +18,9 @@ async function request(app: Express, method: string, path: string, headers: Reco
 describe('OpenAPI docs routes', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 

@@ -2,8 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb } from '../../db/index.js';
 import { loadConfig } from '../../lib/config.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function getHeaders(
   app: Express,
@@ -40,9 +40,9 @@ async function getHeaders(
 describe('CSP security headers', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 
@@ -82,9 +82,9 @@ describe('CSP security headers', () => {
 describe('CSP upgrade-insecure-requests (#682)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 
@@ -107,9 +107,9 @@ describe('CSP upgrade-insecure-requests (#682)', () => {
 describe('secure-context-only headers (#734)', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 

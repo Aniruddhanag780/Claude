@@ -5,8 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { once } from 'node:events';
 import type { Server } from 'node:http';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const realFetch = globalThis.fetch;
 
@@ -14,25 +15,25 @@ let server: Server;
 let baseUrl: string;
 let token: string;
 
-function addKey(platform: string) {
+async function addKey(platform: string) {
   const s = encrypt(`${platform}-media-key`);
-  getDb().prepare(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'test', ?, ?, ?, 'healthy', 1)`).run(platform, s.encrypted, s.iv, s.authTag);
+  (await getDb().run(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+    VALUES (?, 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, s.encrypted, s.iv, s.authTag]));
 }
 
-function addMedia(platform: string, modelId: string, priority: number) {
-  getDb().prepare(`INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, key_id, meta_json)
-    VALUES (?, ?, ?, 'image', ?, 1, '', NULL, NULL)`).run(platform, modelId, modelId, priority);
+async function addMedia(platform: string, modelId: string, priority: number) {
+  (await getDb().run(`INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, key_id, meta_json)
+    VALUES (?, ?, ?, 'image', ?, 1, '', NULL, NULL) RETURNING id`, [platform, modelId, modelId, priority]));
 }
 
 beforeEach(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
-  addMedia('nvidia', 'black-forest-labs/flux.1-schnell', 1);
-  addMedia('siliconflow', 'black-forest-labs/FLUX.1-schnell', 2);
-  addKey('nvidia');
-  addKey('siliconflow');
-  token = getUnifiedApiKey();
+  await initTestDb();
+  await addMedia('nvidia', 'black-forest-labs/flux.1-schnell', 1);
+  await addMedia('siliconflow', 'black-forest-labs/FLUX.1-schnell', 2);
+  await addKey('nvidia');
+  await addKey('siliconflow');
+  token = await getUnifiedApiKey();
   server = createApp().listen(0, '127.0.0.1');
   await once(server, 'listening');
   baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;

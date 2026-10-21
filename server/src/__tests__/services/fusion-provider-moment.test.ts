@@ -10,10 +10,11 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 const keySeqStart = 950000;
 let keySeq = keySeqStart;
 
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { runModelCall } from '../../services/fusion.js';
 import { getAllPenalties, type RouteResult } from '../../services/router.js';
 import type { ChatMessage } from '@freellmapi/shared/types.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 function fakeRoute(throwErr: any): { route: RouteResult; calls: () => number } {
   const n = ++keySeq;
@@ -35,10 +36,8 @@ function penaltyFor(modelDbId: number) {
   return getAllPenalties().find((p) => p.modelDbId === modelDbId);
 }
 
-function lastLogRow(): { status: string; failure_attribution: string | null } | undefined {
-  return getDb().prepare(
-    'SELECT status, failure_attribution FROM requests WHERE model_id = ? ORDER BY id DESC LIMIT 1',
-  ).get('fake-fusion-model') as any;
+async function lastLogRow(): { status: string; failure_attribution: string | null } | undefined {
+  return await getDb().get('SELECT status, failure_attribution FROM requests WHERE model_id = ? ORDER BY id DESC LIMIT 1', ['fake-fusion-model']) as any;
 }
 
 const MESSAGES: ChatMessage[] = [{ role: 'user', content: 'hi' }];
@@ -55,14 +54,14 @@ async function runSlot(route: RouteResult) {
 }
 
 describe('provider-moment attribution in the fusion retry path (#1347)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
-    getDb().prepare('DELETE FROM requests').run();
+  beforeEach(async () => {
+    await getDb().run('DELETE FROM rate_limit_cooldowns');
+    await getDb().run('DELETE FROM requests');
     delete process.env.ROUTER_PROVIDER_MOMENT_ATTRIBUTION;
   });
 
@@ -77,10 +76,9 @@ describe('provider-moment attribution in the fusion retry path (#1347)', () => {
 
     expect(penaltyFor(route.modelDbId)).toBeUndefined();
     // The key cooldown ladder still fires — the failure still steers the key.
-    const cooldowns = getDb().prepare('SELECT COUNT(*) AS n FROM rate_limit_cooldowns WHERE key_id = ?')
-      .get(route.keyId) as { n: number };
+    const cooldowns = await getDb().get('SELECT COUNT(*) AS n FROM rate_limit_cooldowns WHERE key_id = ?', [route.keyId]) as { n: number };
     expect(cooldowns.n).toBe(1);
-    expect(lastLogRow()).toEqual({ status: 'error', failure_attribution: 'provider_moment' });
+    expect(await lastLogRow()).toEqual({ status: 'error', failure_attribution: 'provider_moment' });
   });
 
   it('with attribution OFF (default): penalty and untagged row, exactly as before', async () => {
@@ -88,7 +86,7 @@ describe('provider-moment attribution in the fusion retry path (#1347)', () => {
     await runSlot(route);
 
     expect(penaltyFor(route.modelDbId)).toBeDefined();
-    expect(lastLogRow()).toEqual({ status: 'error', failure_attribution: null });
+    expect(await lastLogRow()).toEqual({ status: 'error', failure_attribution: null });
   });
 
   it('with attribution ON: a non-provider-moment failure still penalizes and stays untagged', async () => {
@@ -99,6 +97,6 @@ describe('provider-moment attribution in the fusion retry path (#1347)', () => {
 
     // 400 is not retryable at all, so the slot stops without a penalty —
     // assert instead that the log row was NOT tagged as a provider moment.
-    expect(lastLogRow()).toEqual({ status: 'error', failure_attribution: null });
+    expect(await lastLogRow()).toEqual({ status: 'error', failure_attribution: null });
   });
 });

@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import express, { type Express } from 'express';
 import { authRouter } from '../../routes/auth.js';
-import { initDb } from '../../db/index.js';
 import { getResetCode, clearResetCode } from '../../lib/reset-code.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Password reset without an active session (#560). Proof of identity is being
 // able to read the server logs, the same trust model first-run setup already
@@ -70,11 +70,11 @@ const PASSWORD = 'original-password';
 afterAll(() => vi.useRealTimers());
 
 describe('forgot-password with no account', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     vi.useFakeTimers({ toFake: ['Date'] });
     jump(60 * 60 * 1000);
-    initDb(':memory:');
+    await initTestDb();
     clearResetCode();
   });
 
@@ -92,7 +92,7 @@ describe('password reset by log code', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     vi.useFakeTimers({ toFake: ['Date'] });
     jump(60 * 60 * 1000);
-    initDb(':memory:');
+    await initTestDb();
     clearResetCode();
     app = makeApp();
     const setup = await post(app, '/api/auth/setup', { email: EMAIL, password: PASSWORD });

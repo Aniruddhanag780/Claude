@@ -2,11 +2,12 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import http from 'node:http';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { decrypt } from '../../lib/crypto.js';
 import { routeRequest } from '../../services/router.js';
 import { resolveProvider, getProvider } from '../../providers/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -73,13 +74,13 @@ describe('Custom Provider Endpoints', () => {
   describe('POST /api/keys/custom (#117)', () => {
     let app: Express;
   
-    beforeAll(() => {
+    beforeAll(async () => {
       process.env.ENCRYPTION_KEY = '0'.repeat(64);
-      initDb(':memory:');
+      await initTestDb();
       // Isolate tests to use global fallback_config
-      getDb().prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+      (await getDb().run("DELETE FROM settings WHERE key = 'active_profile_id'"));
       app = createApp();
-      dashToken = mintDashboardToken();
+      dashToken = await mintDashboardToken();
     });
 
   it('rejects an invalid base URL', async () => {
@@ -99,20 +100,20 @@ describe('Custom Provider Endpoints', () => {
     expect(body.model).toBe('qwen3:4b');
 
     const db = getDb();
-    const key = db.prepare("SELECT * FROM api_keys WHERE platform = 'custom'").get() as any;
+    const key = (await db.get("SELECT * FROM api_keys WHERE platform = 'custom'")) as any;
     expect(key.base_url).toBe('http://127.0.0.1:11434/v1');
-    const model = db.prepare("SELECT * FROM models WHERE platform = 'custom' AND model_id = 'qwen3:4b'").get() as any;
+    const model = (await db.get("SELECT * FROM models WHERE platform = 'custom' AND model_id = 'qwen3:4b'")) as any;
     expect(model).toBeDefined();
-    const fc = db.prepare('SELECT * FROM fallback_config WHERE model_db_id = ?').get(model.id);
+    const fc = (await db.get('SELECT * FROM fallback_config WHERE model_db_id = ?', [model.id]));
     expect(fc).toBeDefined();
   });
 
   it('reuses the single custom key when a second model is added', async () => {
     await post(app, '/api/keys/custom', { baseUrl: 'http://127.0.0.1:11434/v1', model: 'llama3:8b' });
     const db = getDb();
-    const keys = db.prepare("SELECT * FROM api_keys WHERE platform = 'custom'").all();
+    const keys = (await db.all("SELECT * FROM api_keys WHERE platform = 'custom'"));
     expect(keys.length).toBe(1); // not a second key
-    const models = db.prepare("SELECT * FROM models WHERE platform = 'custom'").all();
+    const models = (await db.all("SELECT * FROM models WHERE platform = 'custom'"));
     expect(models.length).toBe(2);
   });
 
@@ -136,23 +137,23 @@ describe('Custom Provider Endpoints', () => {
     });
     expect(second.status).toBe(201);
 
-    const key = getDb().prepare(`
+    const key = (await getDb().get(`
       SELECT id, encrypted_key, iv, auth_tag
         FROM api_keys
        WHERE platform = 'custom' AND base_url = 'http://127.0.0.1:7777/v1'
-    `).get() as { id: number; encrypted_key: string; iv: string; auth_tag: string };
+    `)) as { id: number; encrypted_key: string; iv: string; auth_tag: string };
     expect(decrypt(key.encrypted_key, key.iv, key.auth_tag)).toBe('keep-this-key');
 
     const db = getDb();
-    db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom' AND key_id = ?)").run(key.id);
-    db.prepare("DELETE FROM models WHERE platform = 'custom' AND key_id = ?").run(key.id);
-    db.prepare('DELETE FROM api_keys WHERE id = ?').run(key.id);
+    (await db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom' AND key_id = ?)", [key.id]));
+    (await db.run("DELETE FROM models WHERE platform = 'custom' AND key_id = ?", [key.id]));
+    (await db.run('DELETE FROM api_keys WHERE id = ?', [key.id]));
   });
 
-  it('routes a request to the custom model through its base URL', () => {
+  it('routes a request to the custom model through its base URL', async () => {
     // The seeded built-in models have no keys, so the only routable model is
     // the custom one we registered above.
-    const route = routeRequest(1000);
+    const route = await routeRequest(1000);
     expect(route.platform).toBe('custom');
     expect((route.provider as any).baseUrl).toBe('http://127.0.0.1:11434/v1');
     expect(['qwen3:4b', 'llama3:8b']).toContain(route.modelId);
@@ -160,34 +161,33 @@ describe('Custom Provider Endpoints', () => {
 
   it('deleting the custom key cascades its models out of the fallback chain (#189)', async () => {
     const db = getDb();
-    const key = db.prepare("SELECT id FROM api_keys WHERE platform = 'custom'").get() as { id: number };
-    const customModelIds = (db.prepare("SELECT id FROM models WHERE platform = 'custom'").all() as { id: number }[]).map(r => r.id);
+    const key = (await db.get("SELECT id FROM api_keys WHERE platform = 'custom'")) as { id: number };
+    const customModelIds = ((await db.all("SELECT id FROM models WHERE platform = 'custom'")) as { id: number }[]).map(r => r.id);
     expect(customModelIds.length).toBe(2); // qwen3:4b + llama3:8b from earlier tests
-    const builtinModels = (db.prepare("SELECT COUNT(*) AS n FROM models WHERE platform != 'custom'").get() as { n: number }).n;
+    const builtinModels = ((await db.get("SELECT COUNT(*) AS n FROM models WHERE platform != 'custom'")) as { n: number }).n;
 
     const { status } = await del(app, `/api/keys/${key.id}`);
     expect(status).toBe(200);
 
     // Custom models and their fallback entries are gone — not orphaned.
-    expect((db.prepare("SELECT COUNT(*) AS n FROM models WHERE platform = 'custom'").get() as { n: number }).n).toBe(0);
+    expect(((await db.get("SELECT COUNT(*) AS n FROM models WHERE platform = 'custom'")) as { n: number }).n).toBe(0);
     const placeholders = customModelIds.map(() => '?').join(',');
-    expect((db.prepare(`SELECT COUNT(*) AS n FROM fallback_config WHERE model_db_id IN (${placeholders})`).get(...customModelIds) as { n: number }).n).toBe(0);
+    expect(((await db.get(`SELECT COUNT(*) AS n FROM fallback_config WHERE model_db_id IN (${placeholders})`, [...customModelIds])) as { n: number }).n).toBe(0);
     // Built-in catalog rows are untouched.
-    expect((db.prepare("SELECT COUNT(*) AS n FROM models WHERE platform != 'custom'").get() as { n: number }).n).toBe(builtinModels);
+    expect(((await db.get("SELECT COUNT(*) AS n FROM models WHERE platform != 'custom'")) as { n: number }).n).toBe(builtinModels);
   });
 
   it('deleting a built-in platform key does NOT cascade its catalog models', async () => {
     const db = getDb();
-    const r = db.prepare(`
+    const r = (await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('groq', 'test', 'x', 'x', 'x', 'unknown', 1)
-    `).run();
-    const groqModels = (db.prepare("SELECT COUNT(*) AS n FROM models WHERE platform = 'groq'").get() as { n: number }).n;
+      VALUES ('groq', 'test', 'x', 'x', 'x', 'unknown', 1) RETURNING id`));
+    const groqModels = ((await db.get("SELECT COUNT(*) AS n FROM models WHERE platform = 'groq'")) as { n: number }).n;
     expect(groqModels).toBeGreaterThan(0);
 
     const { status } = await del(app, `/api/keys/${r.lastInsertRowid}`);
     expect(status).toBe(200);
-    expect((db.prepare("SELECT COUNT(*) AS n FROM models WHERE platform = 'groq'").get() as { n: number }).n).toBe(groqModels);
+    expect(((await db.get("SELECT COUNT(*) AS n FROM models WHERE platform = 'groq'")) as { n: number }).n).toBe(groqModels);
   });
 
   it('re-adding a custom provider after deletion starts a fresh chain entry', async () => {
@@ -197,8 +197,8 @@ describe('Custom Provider Endpoints', () => {
     });
     expect(status).toBe(201);
     const db = getDb();
-    expect((db.prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'").get() as { n: number }).n).toBe(1);
-    const fc = db.prepare('SELECT * FROM fallback_config WHERE model_db_id = ?').get(body.modelDbId);
+    expect(((await db.get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'")) as { n: number }).n).toBe(1);
+    const fc = (await db.get('SELECT * FROM fallback_config WHERE model_db_id = ?', [body.modelDbId]));
     expect(fc).toBeDefined();
   });
 
@@ -230,7 +230,7 @@ describe('Custom Provider Endpoints', () => {
     const addr = server.address() as any;
     const res = await fetch(`http://127.0.0.1:${addr.port}/v1/chat/completions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getUnifiedApiKey()}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${await getUnifiedApiKey()}` },
       body: JSON.stringify({ model: 'ndjson-model', messages: [{ role: 'user', content: 'hi' }] }),
     });
     const body = await res.json().catch(() => null);
@@ -249,10 +249,10 @@ describe('Custom Provider Endpoints', () => {
     beforeAll(async () => {
       // Sweep custom state left by the tests above for a deterministic start.
       const db = getDb();
-      db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')").run();
-      db.prepare("DELETE FROM models WHERE platform = 'custom'").run();
-      db.prepare('DELETE FROM api_keys').run();
-      db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
+      (await db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')"));
+      (await db.run("DELETE FROM models WHERE platform = 'custom'"));
+      (await db.run('DELETE FROM api_keys'));
+      (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
 
       const a = await post(app, '/api/keys/custom', { baseUrl: 'http://127.0.0.1:11434/v1', model: 'llama3:8b', label: 'Ollama box' });
       const b = await post(app, '/api/keys/custom', { baseUrl: 'http://127.0.0.1:1234/v1', model: 'qwen3:4b', label: 'LM Studio' });
@@ -260,31 +260,31 @@ describe('Custom Provider Endpoints', () => {
       expect(b.status).toBe(201);
     });
 
-    it('keeps a separate key row per endpoint instead of overwriting', () => {
+    it('keeps a separate key row per endpoint instead of overwriting', async () => {
       const db = getDb();
-      const keys = db.prepare("SELECT id, base_url FROM api_keys WHERE platform = 'custom' ORDER BY id").all() as any[];
+      const keys = (await db.all("SELECT id, base_url FROM api_keys WHERE platform = 'custom' ORDER BY id")) as any[];
       expect(keys.length).toBe(2);
       expect(keys.map(k => k.base_url).sort()).toEqual(['http://127.0.0.1:11434/v1', 'http://127.0.0.1:1234/v1'].sort());
     });
 
-    it('binds each model to its own endpoint key', () => {
+    it('binds each model to its own endpoint key', async () => {
       const db = getDb();
-      const llama = db.prepare("SELECT m.key_id, k.base_url FROM models m JOIN api_keys k ON k.id = m.key_id WHERE m.platform = 'custom' AND m.model_id = 'llama3:8b'").get() as any;
-      const qwen = db.prepare("SELECT m.key_id, k.base_url FROM models m JOIN api_keys k ON k.id = m.key_id WHERE m.platform = 'custom' AND m.model_id = 'qwen3:4b'").get() as any;
+      const llama = (await db.get("SELECT m.key_id, k.base_url FROM models m JOIN api_keys k ON k.id = m.key_id WHERE m.platform = 'custom' AND m.model_id = 'llama3:8b'")) as any;
+      const qwen = (await db.get("SELECT m.key_id, k.base_url FROM models m JOIN api_keys k ON k.id = m.key_id WHERE m.platform = 'custom' AND m.model_id = 'qwen3:4b'")) as any;
       expect(llama.base_url).toBe('http://127.0.0.1:11434/v1');
       expect(qwen.base_url).toBe('http://127.0.0.1:1234/v1');
     });
 
-    it('routes each model through ITS endpoint, never the other one', () => {
+    it('routes each model through ITS endpoint, never the other one', async () => {
       const db = getDb();
-      const llamaId = (db.prepare("SELECT id FROM models WHERE platform = 'custom' AND model_id = 'llama3:8b'").get() as any).id;
-      const qwenId = (db.prepare("SELECT id FROM models WHERE platform = 'custom' AND model_id = 'qwen3:4b'").get() as any).id;
+      const llamaId = ((await db.get("SELECT id FROM models WHERE platform = 'custom' AND model_id = 'llama3:8b'")) as any).id;
+      const qwenId = ((await db.get("SELECT id FROM models WHERE platform = 'custom' AND model_id = 'qwen3:4b'")) as any).id;
 
-      const llamaRoute = routeRequest(1000, undefined, llamaId);
+      const llamaRoute = await routeRequest(1000, undefined, llamaId);
       expect(llamaRoute.modelId).toBe('llama3:8b');
       expect((llamaRoute.provider as any).baseUrl).toBe('http://127.0.0.1:11434/v1');
 
-      const qwenRoute = routeRequest(1000, undefined, qwenId);
+      const qwenRoute = await routeRequest(1000, undefined, qwenId);
       expect(qwenRoute.modelId).toBe('qwen3:4b');
       expect((qwenRoute.provider as any).baseUrl).toBe('http://127.0.0.1:1234/v1');
     });
@@ -293,21 +293,21 @@ describe('Custom Provider Endpoints', () => {
       const { status } = await post(app, '/api/keys/custom', { baseUrl: 'http://127.0.0.1:11434/v1', model: 'mistral:7b', label: 'Ollama box renamed' });
       expect(status).toBe(201);
       const db = getDb();
-      expect((db.prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'").get() as any).n).toBe(2);
-      const key = db.prepare("SELECT label FROM api_keys WHERE platform = 'custom' AND base_url = 'http://127.0.0.1:11434/v1'").get() as any;
+      expect(((await db.get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'")) as any).n).toBe(2);
+      const key = (await db.get("SELECT label FROM api_keys WHERE platform = 'custom' AND base_url = 'http://127.0.0.1:11434/v1'")) as any;
       expect(key.label).toBe('Ollama box renamed');
     });
 
     it('deleting one endpoint removes only ITS models from catalog and chain', async () => {
       const db = getDb();
-      const ollamaKey = db.prepare("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = 'http://127.0.0.1:11434/v1'").get() as any;
+      const ollamaKey = (await db.get("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = 'http://127.0.0.1:11434/v1'")) as any;
 
       const { status } = await del(app, `/api/keys/${ollamaKey.id}`);
       expect(status).toBe(200);
 
-      const remainingModels = (db.prepare("SELECT model_id FROM models WHERE platform = 'custom'").all() as any[]).map(r => r.model_id);
+      const remainingModels = ((await db.all("SELECT model_id FROM models WHERE platform = 'custom'")) as any[]).map(r => r.model_id);
       expect(remainingModels).toEqual(['qwen3:4b']); // llama3:8b + mistral:7b cascaded with their key
-      const keys = db.prepare("SELECT base_url FROM api_keys WHERE platform = 'custom'").all() as any[];
+      const keys = (await db.all("SELECT base_url FROM api_keys WHERE platform = 'custom'")) as any[];
       expect(keys.length).toBe(1);
       expect(keys[0].base_url).toBe('http://127.0.0.1:1234/v1');
     });
@@ -316,11 +316,11 @@ describe('Custom Provider Endpoints', () => {
   // #281: one submit can bind several model ids to a single endpoint, instead
   // of forcing one POST per model.
   describe('multiple models per endpoint (#281)', () => {
-    beforeAll(() => {
+    beforeAll(async () => {
       const db = getDb();
-      db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')").run();
-      db.prepare("DELETE FROM models WHERE platform = 'custom'").run();
-      db.prepare("DELETE FROM api_keys WHERE platform = 'custom'").run();
+      (await db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')"));
+      (await db.run("DELETE FROM models WHERE platform = 'custom'"));
+      (await db.run("DELETE FROM api_keys WHERE platform = 'custom'"));
     });
 
     it('registers every model in the models array against one endpoint key', async () => {
@@ -337,12 +337,12 @@ describe('Custom Provider Endpoints', () => {
       expect(body.models.find((m: any) => m.model === 'phi4:14b').displayName).toBe('Phi 4');
 
       const db = getDb();
-      const keys = db.prepare("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = 'http://127.0.0.1:9999/v1'").all();
+      const keys = (await db.all("SELECT id FROM api_keys WHERE platform = 'custom' AND base_url = 'http://127.0.0.1:9999/v1'"));
       expect(keys.length).toBe(1); // one endpoint, one key
-      const models = db.prepare("SELECT model_id FROM models WHERE platform = 'custom' AND key_id = ?").all((keys[0] as any).id) as any[];
+      const models = (await db.all("SELECT model_id FROM models WHERE platform = 'custom' AND key_id = ?", [(keys[0] as any).id])) as any[];
       expect(models.map(m => m.model_id).sort()).toEqual(['gemma3:1b', 'phi4:14b']);
       for (const m of body.models) {
-        expect(db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(m.modelDbId)).toBeDefined();
+        expect((await db.get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [m.modelDbId]))).toBeDefined();
       }
     });
 
@@ -374,9 +374,7 @@ describe('Custom Provider Endpoints', () => {
       expect(status).toBe(201);
       expect(body.models[0].displayName).toBe('My Local Qwen');
 
-      const row = getDb().prepare(
-        "SELECT display_name FROM models WHERE platform = 'custom' AND model_id = 'qwen3:4b'",
-      ).get() as any;
+      const row = (await getDb().get("SELECT display_name FROM models WHERE platform = 'custom' AND model_id = 'qwen3:4b'")) as any;
       expect(row.display_name).toBe('My Local Qwen');
     });
 
@@ -416,9 +414,7 @@ describe('Custom Provider Endpoints', () => {
       expect(status).toBe(201);
       expect(body.models[0].displayName).toBe(modelId);
 
-      const row = getDb().prepare(
-        "SELECT display_name FROM models WHERE platform = 'custom' AND model_id = ?",
-      ).get(modelId) as any;
+      const row = (await getDb().get("SELECT display_name FROM models WHERE platform = 'custom' AND model_id = ?", [modelId])) as any;
       expect(row.display_name).toBe(modelId);
     });
 
@@ -442,9 +438,7 @@ describe('Custom Provider Endpoints', () => {
       // …while a model nobody named still takes its id.
       expect(body.models.find((m: any) => m.model === 'newcomer:1').displayName).toBe('newcomer:1');
 
-      const row = getDb().prepare(
-        "SELECT display_name FROM models WHERE platform = 'custom' AND model_id = 'keeper:1'",
-      ).get() as any;
+      const row = (await getDb().get("SELECT display_name FROM models WHERE platform = 'custom' AND model_id = 'keeper:1'")) as any;
       expect(row.display_name).toBe('Kept Name');
     });
 
@@ -467,17 +461,15 @@ describe('Custom Provider Endpoints', () => {
   // clients that send `tools` matched zero of them and hit a false "all models
   // exhausted" error. Registration now defaults tools on, vision off.
   describe('capability defaults (#470)', () => {
-    beforeAll(() => {
+    beforeAll(async () => {
       const db = getDb();
-      db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')").run();
-      db.prepare("DELETE FROM models WHERE platform = 'custom'").run();
-      db.prepare("DELETE FROM api_keys WHERE platform = 'custom'").run();
+      (await db.run("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'custom')"));
+      (await db.run("DELETE FROM models WHERE platform = 'custom'"));
+      (await db.run("DELETE FROM api_keys WHERE platform = 'custom'"));
     });
 
-    function toolsVision(modelId: string) {
-      return getDb()
-        .prepare("SELECT supports_tools, supports_vision FROM models WHERE platform = 'custom' AND model_id = ?")
-        .get(modelId) as { supports_tools: number; supports_vision: number };
+    async function toolsVision(modelId: string) {
+      return (await getDb().get("SELECT supports_tools, supports_vision FROM models WHERE platform = 'custom' AND model_id = ?", [modelId])) as { supports_tools: number; supports_vision: number };
     }
 
     it('defaults a new custom model to tools on, vision off', async () => {
@@ -486,7 +478,7 @@ describe('Custom Provider Endpoints', () => {
         model: 'defaults-model',
       });
       expect(status).toBe(201);
-      expect(toolsVision('defaults-model')).toEqual({ supports_tools: 1, supports_vision: 0 });
+      expect(await toolsVision('defaults-model')).toEqual({ supports_tools: 1, supports_vision: 0 });
       // Echoed back to the client so the UI can render the capability badges.
       expect(body.supportsTools).toBe(true);
       expect(body.supportsVision).toBe(false);
@@ -500,7 +492,7 @@ describe('Custom Provider Endpoints', () => {
         supportsVision: true,
       });
       expect(status).toBe(201);
-      expect(toolsVision('vision-no-tools')).toEqual({ supports_tools: 0, supports_vision: 1 });
+      expect(await toolsVision('vision-no-tools')).toEqual({ supports_tools: 0, supports_vision: 1 });
     });
 
     it('honors per-entry flags in the models array and per-model defaults', async () => {
@@ -512,8 +504,8 @@ describe('Custom Provider Endpoints', () => {
         ],
       });
       expect(status).toBe(201);
-      expect(toolsVision('entry-vision')).toEqual({ supports_tools: 1, supports_vision: 1 });
-      expect(toolsVision('entry-default')).toEqual({ supports_tools: 1, supports_vision: 0 });
+      expect(await toolsVision('entry-vision')).toEqual({ supports_tools: 1, supports_vision: 1 });
+      expect(await toolsVision('entry-default')).toEqual({ supports_tools: 1, supports_vision: 0 });
     });
 
     it('preserves a stored capability when re-registration omits the flag', async () => {
@@ -522,7 +514,7 @@ describe('Custom Provider Endpoints', () => {
         model: 'preserve-model',
         supportsTools: false,
       });
-      expect(toolsVision('preserve-model')).toEqual({ supports_tools: 0, supports_vision: 0 });
+      expect(await toolsVision('preserve-model')).toEqual({ supports_tools: 0, supports_vision: 0 });
 
       // Re-submit the same endpoint/model without capability flags — the earlier
       // tools = 0 the user chose must survive, not snap back to the default.
@@ -532,7 +524,7 @@ describe('Custom Provider Endpoints', () => {
         displayName: 'Renamed',
       });
       expect(status).toBe(201);
-      expect(toolsVision('preserve-model')).toEqual({ supports_tools: 0, supports_vision: 0 });
+      expect(await toolsVision('preserve-model')).toEqual({ supports_tools: 0, supports_vision: 0 });
     });
 
     it('rejects a non-boolean capability flag', async () => {

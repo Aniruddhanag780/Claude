@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #1599: SerpSearch revoked a free account over the empty search the health
 // pass sent every 5 minutes as its key check. A provider with
@@ -12,7 +13,7 @@ vi.mock('../../providers/index.js', async (importOriginal) => {
   };
 });
 
-const { initDb, getDb } = await import('../../db/index.js');
+const { getDb } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const { checkAllKeys, probeKeyValidity, NO_POLL_ERROR_REPROBE_MS } = await import('../../services/health.js');
 const { SerpSearchProvider } = await import('../../providers/serpsearch.js');
@@ -22,13 +23,13 @@ const { ParallelProvider } = await import('../../providers/parallel.js');
 describe('a provider that must not be polled (#1599)', () => {
   let nextId = 9300;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
+  beforeEach(async () => {
+    await getDb().run('DELETE FROM api_keys');
     validateKey.mockReset();
     validateKey.mockResolvedValue(true);
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -37,19 +38,19 @@ describe('a provider that must not be polled (#1599)', () => {
   });
 
   /** ageMs null = never checked. */
-  function seedKey(status: string, ageMs: number | null): number {
+  async function seedKey(status: string, ageMs: number | null): number {
     const id = ++nextId;
     const enc = encrypt(`no-poll-${id}`);
     const checkedAt = ageMs === null ? null : new Date(Date.now() - ageMs).toISOString().replace('T', ' ').slice(0, 19);
-    getDb().prepare(`
+    await getDb().run(`
       INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, enabled, status, last_checked_at)
       VALUES (?, 'serpsearch', ?, ?, ?, ?, 1, ?, ?)
-    `).run(id, `no-poll-${id}`, enc.encrypted, enc.iv, enc.authTag, status, checkedAt);
+    `, [id, `no-poll-${id}`, enc.encrypted, enc.iv, enc.authTag, status, checkedAt]);
     return id;
   }
 
   it('validates a new key once, then never again on the schedule', async () => {
-    const id = seedKey('unknown', null);
+    const id = await seedKey('unknown', null);
 
     expect((await checkAllKeys()).checkedKeyIds).toEqual([id]);
     expect(validateKey).toHaveBeenCalledOnce();
@@ -61,8 +62,8 @@ describe('a provider that must not be polled (#1599)', () => {
   });
 
   it('leaves a healthy or invalid key alone however long ago it was checked', async () => {
-    const healthy = seedKey('healthy', 30 * 24 * 60 * 60 * 1000);
-    const invalid = seedKey('invalid', 30 * 24 * 60 * 60 * 1000);
+    const healthy = await seedKey('healthy', 30 * 24 * 60 * 60 * 1000);
+    const invalid = await seedKey('invalid', 30 * 24 * 60 * 60 * 1000);
 
     const pass = await checkAllKeys({ force: true });
 
@@ -72,8 +73,8 @@ describe('a provider that must not be polled (#1599)', () => {
   });
 
   it('re-asks about a key parked at error at most once per reprobe window', async () => {
-    const recent = seedKey('error', 10 * 60 * 1000);
-    const stale = seedKey('error', NO_POLL_ERROR_REPROBE_MS + 60 * 1000);
+    const recent = await seedKey('error', 10 * 60 * 1000);
+    const stale = await seedKey('error', NO_POLL_ERROR_REPROBE_MS + 60 * 1000);
 
     const pass = await checkAllKeys();
 
@@ -82,14 +83,14 @@ describe('a provider that must not be polled (#1599)', () => {
   });
 
   it('"Check all" still validates every key', async () => {
-    const id = seedKey('healthy', 60 * 1000);
+    const id = await seedKey('healthy', 60 * 1000);
 
     expect((await checkAllKeys({ force: true, manual: true })).checkedKeyIds).toEqual([id]);
     expect(validateKey).toHaveBeenCalledOnce();
   });
 
   it('the cooldown probe treats the key as inconclusive without probing', async () => {
-    const id = seedKey('healthy', 60 * 1000);
+    const id = await seedKey('healthy', 60 * 1000);
 
     expect(await probeKeyValidity(id)).toBe('error');
     expect(validateKey).not.toHaveBeenCalled();

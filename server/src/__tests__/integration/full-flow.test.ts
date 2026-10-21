@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -27,22 +28,22 @@ async function req(app: Express, method: string, path: string, body?: any, heade
   return { status: res.status, body: json, headers: res.headers, raw: data };
 }
 
-function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+async function authHeaders() {
+  return { Authorization: `Bearer ${await getUnifiedApiKey()}` };
 }
 
 describe('Full Integration Flow', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
     // Clean
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
+    (await db.run('DELETE FROM api_keys'));
+    (await db.run('DELETE FROM requests'));
   });
 
   it('Step 1: Verify models are seeded', async () => {
@@ -70,7 +71,7 @@ describe('Full Integration Flow', () => {
   it('Step 3: Authenticated proxy returns 429 with no keys', async () => {
     const { status, body } = await req(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
-    }, authHeaders());
+    }, await authHeaders());
     // 429 (all exhausted) or 502 (provider error) or 503 (no route)
     expect([429, 502, 503]).toContain(status);
     expect(body.error).toBeDefined();
@@ -107,7 +108,7 @@ describe('Full Integration Flow', () => {
 
     const { status, body } = await req(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
-    }, authHeaders());
+    }, await authHeaders());
 
     // 502 (provider error) or 429 (all exhausted after retries)
     expect([502, 429]).toContain(status);
@@ -154,12 +155,12 @@ describe('Full Integration Flow', () => {
   it('Step 10: Validate request schema', async () => {
     const { status } = await req(app, 'POST', '/v1/chat/completions', {
       messages: [], // empty
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).toBe(400);
 
     const { status: s2 } = await req(app, 'POST', '/v1/chat/completions', {
       // missing messages entirely
-    }, authHeaders());
+    }, await authHeaders());
     expect(s2).toBe(400);
   });
 
@@ -167,7 +168,7 @@ describe('Full Integration Flow', () => {
     const { status, body } = await req(app, 'POST', '/v1/chat/completions', {
       model: 'definitely-not-a-real-model',
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).toBe(404);
     expect(body.error.code).toBe('model_not_found');
     expect(body.error.message).toContain('not in the catalog');
@@ -178,7 +179,7 @@ describe('Full Integration Flow', () => {
     const { status, body } = await req(app, 'POST', '/v1/chat/completions', {
       model: 'gemini-2.5-pro',
       messages: [{ role: 'user', content: 'hi' }],
-    }, authHeaders());
+    }, await authHeaders());
     expect(status).toBe(404);
     expect(body.error.code).toBe('model_not_found');
     expect(body.error.message).toContain('is disabled');

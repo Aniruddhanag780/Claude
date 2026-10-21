@@ -2,7 +2,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { encrypt } from '../../lib/crypto.js';
-import { getDb, getUnifiedApiKey, initDb } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(
   app: Express,
@@ -29,12 +30,11 @@ async function request(
   return { status: response.status, text, body: json, headers: response.headers };
 }
 
-function seedGroq(): void {
+async function seedGroq(): void {
   const key = encrypt('gsk_gemini_surface_test');
-  getDb().prepare(`
+  (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES ('groq', 'gemini-test', ?, ?, ?, 'healthy', 1)
-  `).run(key.encrypted, key.iv, key.authTag);
+    VALUES ('groq', 'gemini-test', ?, ?, ?, 'healthy', 1) RETURNING id`, [key.encrypted, key.iv, key.authTag]));
 }
 
 const completion = {
@@ -53,25 +53,25 @@ const completion = {
 describe('native Gemini /v1beta surface', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM api_keys').run();
-    getDb().prepare('DELETE FROM requests').run();
-    getDb().prepare('DELETE FROM rate_limit_usage').run();
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
-    seedGroq();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM api_keys'));
+    (await getDb().run('DELETE FROM requests'));
+    (await getDb().run('DELETE FROM rate_limit_usage'));
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
+    await seedGroq();
   });
 
   afterEach(() => vi.restoreAllMocks());
 
   it('lists Gemini-shaped models with x-goog-api-key auth', async () => {
     const response = await request(app, 'GET', '/v1beta/models', undefined, {
-      'x-goog-api-key': getUnifiedApiKey(),
+      'x-goog-api-key': await getUnifiedApiKey(),
     });
     expect(response.status).toBe(200);
     expect(response.body.models[0]).toMatchObject({
@@ -81,7 +81,7 @@ describe('native Gemini /v1beta surface', () => {
     expect(response.body.models.some((model: any) => model.name.startsWith('models/'))).toBe(true);
 
     const single = await request(app, 'GET', '/v1beta/models/auto', undefined, {
-      'x-goog-api-key': getUnifiedApiKey(),
+      'x-goog-api-key': await getUnifiedApiKey(),
     });
     expect(single.status).toBe(200);
     expect(single.body.name).toBe('models/auto');
@@ -105,7 +105,7 @@ describe('native Gemini /v1beta surface', () => {
     const response = await request(
       app,
       'POST',
-      `/v1beta/models/gemini-2.5-flash:generateContent?key=${getUnifiedApiKey()}`,
+      `/v1beta/models/gemini-2.5-flash:generateContent?key=${await getUnifiedApiKey()}`,
       {
         systemInstruction: { parts: [{ text: 'Be concise' }] },
         contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
@@ -173,7 +173,7 @@ describe('native Gemini /v1beta surface', () => {
           }],
         }],
       },
-      { 'x-goog-api-key': getUnifiedApiKey() },
+      { 'x-goog-api-key': await getUnifiedApiKey() },
     );
 
     expect(response.status).toBe(200);
@@ -207,7 +207,7 @@ describe('native Gemini /v1beta surface', () => {
       'POST',
       '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
       body,
-      { 'x-goog-api-key': getUnifiedApiKey() },
+      { 'x-goog-api-key': await getUnifiedApiKey() },
     );
     expect(stream.status).toBe(200);
     expect(stream.headers.get('content-type')).toContain('text/event-stream');
@@ -219,7 +219,7 @@ describe('native Gemini /v1beta surface', () => {
       'POST',
       '/v1beta/models/gemini-2.5-flash:streamGenerateContent',
       body,
-      { 'x-goog-api-key': getUnifiedApiKey() },
+      { 'x-goog-api-key': await getUnifiedApiKey() },
     );
     expect(jsonStream.status).toBe(200);
     expect(jsonStream.headers.get('content-type')).toContain('application/json');
@@ -231,7 +231,7 @@ describe('native Gemini /v1beta surface', () => {
       'POST',
       '/v1beta/models/gemini-2.5-flash:countTokens',
       body,
-      { 'x-goog-api-key': getUnifiedApiKey() },
+      { 'x-goog-api-key': await getUnifiedApiKey() },
     );
     expect(count.status).toBe(200);
     expect(count.body.totalTokens).toBeGreaterThan(0);

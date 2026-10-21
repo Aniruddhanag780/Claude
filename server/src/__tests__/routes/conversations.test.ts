@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { MAX_MESSAGES_BYTES } from '../../routes/conversations.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // Playground conversation storage: the sidebar's list/load/save/delete surface.
 // Same in-memory DB + minted dashboard session as the other admin route suites.
@@ -51,16 +52,16 @@ describe('playground conversations', () => {
   let dashToken: string;
   let unifiedKey: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    unifiedKey = getUnifiedApiKey();
-    dashToken = mintDashboardToken('conversations@example.com');
+    unifiedKey = await getUnifiedApiKey();
+    dashToken = await mintDashboardToken('conversations@example.com');
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM playground_conversations').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM playground_conversations'));
   });
 
   async function create(body: unknown = {}) {

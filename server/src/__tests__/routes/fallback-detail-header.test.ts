@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
+import { initTestDb } from '../helpers/test-db.js';
 
 // X-Fallback-Detail: the opt-in companion to X-Fallback-Trail.
 //
@@ -23,7 +24,7 @@ vi.mock('../../providers/index.js', async (importOriginal) => {
 });
 
 const { createApp } = await import('../../app.js');
-const { initDb, getDb, getUnifiedApiKey, setSetting } = await import('../../db/index.js');
+const { getDb, getUnifiedApiKey, setSetting } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const { setRoutingStrategy } = await import('../../services/router.js');
 const {
@@ -36,8 +37,8 @@ const { newRequestTrace, runWithRequestTrace } = await import('../../lib/attempt
 
 /** Remove the row entirely, so the env-var fallback is actually reachable —
  *  storing '0' is a decision, not an absence. */
-function clearDetailSetting(): void {
-  getDb().prepare('DELETE FROM settings WHERE key = ?').run(EXPOSE_FALLBACK_DETAIL_SETTING);
+async function clearDetailSetting(): void {
+  (await getDb().run('DELETE FROM settings WHERE key = ?', [EXPOSE_FALLBACK_DETAIL_SETTING]));
 }
 
 async function post(app: Express, path: string, body: any, key: string) {
@@ -120,18 +121,18 @@ describe('formatAttemptDetail', () => {
 });
 
 describe('isFallbackDetailHeaderEnabled', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  beforeEach(() => {
-    clearDetailSetting();
+  beforeEach(async () => {
+    await clearDetailSetting();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     delete process.env.FALLBACK_DETAIL_HEADER;
-    clearDetailSetting();
+    await clearDetailSetting();
   });
 
   it('is off by default — this widens what the surface reveals', () => {
@@ -159,26 +160,25 @@ describe('X-Fallback-Detail on the wire', () => {
   let app: Express;
   let key: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
     key = getUnifiedApiKey();
 
     const db = getDb();
     setRoutingStrategy('priority');
     const { encrypted, iv, authTag } = encrypt('detail-header-test-key');
-    db.prepare(`
+    (await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('groq', 'detail-header', ?, ?, ?, 'healthy', 1)
-    `).run(encrypted, iv, authTag);
+      VALUES ('groq', 'detail-header', ?, ?, ?, 'healthy', 1) RETURNING id`, [encrypted, iv, authTag]));
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     chatCompletion.mockReset();
     streamChatCompletion.mockReset();
-    getDb().prepare('DELETE FROM requests').run();
-    getDb().prepare('DELETE FROM rate_limit_cooldowns').run();
+    (await getDb().run('DELETE FROM requests'));
+    (await getDb().run('DELETE FROM rate_limit_cooldowns'));
     setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '1');
   });
 
@@ -265,8 +265,8 @@ describe('X-Fallback-Detail value safety', () => {
     return out;
   }
 
-  afterEach(() => {
-    getDb().prepare('DELETE FROM settings WHERE key = ?').run(EXPOSE_FALLBACK_DETAIL_SETTING);
+  afterEach(async () => {
+    (await getDb().run('DELETE FROM settings WHERE key = ?', [EXPOSE_FALLBACK_DETAIL_SETTING]));
   });
 
   it('encodes a control-laden model id instead of letting it inject a header line', () => {

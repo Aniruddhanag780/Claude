@@ -1,12 +1,13 @@
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
 import { OpenAICompatProvider } from '../../providers/openai-compat.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { resolveProvider } from '../../providers/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #1403 phase 1: quota_api observations from a provider key-info endpoint.
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
 function makeProvider(spec?: {
@@ -20,16 +21,14 @@ function makeProvider(spec?: {
   } as any);
 }
 
-function stateRows(platform = 'openrouter') {
-  return getDb().prepare(
-    'SELECT metric, limit_value, remaining_value, source FROM provider_quota_state WHERE platform = ?',
-  ).all(platform) as { metric: string; limit_value: number | null; remaining_value: number | null; source: string }[];
+async function stateRows(platform = 'openrouter') {
+  return (await getDb().all('SELECT metric, limit_value, remaining_value, source FROM provider_quota_state WHERE platform = ?', [platform])) as { metric: string; limit_value: number | null; remaining_value: number | null; source: string }[];
 }
 
 describe('fetchQuota — provider-reported quota polling (#1403)', () => {
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM provider_quota_state').run();
-    getDb().prepare('DELETE FROM provider_quota_observations').run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM provider_quota_state'));
+    (await getDb().run('DELETE FROM provider_quota_observations'));
     vi.restoreAllMocks();
   });
 
@@ -58,7 +57,7 @@ describe('fetchQuota — provider-reported quota polling (#1403)', () => {
     const headers = (fetchSpy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe('Bearer sk-or-test');
 
-    const rows = stateRows();
+    const rows = await stateRows();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ metric: 'credits', limit_value: 10, remaining_value: 7.25, source: 'quota_api' });
   });
@@ -73,7 +72,7 @@ describe('fetchQuota — provider-reported quota polling (#1403)', () => {
     });
     const ok = await provider.fetchQuota('k', { platform: 'openrouter', keyId: 1 });
     expect(ok).toBe(true);
-    const rows = stateRows();
+    const rows = await stateRows();
     expect(rows[0]).toMatchObject({ limit_value: 100, remaining_value: 40 });
   });
 
@@ -82,7 +81,7 @@ describe('fetchQuota — provider-reported quota polling (#1403)', () => {
     const provider = makeProvider();
     expect(await provider.fetchQuota('k', { platform: 'openrouter', keyId: 1 })).toBe(false);
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(stateRows()).toHaveLength(0);
+    expect(await stateRows()).toHaveLength(0);
   });
 
   it('never throws: transport errors and error statuses are inconclusive', async () => {
@@ -95,7 +94,7 @@ describe('fetchQuota — provider-reported quota polling (#1403)', () => {
 
     vi.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status: 401 } as any);
     expect(await provider.fetchQuota('k', { platform: 'openrouter', keyId: 1 })).toBe(false);
-    expect(stateRows()).toHaveLength(0);
+    expect(await stateRows()).toHaveLength(0);
   });
 
   it('a body with no numeric limit/remaining records nothing', async () => {
@@ -107,7 +106,7 @@ describe('fetchQuota — provider-reported quota polling (#1403)', () => {
       limitFields: ['limit'], remainingFields: ['limit_remaining'],
     });
     expect(await provider.fetchQuota('k', { platform: 'openrouter', keyId: 1 })).toBe(false);
-    expect(stateRows()).toHaveLength(0);
+    expect(await stateRows()).toHaveLength(0);
   });
 
   it('the registered OpenRouter provider carries the /api/v1/key probe', async () => {
@@ -116,7 +115,7 @@ describe('fetchQuota — provider-reported quota polling (#1403)', () => {
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true, status: 200, json: async () => ({ data: { limit: 5, limit_remaining: 4.99 } }),
     } as any);
-    getDb().prepare('DELETE FROM provider_quota_state').run();
+    (await getDb().run('DELETE FROM provider_quota_state'));
     const ok = await provider!.fetchQuota('sk-or-x', { platform: 'openrouter', keyId: 7 });
     expect(ok).toBe(true);
     expect(String(vi.mocked(fetch).mock.calls[0][0])).toBe('https://openrouter.ai/api/v1/key');
@@ -133,7 +132,7 @@ describe('fetchQuota — provider-reported quota polling (#1403)', () => {
     });
     const ok = await provider.fetchQuota('sk-test', { platform: 'openrouter', keyId: 3 });
     expect(ok).toBe(true);
-    const rows = stateRows();
+    const rows = await stateRows();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ metric: 'credits', limit_value: null, remaining_value: 22.6478, source: 'quota_api' });
   });
@@ -148,7 +147,7 @@ describe('fetchQuota — provider-reported quota polling (#1403)', () => {
       limitFields: [], remainingFields: ['totalBalance', 'balance'],
     });
     expect(await provider.fetchQuota('sk-test', { platform: 'openrouter', keyId: 3 })).toBe(false);
-    expect(stateRows()).toHaveLength(0);
+    expect(await stateRows()).toHaveLength(0);
   });
 
   it('the registered SiliconFlow provider carries the /v1/user/info probe', async () => {
@@ -157,10 +156,10 @@ describe('fetchQuota — provider-reported quota polling (#1403)', () => {
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true, status: 200, json: async () => ({ data: { balance: '0.88', totalBalance: '0.88' } }),
     } as any);
-    getDb().prepare('DELETE FROM provider_quota_state').run();
+    (await getDb().run('DELETE FROM provider_quota_state'));
     const ok = await provider!.fetchQuota('sk-sf', { platform: 'siliconflow', keyId: 9 });
     expect(ok).toBe(true);
     expect(String(vi.mocked(fetch).mock.calls[0][0])).toBe('https://api.siliconflow.com/v1/user/info');
-    expect(stateRows('siliconflow')[0]).toMatchObject({ remaining_value: 0.88, source: 'quota_api' });
+    expect((await stateRows('siliconflow'))[0]).toMatchObject({ remaining_value: 0.88, source: 'quota_api' });
   });
 });

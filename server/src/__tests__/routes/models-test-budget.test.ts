@@ -1,11 +1,12 @@
 import { beforeEach, afterEach, it, expect, vi } from 'vitest';
 import type { Server } from 'node:http';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { getProvider } from '../../providers/index.js';
 import { checkMonthlyBudget, getMonthlyUsage } from '../../services/key-budget.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let server: Server;
 let keyId: number;
@@ -20,30 +21,30 @@ const post = async (path: string, body?: object) => {
   return {status:res.status,body:await res.json()};
 };
 beforeEach(async () => {
-  process.env.ENCRYPTION_KEY='0'.repeat(64); initDb(':memory:'); const db=getDb();
+  process.env.ENCRYPTION_KEY='0'.repeat(64); await initTestDb(); const db=getDb();
   const {encrypted,iv,authTag}=encrypt('synthetic-test-key');
-  keyId=Number(db.prepare("INSERT INTO api_keys(platform,label,encrypted_key,iv,auth_tag,status,enabled,monthly_request_cap) VALUES ('groq','test',?,?,?,'healthy',1,1)").run(encrypted,iv,authTag).lastInsertRowid);
+  keyId=Number(((await db.run("INSERT INTO api_keys(platform,label,encrypted_key,iv,auth_tag,status,enabled,monthly_request_cap) VALUES ('groq','test',?,?,?,'healthy',1,1) RETURNING id", [encrypted, iv, authTag]))).lastInsertRowid);
   ids = [++sequence,++sequence];
-  for(const id of ids) db.prepare("INSERT INTO models(id,platform,model_id,display_name,intelligence_rank,speed_rank,size_label,enabled) VALUES (?,'groq',?,'Test',1,1,'Small',1)").run(id,'test-'+id);
+  for(const id of ids) (await db.run("INSERT INTO models(id,platform,model_id,display_name,intelligence_rank,speed_rank,size_label,enabled) VALUES (?,'groq',?,'Test',1,1,'Small',1) RETURNING id", [id, 'test-'+id]));
   server=createApp().listen(0,'127.0.0.1');
   if(!server.listening) await new Promise<void>(r=>server.once('listening',r));
-  token=mintDashboardToken();
+  token=await mintDashboardToken();
 });
 afterEach(()=>{server.close(); vi.restoreAllMocks();});
 it('does not dispatch with an exhausted monthly request budget', async () => {
-  getDb().prepare('INSERT INTO key_monthly_usage(key_id,month,requests,tokens) VALUES (?,?,1,10)').run(keyId,new Date().toISOString().slice(0,7));
+  (await getDb().run('INSERT INTO key_monthly_usage(key_id,month,requests,tokens) VALUES (?,?,1,10)', [keyId, new Date().toISOString().slice(0,7)]));
   const call=vi.spyOn(getProvider('groq')!,'chatCompletion').mockResolvedValue(answer);
   expect((await post('/api/models/'+ids[0]+'/test')).body.success).toBe(false);
   expect(call).not.toHaveBeenCalled();
-  expect(getMonthlyUsage(keyId)).toEqual({requests:1,tokens:10});
+  expect(await getMonthlyUsage(keyId)).toEqual({requests:1,tokens:10});
 });
 it('records successful test usage in monthly accounting and request history', async () => {
   vi.spyOn(getProvider('groq')!,'chatCompletion').mockResolvedValue(answer);
   expect((await post('/api/models/'+ids[0]+'/test')).body.success).toBe(true);
-  expect(getMonthlyUsage(keyId)).toEqual({requests:1,tokens:5});
-  const logged=getDb().prepare("SELECT caller,input_tokens,output_tokens FROM requests WHERE key_id=?").get(keyId);
+  expect(await getMonthlyUsage(keyId)).toEqual({requests:1,tokens:5});
+  const logged=(await getDb().get("SELECT caller,input_tokens,output_tokens FROM requests WHERE key_id=?", [keyId]));
   expect(logged).toEqual({caller:'model-test',input_tokens:3,output_tokens:2});
-  expect(checkMonthlyBudget(keyId,0).allowed).toBe(false);
+  expect((await checkMonthlyBudget(keyId,0)).allowed).toBe(false);
 });
 it('reserves capacity across models while a test is in flight and releases it after failure', async () => {
   let reject!: (error: Error)=>void;
@@ -51,16 +52,16 @@ it('reserves capacity across models while a test is in flight and releases it af
   const began=new Promise<void>(resolve=>{started=resolve;});
   const call=vi.spyOn(getProvider('groq')!,'chatCompletion').mockImplementationOnce(()=>{started();return new Promise((_resolve,r)=>{reject=r;});});
   const first=post('/api/models/'+ids[0]+'/test'); await began;
-  expect(checkMonthlyBudget(keyId,0).allowed).toBe(false);
+  expect((await checkMonthlyBudget(keyId,0)).allowed).toBe(false);
   expect((await post('/api/models/'+ids[1]+'/test')).body.success).toBe(false);
   expect(call).toHaveBeenCalledTimes(1);
   reject(new Error('synthetic upstream failure'));
   expect((await first).body.success).toBe(false);
-  expect(checkMonthlyBudget(keyId,20).allowed).toBe(true);
-  expect(getMonthlyUsage(keyId)).toEqual({requests:0,tokens:0});
+  expect((await checkMonthlyBudget(keyId,20)).allowed).toBe(true);
+  expect(await getMonthlyUsage(keyId)).toEqual({requests:0,tokens:0});
 });
 it('rejects a test whose input/output reservation would exceed the token cap', async () => {
-  getDb().prepare('UPDATE api_keys SET monthly_token_cap=10 WHERE id=?').run(keyId);
+  (await getDb().run('UPDATE api_keys SET monthly_token_cap=10 WHERE id=?', [keyId]));
   const call=vi.spyOn(getProvider('groq')!,'chatCompletion').mockResolvedValue(answer);
   expect((await post('/api/models/'+ids[0]+'/test')).body.success).toBe(false);
   expect(call).not.toHaveBeenCalled();
@@ -70,9 +71,9 @@ it('requires an existing custom key and rejects mismatched endpoints or native k
   expect((await post('/api/models',payload)).status).toBe(400);
   expect((await post('/api/models',{...payload,keyId})).status).toBe(400);
   expect((await post('/api/models',{platform:'groq',modelId:'native-bound',keyId})).status).toBe(400);
-  getDb().prepare("UPDATE api_keys SET platform='custom',base_url='https://relay-a.example/v1' WHERE id=?").run(keyId);
+  (await getDb().run("UPDATE api_keys SET platform='custom',base_url='https://relay-a.example/v1' WHERE id=?", [keyId]));
   expect((await post('/api/models',{...payload,keyId,endpointScope:'https://relay-b.example/v1'})).status).toBe(400);
   const added=await post('/api/models',{...payload,keyId});
   expect(added.status).toBe(201);
-  expect(getDb().prepare('SELECT key_id,endpoint_scope FROM models WHERE id=?').get(added.body.id)).toEqual({key_id:keyId,endpoint_scope:'https://relay-a.example/v1'});
+  expect((await getDb().get('SELECT key_id,endpoint_scope FROM models WHERE id=?', [added.body.id]))).toEqual({key_id:keyId,endpoint_scope:'https://relay-a.example/v1'});
 });

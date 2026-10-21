@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { parseProviderContextWindow, learnContextWindowFromError } from '../../services/ratelimit.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 describe('parseProviderContextWindow', () => {
   it('parses the OpenRouter endpoint body from #1479', () => {
@@ -46,43 +47,41 @@ describe('parseProviderContextWindow', () => {
 });
 
 describe('learnContextWindowFromError (persistence)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  function insertModel(contextWindow: number | null): number {
-    const info = getDb().prepare(
-      `INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, context_window)
-       VALUES ('openrouter', ?, 'M', 50, 50, ?)`,
-    ).run(`m-${Math.random().toString(36).slice(2)}`, contextWindow);
+  async function insertModel(contextWindow: number | null): number {
+    const info = (await getDb().run(`INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, context_window)
+       VALUES ('openrouter', ?, 'M', 50, 50, ?) RETURNING id`, [`m-${Math.random().toString(36).slice(2)}`, contextWindow]));
     return info.lastInsertRowid as number;
   }
-  const windowOf = (id: number) =>
-    (getDb().prepare('SELECT context_window FROM models WHERE id = ?').get(id) as { context_window: number | null }).context_window;
+  const windowOf = async (id: number) =>
+    ((await getDb().get('SELECT context_window FROM models WHERE id = ?', [id])) as { context_window: number | null }).context_window;
   const tooLong = { message: "This endpoint's maximum context length is 262144 tokens. However, you requested about 404225 tokens." };
 
-  it('lowers a catalog window the endpoint does not honor', () => {
-    const id = insertModel(1_000_000);
-    expect(learnContextWindowFromError(id, tooLong)).toBe(262144);
-    expect(windowOf(id)).toBe(262144);
+  it('lowers a catalog window the endpoint does not honor', async () => {
+    const id = await insertModel(1_000_000);
+    expect(await learnContextWindowFromError(id, tooLong)).toBe(262144);
+    expect(await windowOf(id)).toBe(262144);
   });
 
-  it('fills an unknown window', () => {
-    const id = insertModel(null);
-    expect(learnContextWindowFromError(id, tooLong)).toBe(262144);
-    expect(windowOf(id)).toBe(262144);
+  it('fills an unknown window', async () => {
+    const id = await insertModel(null);
+    expect(await learnContextWindowFromError(id, tooLong)).toBe(262144);
+    expect(await windowOf(id)).toBe(262144);
   });
 
-  it('never raises a window that is already lower', () => {
-    const id = insertModel(131072);
-    expect(learnContextWindowFromError(id, tooLong)).toBeNull();
-    expect(windowOf(id)).toBe(131072);
+  it('never raises a window that is already lower', async () => {
+    const id = await insertModel(131072);
+    expect(await learnContextWindowFromError(id, tooLong)).toBeNull();
+    expect(await windowOf(id)).toBe(131072);
   });
 
-  it('is a no-op for an error that names no window', () => {
-    const id = insertModel(200000);
-    expect(learnContextWindowFromError(id, { message: 'Request Entity Too Large' })).toBeNull();
-    expect(windowOf(id)).toBe(200000);
+  it('is a no-op for an error that names no window', async () => {
+    const id = await insertModel(200000);
+    expect(await learnContextWindowFromError(id, { message: 'Request Entity Too Large' })).toBeNull();
+    expect(await windowOf(id)).toBe(200000);
   });
 });

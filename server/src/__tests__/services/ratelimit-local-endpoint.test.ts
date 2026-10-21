@@ -9,26 +9,26 @@ import { describe, it, expect, beforeAll } from 'vitest';
 // is attached. Non-local keys (public IPs/hostnames, built-in platforms with
 // base_url NULL) keep the full pre-existing behavior.
 
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { cooldownDecisionForError } from '../../lib/fallback-loop.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const MINUTE = 60_000;
 const TRANSIENT = 90_000;
 const LOCAL_CAP_MS = 5_000;
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
 // Register a custom-platform key row carrying the endpoint, like
 // routes/keys.ts POST /custom does, and return its real DB id.
-function insertKey(baseUrl: string | null): number {
-  const r = getDb().prepare(`
+async function insertKey(baseUrl: string | null): number {
+  const r = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
-    VALUES ('custom', 'test-endpoint', 'enc', 'iv', 'tag', 'valid', 1, ?)
-  `).run(baseUrl);
+    VALUES ('custom', 'test-endpoint', 'enc', 'iv', 'tag', 'valid', 1, ?) RETURNING id`, [baseUrl]));
   return Number(r.lastInsertRowid);
 }
 
@@ -46,51 +46,51 @@ const real429 = () => Object.assign(new Error('429 Too Many Requests'), { status
 const timeoutErr = () => Object.assign(new Error('Request timeout after 120000ms'), { name: 'TimeoutError' });
 
 describe('local-endpoint cooldown cap (#592)', () => {
-  it('loopback base_url: capped short bench even on repeated real 429s', () => {
-    const route = routeForKey(insertKey('http://127.0.0.1:11434/v1'));
+  it('loopback base_url: capped short bench even on repeated real 429s', async () => {
+    const route = routeForKey(await insertKey('http://127.0.0.1:11434/v1'));
     for (let i = 0; i < 4; i++) {
-      const decision = cooldownDecisionForError(route, real429());
+      const decision = await cooldownDecisionForError(route, real429());
       expect(decision.durationMs).toBe(LOCAL_CAP_MS);
       expect(decision.source).toBe('heuristic');
     }
   });
 
-  it('localhost hostname counts as loopback without DNS', () => {
-    const route = routeForKey(insertKey('http://localhost:11434/v1'));
-    expect(cooldownDecisionForError(route, real429()).durationMs).toBe(LOCAL_CAP_MS);
-    expect(cooldownDecisionForError(route, timeoutErr()).durationMs).toBe(LOCAL_CAP_MS);
+  it('localhost hostname counts as loopback without DNS', async () => {
+    const route = routeForKey(await insertKey('http://localhost:11434/v1'));
+    expect((await cooldownDecisionForError(route, real429())).durationMs).toBe(LOCAL_CAP_MS);
+    expect((await cooldownDecisionForError(route, timeoutErr())).durationMs).toBe(LOCAL_CAP_MS);
   });
 
-  it('RFC1918 base_url (LAN box): capped the same way', () => {
+  it('RFC1918 base_url (LAN box): capped the same way', async () => {
     for (const url of ['http://192.168.1.50:8080/v1', 'http://10.0.0.7:11434/v1', 'http://172.16.4.2:5000/v1']) {
-      const route = routeForKey(insertKey(url));
-      expect(cooldownDecisionForError(route, real429()).durationMs).toBe(LOCAL_CAP_MS);
-      expect(cooldownDecisionForError(route, real429()).durationMs).toBe(LOCAL_CAP_MS);
+      const route = routeForKey(await insertKey(url));
+      expect((await cooldownDecisionForError(route, real429())).durationMs).toBe(LOCAL_CAP_MS);
+      expect((await cooldownDecisionForError(route, real429())).durationMs).toBe(LOCAL_CAP_MS);
     }
   });
 
-  it('ignores an upstream Retry-After on a local endpoint', () => {
-    const route = routeForKey(insertKey('http://127.0.0.1:8080/v1'));
+  it('ignores an upstream Retry-After on a local endpoint', async () => {
+    const route = routeForKey(await insertKey('http://127.0.0.1:8080/v1'));
     const err = Object.assign(new Error('429 Too Many Requests'), { status: 429, retryAfterMs: 5 * MINUTE });
-    expect(cooldownDecisionForError(route, err).durationMs).toBe(LOCAL_CAP_MS);
+    expect((await cooldownDecisionForError(route, err)).durationMs).toBe(LOCAL_CAP_MS);
   });
 
-  it('public-IP base_url is NOT exempt: transient then ladder on real 429s', () => {
-    const route = routeForKey(insertKey('http://203.0.113.10/v1'));
-    expect(cooldownDecisionForError(route, real429()).durationMs).toBe(TRANSIENT);
-    expect(cooldownDecisionForError(route, real429()).durationMs).toBe(2 * MINUTE);
-    expect(cooldownDecisionForError(route, real429()).durationMs).toBe(10 * MINUTE);
+  it('public-IP base_url is NOT exempt: transient then ladder on real 429s', async () => {
+    const route = routeForKey(await insertKey('http://203.0.113.10/v1'));
+    expect((await cooldownDecisionForError(route, real429())).durationMs).toBe(TRANSIENT);
+    expect((await cooldownDecisionForError(route, real429())).durationMs).toBe(2 * MINUTE);
+    expect((await cooldownDecisionForError(route, real429())).durationMs).toBe(10 * MINUTE);
   });
 
-  it('non-literal hostname is treated as non-local (no DNS on the hot path)', () => {
-    const route = routeForKey(insertKey('https://inference.example.com/v1'));
-    expect(cooldownDecisionForError(route, real429()).durationMs).toBe(TRANSIENT);
-    expect(cooldownDecisionForError(route, real429()).durationMs).toBe(2 * MINUTE);
+  it('non-literal hostname is treated as non-local (no DNS on the hot path)', async () => {
+    const route = routeForKey(await insertKey('https://inference.example.com/v1'));
+    expect((await cooldownDecisionForError(route, real429())).durationMs).toBe(TRANSIENT);
+    expect((await cooldownDecisionForError(route, real429())).durationMs).toBe(2 * MINUTE);
   });
 
-  it('a key with no base_url (built-in platform shape) keeps full behavior', () => {
-    const route = routeForKey(insertKey(null));
-    expect(cooldownDecisionForError(route, real429()).durationMs).toBe(TRANSIENT);
-    expect(cooldownDecisionForError(route, real429()).durationMs).toBe(2 * MINUTE);
+  it('a key with no base_url (built-in platform shape) keeps full behavior', async () => {
+    const route = routeForKey(await insertKey(null));
+    expect((await cooldownDecisionForError(route, real429())).durationMs).toBe(TRANSIENT);
+    expect((await cooldownDecisionForError(route, real429())).durationMs).toBe(2 * MINUTE);
   });
 });

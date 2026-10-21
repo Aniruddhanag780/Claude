@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import {
   builtinDiscoveryMode,
@@ -13,6 +13,7 @@ import {
 } from '../../services/builtin-model-discovery.js';
 import { applyCatalog } from '../../services/catalog-sync.js';
 import { recordCatalogModelTombstone, isCatalogManagedModel } from '../../services/model-state.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 // #1348: built-in OpenAI-compatible providers the signed catalog carries no
 // models for fill their list from their own /models. These tests pin the
@@ -48,19 +49,18 @@ function catalogOf(models: AnyCatalog['models'], extra: Partial<AnyCatalog> = {}
 }
 
 /** Pretend `catalog` was the last one applied (what appliedCatalogPlatforms reads). */
-function cacheAppliedCatalog(catalog: AnyCatalog): void {
-  getDb().prepare(`
+async function cacheAppliedCatalog(catalog: AnyCatalog): void {
+  (await getDb().run(`
     INSERT INTO settings (key, value) VALUES ('catalog_applied_json', ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `).run(JSON.stringify(catalog));
+  `, [JSON.stringify(catalog)]));
 }
 
-function addKey(platform: string, secret = 'sk-test', status = 'healthy'): number {
+async function addKey(platform: string, secret = 'sk-test', status = 'healthy'): number {
   const { encrypted, iv, authTag } = encrypt(secret);
-  const info = getDb().prepare(`
+  const info = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, '', ?, ?, ?, ?, 1)
-  `).run(platform, encrypted, iv, authTag, status);
+    VALUES (?, '', ?, ?, ?, ?, 1) RETURNING id`, [platform, encrypted, iv, authTag, status]));
   return Number(info.lastInsertRowid);
 }
 
@@ -73,18 +73,16 @@ function stubModels(ids: Array<string | Record<string, unknown>>) {
   return mock;
 }
 
-function rows(platform: string) {
-  return getDb().prepare(
-    'SELECT id, model_id, source, display_name, enabled, key_id FROM models WHERE platform = ? ORDER BY model_id',
-  ).all(platform) as Array<{ id: number; model_id: string; source: string; display_name: string; enabled: number; key_id: number | null }>;
+async function rows(platform: string) {
+  return (await getDb().all('SELECT id, model_id, source, display_name, enabled, key_id FROM models WHERE platform = ? ORDER BY model_id', [platform])) as Array<{ id: number; model_id: string; source: string; display_name: string; enabled: number; key_id: number | null }>;
 }
 
 describe('built-in model discovery (#1348)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     process.env.BUILTIN_MODEL_DISCOVERY = 'auto';
     delete process.env.CUSTOM_MODEL_SYNC_FREE_PATTERNS;
-    initDb(':memory:');
+    await initTestDb();
     resetBuiltinDiscoveryThrottle();
   });
 
@@ -105,70 +103,70 @@ describe('built-in model discovery (#1348)', () => {
   });
 
   describe('eligibility', () => {
-    it('allows only the allowlisted platforms the catalog does not carry', () => {
+    it('allows only the allowlisted platforms the catalog does not carry', async () => {
       const db = getDb();
-      expect(builtinDiscoveryEligibility(db, 'siliconflow').eligible).toBe(true);
-      expect(builtinDiscoveryEligibility(db, 'longcat').eligible).toBe(true);
+      expect((await builtinDiscoveryEligibility(db, 'siliconflow')).eligible).toBe(true);
+      expect((await builtinDiscoveryEligibility(db, 'longcat')).eligible).toBe(true);
       // Catalog-managed providers are never discoverable, whatever their state.
-      expect(builtinDiscoveryEligibility(db, 'groq')).toMatchObject({ eligible: false, reason: 'not_allowlisted' });
-      expect(builtinDiscoveryEligibility(db, 'custom').eligible).toBe(false);
+      expect(await builtinDiscoveryEligibility(db, 'groq')).toMatchObject({ eligible: false, reason: 'not_allowlisted' });
+      expect((await builtinDiscoveryEligibility(db, 'custom')).eligible).toBe(false);
     });
 
-    it('keeps Premium-window and audited-off providers out of the allowlist', () => {
+    it('keeps Premium-window and audited-off providers out of the allowlist', async () => {
       // radeon/routeway ship enabled rows in the Premium catalog only (not yet
       // aged into free); reka/navy/opencode/orcarouter/xfyun carry disabled
       // rows the audit keeps off. A free install cannot see either, so the
       // allowlist is what keeps discovery from bypassing the gate.
       for (const gated of ['radeon', 'routeway', 'reka', 'navy', 'opencode', 'orcarouter', 'xfyun']) {
         expect(BUILTIN_DISCOVERY_PLATFORMS).not.toContain(gated);
-        expect(builtinDiscoveryEligibility(getDb(), gated).eligible).toBe(false);
+        expect((await builtinDiscoveryEligibility(getDb(), gated)).eligible).toBe(false);
       }
     });
 
-    it('is off limits once the applied catalog lists the platform, even with a disabled row', () => {
-      cacheAppliedCatalog(catalogOf([catalogModel('siliconflow', 'Qwen/Qwen3-8B', false)]));
-      expect(builtinDiscoveryEligibility(getDb(), 'siliconflow')).toMatchObject({ eligible: false, reason: 'catalog_managed' });
-      expect(builtinDiscoveryEligibility(getDb(), 'longcat').eligible).toBe(true);
+    it('is off limits once the applied catalog lists the platform, even with a disabled row', async () => {
+      await cacheAppliedCatalog(catalogOf([catalogModel('siliconflow', 'Qwen/Qwen3-8B', false)]));
+      expect(await builtinDiscoveryEligibility(getDb(), 'siliconflow')).toMatchObject({ eligible: false, reason: 'catalog_managed' });
+      expect((await builtinDiscoveryEligibility(getDb(), 'longcat')).eligible).toBe(true);
     });
 
-    it('honors a names-only managedPlatforms entry (Premium window, no rows in this tier)', () => {
-      cacheAppliedCatalog(catalogOf([], { managedPlatforms: ['longcat'] }));
-      expect(builtinDiscoveryEligibility(getDb(), 'longcat')).toMatchObject({ eligible: false, reason: 'catalog_managed' });
+    it('honors a names-only managedPlatforms entry (Premium window, no rows in this tier)', async () => {
+      await cacheAppliedCatalog(catalogOf([], { managedPlatforms: ['longcat'] }));
+      expect(await builtinDiscoveryEligibility(getDb(), 'longcat')).toMatchObject({ eligible: false, reason: 'catalog_managed' });
     });
 
-    it('can be switched off', () => {
+    it('can be switched off', async () => {
       process.env.BUILTIN_MODEL_DISCOVERY = 'off';
-      expect(builtinDiscoveryEligibility(getDb(), 'siliconflow')).toMatchObject({ eligible: false, reason: 'disabled' });
+      expect(await builtinDiscoveryEligibility(getDb(), 'siliconflow')).toMatchObject({ eligible: false, reason: 'disabled' });
     });
   });
 
   describe('registration precedence', () => {
-    it('writes discovered rows that route like catalog rows but are marked discovered', () => {
-      const result = registerDiscoveredModels(getDb(), 'siliconflow', [{ modelId: 'deepseek-ai/DeepSeek-V3', contextWindow: 65536 }], { explicit: false });
+    it('writes discovered rows that route like catalog rows but are marked discovered', async () => {
+      const result = await registerDiscoveredModels(getDb(), 'siliconflow', [{ modelId: 'deepseek-ai/DeepSeek-V3', contextWindow: 65536 }], { explicit: false });
       expect(result.created).toEqual(['deepseek-ai/DeepSeek-V3']);
-      const [row] = rows('siliconflow');
+      const [row] = await rows('siliconflow');
       expect(row).toMatchObject({ model_id: 'deepseek-ai/DeepSeek-V3', source: 'discovered', enabled: 1, key_id: null });
-      expect(getDb().prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(row!.id)).toBeTruthy();
+      expect((await getDb().get('SELECT 1 FROM fallback_config WHERE model_db_id = ?', [row!.id]))).toBeTruthy();
       // Deleting one records a catalog tombstone, the "stays deleted" contract.
       expect(isCatalogManagedModel({ platform: 'siliconflow', key_id: null, source: 'discovered' })).toBe(true);
     });
 
-    it('never overwrites an existing catalog or user row', () => {
+    it('never overwrites an existing catalog or user row', async () => {
       const db = getDb();
-      db.prepare(`INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, source)
-                  VALUES ('siliconflow', 'from-user', 'Mine', 1, 1, 'Large', 'user')`).run();
-      const result = registerDiscoveredModels(db, 'siliconflow', [{ modelId: 'from-user' }, { modelId: 'fresh' }], { explicit: true });
+      (await db.run(`INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, source)
+                  VALUES ('siliconflow', 'from-user', 'Mine', 1, 1, 'Large', 'user') RETURNING id`));
+      const result = await registerDiscoveredModels(db, 'siliconflow', [{ modelId: 'from-user' }, { modelId: 'fresh' }], { explicit: true });
       expect(result.existing).toEqual(['from-user']);
       expect(result.created).toEqual(['fresh']);
-      expect(rows('siliconflow').find(r => r.model_id === 'from-user')).toMatchObject({ source: 'user', display_name: 'Mine' });
+      expect((await rows('siliconflow')).find(r => r.model_id === 'from-user')).toMatchObject({ source: 'user', display_name: 'Mine' });
     });
 
-    it('keeps a deleted model deleted on automatic passes; an explicit pick lifts it', () => {
+    it('keeps a deleted model deleted on automatic passes; an explicit pick lifts it', async () => {
       const db = getDb();
-      recordCatalogModelTombstone(db, 'chat', 'siliconflow', 'gone');
-      expect(registerDiscoveredModels(db, 'siliconflow', [{ modelId: 'gone' }], { explicit: false }).tombstoned).toEqual(['gone']);
-      expect(rows('siliconflow')).toEqual([]);
-      expect(registerDiscoveredModels(db, 'siliconflow', [{ modelId: 'gone' }], { explicit: true }).created).toEqual(['gone']);
+      await recordCatalogModelTombstone(db, 'chat', 'siliconflow', 'gone');
+      expect((await registerDiscoveredModels(db, 'siliconflow', [{ modelId: 'gone' }], { explicit: false })).tombstoned).toEqual(['gone']);
+      expect(await rows('siliconflow')).toEqual([]);
+      expect((await registerDiscoveredModels(db, 'siliconflow', [{ modelId: 'gone' }], { explicit: true })).created).toEqual(['gone']);
     });
   });
 
@@ -195,7 +193,7 @@ describe('built-in model discovery (#1348)', () => {
 
   describe('runBuiltinModelDiscovery', () => {
     it('fetches the registered base URL with the stored key and registers new chat models', async () => {
-      addKey('siliconflow', 'sk-silicon');
+      await addKey('siliconflow', 'sk-silicon');
       const mock = stubModels(['deepseek-ai/DeepSeek-V3', 'BAAI/bge-m3-embedding', 'Qwen/Qwen3-8B']);
 
       const result = await runBuiltinModelDiscovery(getDb());
@@ -205,80 +203,80 @@ describe('built-in model discovery (#1348)', () => {
       expect((init.headers as Record<string, string>).Authorization).toBe('Bearer sk-silicon');
       expect(result.added).toBe(2);
       expect(result.nonChatSkipped).toBe(1);
-      expect(rows('siliconflow').map(r => r.model_id)).toEqual(['Qwen/Qwen3-8B', 'deepseek-ai/DeepSeek-V3']);
+      expect((await rows('siliconflow')).map(r => r.model_id)).toEqual(['Qwen/Qwen3-8B', 'deepseek-ai/DeepSeek-V3']);
     });
 
     it('does nothing for a platform without a usable key, or in manual mode', async () => {
       const mock = stubModels(['x']);
       expect((await runBuiltinModelDiscovery(getDb())).platforms).toBe(0);
-      addKey('siliconflow');
+      await addKey('siliconflow');
       process.env.BUILTIN_MODEL_DISCOVERY = 'manual';
       expect((await runBuiltinModelDiscovery(getDb())).platforms).toBe(0);
       expect(mock).not.toHaveBeenCalled();
     });
 
     it('never touches a Premium-gated platform even with a healthy key', async () => {
-      addKey('routeway');
+      await addKey('routeway');
       const mock = stubModels(['a:free']);
       await runBuiltinModelDiscovery(getDb(), 'routeway');
-      expect(triggerBuiltinModelDiscovery(getDb(), 'routeway', 'key_added')).toBeNull();
+      expect(await triggerBuiltinModelDiscovery(getDb(), 'routeway', 'key_added')).toBeNull();
       expect(mock).not.toHaveBeenCalled();
-      expect(rows('routeway')).toEqual([]);
+      expect(await rows('routeway')).toEqual([]);
     });
 
     it('records upstream failures without throwing', async () => {
-      addKey('longcat');
+      await addKey('longcat');
       globalThis.fetch = vi.fn(async () => new Response('{"error":{"message":"bad key"}}', { status: 401 })) as any;
       const result = await runBuiltinModelDiscovery(getDb());
       expect(result.failures).toEqual([{ platform: 'longcat', error: expect.stringContaining('rejected the key') }]);
     });
 
     it('the healthy-check trigger runs once for an empty platform and then stays quiet', async () => {
-      addKey('longcat');
+      await addKey('longcat');
       const mock = stubModels(['LongCat-Flash-Chat']);
       await triggerBuiltinModelDiscovery(getDb(), 'longcat', 'healthy');
-      expect(rows('longcat').map(r => r.model_id)).toEqual(['LongCat-Flash-Chat']);
-      expect(triggerBuiltinModelDiscovery(getDb(), 'longcat', 'healthy')).toBeNull();
+      expect((await rows('longcat')).map(r => r.model_id)).toEqual(['LongCat-Flash-Chat']);
+      expect(await triggerBuiltinModelDiscovery(getDb(), 'longcat', 'healthy')).toBeNull();
       expect(mock).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('catalog precedence on sync', () => {
-    function stripCatalogRows(): AnyCatalog['models'] {
+    async function stripCatalogRows(): AnyCatalog['models'] {
       // Keep every baseline catalog row so the apply only exercises the rows under test.
-      return (getDb().prepare("SELECT platform, model_id FROM models WHERE source = 'catalog'").all() as Array<{ platform: string; model_id: string }>)
+      return ((await getDb().all("SELECT platform, model_id FROM models WHERE source = 'catalog'")) as Array<{ platform: string; model_id: string }>)
         .map(r => catalogModel(r.platform, r.model_id));
     }
 
-    it('adopts a discovered row the catalog lists and retires the rest of that platform', () => {
+    it('adopts a discovered row the catalog lists and retires the rest of that platform', async () => {
       const db = getDb();
-      registerDiscoveredModels(db, 'siliconflow', [{ modelId: 'listed' }, { modelId: 'unlisted' }], { explicit: false });
-      registerDiscoveredModels(db, 'longcat', [{ modelId: 'untouched' }], { explicit: false });
-      const listedId = rows('siliconflow').find(r => r.model_id === 'listed')!.id;
+      await registerDiscoveredModels(db, 'siliconflow', [{ modelId: 'listed' }, { modelId: 'unlisted' }], { explicit: false });
+      await registerDiscoveredModels(db, 'longcat', [{ modelId: 'untouched' }], { explicit: false });
+      const listedId = (await rows('siliconflow')).find(r => r.model_id === 'listed')!.id;
 
-      applyCatalog(db, catalogOf([...stripCatalogRows(), catalogModel('siliconflow', 'listed')]));
+      await applyCatalog(db, catalogOf([...await stripCatalogRows(), catalogModel('siliconflow', 'listed')]));
 
-      const silicon = rows('siliconflow');
+      const silicon = await rows('siliconflow');
       expect(silicon).toEqual([
         expect.objectContaining({ id: listedId, model_id: 'listed', source: 'catalog', display_name: 'listed (catalog)' }),
       ]);
       // A platform the catalog still does not manage keeps its discovered rows.
-      expect(rows('longcat')).toEqual([expect.objectContaining({ model_id: 'untouched', source: 'discovered' })]);
+      expect(await rows('longcat')).toEqual([expect.objectContaining({ model_id: 'untouched', source: 'discovered' })]);
     });
 
-    it('retires discovered rows when the catalog manages the platform by name only', () => {
+    it('retires discovered rows when the catalog manages the platform by name only', async () => {
       const db = getDb();
-      registerDiscoveredModels(db, 'longcat', [{ modelId: 'a' }], { explicit: false });
-      applyCatalog(db, catalogOf(stripCatalogRows(), { managedPlatforms: ['longcat'] }));
-      expect(rows('longcat')).toEqual([]);
+      await registerDiscoveredModels(db, 'longcat', [{ modelId: 'a' }], { explicit: false });
+      await applyCatalog(db, catalogOf(await stripCatalogRows(), { managedPlatforms: ['longcat'] }));
+      expect(await rows('longcat')).toEqual([]);
     });
 
-    it('keeps a local disable when the catalog adopts a discovered row', () => {
+    it('keeps a local disable when the catalog adopts a discovered row', async () => {
       const db = getDb();
-      registerDiscoveredModels(db, 'siliconflow', [{ modelId: 'listed' }], { explicit: false });
-      db.prepare("UPDATE models SET enabled = 0 WHERE platform = 'siliconflow'").run();
-      applyCatalog(db, catalogOf([...stripCatalogRows(), catalogModel('siliconflow', 'listed')]));
-      expect(rows('siliconflow')[0]).toMatchObject({ source: 'catalog', enabled: 0 });
+      await registerDiscoveredModels(db, 'siliconflow', [{ modelId: 'listed' }], { explicit: false });
+      (await db.run("UPDATE models SET enabled = 0 WHERE platform = 'siliconflow'"));
+      await applyCatalog(db, catalogOf([...await stripCatalogRows(), catalogModel('siliconflow', 'listed')]));
+      expect((await rows('siliconflow'))[0]).toMatchObject({ source: 'catalog', enabled: 0 });
     });
   });
 });

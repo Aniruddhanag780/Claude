@@ -13,7 +13,7 @@ vi.mock('../../services/health.js', () => ({
   markKeyHealthyFromRequest: vi.fn(),
 }));
 
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import {
   newFallbackState,
@@ -31,18 +31,18 @@ import {
 } from '../../lib/tool-capability.js';
 import { clearCooldownsForKey, resetKeyLocalityCache } from '../../services/ratelimit.js';
 import type { RouteResult } from '../../services/router.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const PLATFORM = 'groq';
 let keyA = 0;
 let keyB = 0;
 let models: { id: number; model_id: string }[] = [];
 
-function insertKey(label: string): number {
+async function insertKey(label: string): number {
   const { encrypted, iv, authTag } = encrypt(`test-${label}`);
-  const info = getDb().prepare(`
+  const info = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, ?, ?, ?, ?, 'healthy', 1)
-  `).run(PLATFORM, label, encrypted, iv, authTag);
+    VALUES (?, ?, ?, ?, ?, 'healthy', 1) RETURNING id`, [PLATFORM, label, encrypted, iv, authTag]));
   return Number(info.lastInsertRowid);
 }
 
@@ -80,83 +80,81 @@ function toolState(): FallbackState {
 
 const benched = (m: { model_id: string }, scope = '') => isToolBenched(PLATFORM, m.model_id, scope);
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
   const db = getDb();
-  db.prepare('DELETE FROM api_keys').run();
-  keyA = insertKey('key-a');
-  keyB = insertKey('key-b');
+  (await db.run('DELETE FROM api_keys'));
+  keyA = await insertKey('key-a');
+  keyB = await insertKey('key-b');
   resetKeyLocalityCache();
-  models = db.prepare(
-    'SELECT id, model_id FROM models WHERE platform = ? AND enabled = 1 ORDER BY id'
-  ).all(PLATFORM) as { id: number; model_id: string }[];
+  models = (await db.all('SELECT id, model_id FROM models WHERE platform = ? AND enabled = 1 ORDER BY id', [PLATFORM])) as { id: number; model_id: string }[];
   expect(models.length).toBeGreaterThanOrEqual(3);
 });
 
-beforeEach(() => {
-  clearCooldownsForKey(keyA);
-  clearCooldownsForKey(keyB);
+beforeEach(async () => {
+  await clearCooldownsForKey(keyA);
+  await clearCooldownsForKey(keyB);
   resetModelFailureWindows();
   resetToolCapability();
 });
 
 describe('tool-request rejections are remembered per model (#1230)', () => {
-  it('defers a model after the limit of DISTINCT tool requests it rejected', () => {
+  it('defers a model after the limit of DISTINCT tool requests it rejected', async () => {
     for (let i = 0; i < TOOL_REJECTION_LIMIT - 1; i++) {
-      recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState());
+      await recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState());
     }
     expect(benched(models[0])).toBe(false);
-    recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState());
+    await recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState());
     expect(benched(models[0])).toBe(true);
     // Only the model that rejected is affected.
     expect(benched(models[1])).toBe(false);
   });
 
-  it('counts one request once, however many keys of the model were tried', () => {
+  it('counts one request once, however many keys of the model were tried', async () => {
     const state = toolState();
     for (let i = 0; i < TOOL_REJECTION_LIMIT + 2; i++) {
-      recordRetryableFailure(routeFor(models[0], i % 2 ? keyA : keyB), BAD_REQUEST(), state);
+      await recordRetryableFailure(routeFor(models[0], i % 2 ? keyA : keyB), BAD_REQUEST(), state);
     }
     expect(benched(models[0])).toBe(false);
   });
 
-  it('ignores requests that carry no tools', () => {
+  it('ignores requests that carry no tools', async () => {
     for (let i = 0; i < TOOL_REJECTION_LIMIT + 2; i++) {
-      recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), newFallbackState());
+      await recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), newFallbackState());
     }
     expect(benched(models[0])).toBe(false);
   });
 
-  it('ignores 400s that are really another class (context too large)', () => {
+  it('ignores 400s that are really another class (context too large)', async () => {
     for (let i = 0; i < TOOL_REJECTION_LIMIT + 2; i++) {
-      recordRetryableFailure(routeFor(models[0], keyA), CONTEXT_400(), toolState());
+      await recordRetryableFailure(routeFor(models[0], keyA), CONTEXT_400(), toolState());
     }
     expect(benched(models[0])).toBe(false);
   });
 
-  it('forgets rejections that fall outside the window', () => {
+  it('forgets rejections that fall outside the window', async () => {
     const t0 = 1_800_000_000_000;
     for (let i = 0; i < TOOL_REJECTION_LIMIT - 1; i++) {
-      recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState(), t0);
+      await recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState(), t0);
     }
-    recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState(), t0 + TOOL_REJECTION_WINDOW_MS + 1);
+    await recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState(), t0 + TOOL_REJECTION_WINDOW_MS + 1);
     expect(isToolBenched(PLATFORM, models[0].model_id, '', t0 + TOOL_REJECTION_WINDOW_MS + 2)).toBe(false);
   });
 
-  it('keeps two relays serving the same model id apart', () => {
+  it('keeps two relays serving the same model id apart', async () => {
     const relayA = { platform: 'custom', endpointScope: 'https://relay-a.example/v1' };
     for (let i = 0; i < TOOL_REJECTION_LIMIT; i++) {
-      recordRetryableFailure(routeFor(models[0], keyA, relayA), BAD_REQUEST(), toolState());
+      await recordRetryableFailure(routeFor(models[0], keyA, relayA), BAD_REQUEST(), toolState());
     }
     expect(isToolBenched('custom', models[0].model_id, 'https://relay-a.example/v1')).toBe(true);
     expect(isToolBenched('custom', models[0].model_id, 'https://relay-b.example/v1')).toBe(false);
   });
 
-  it('expires on its own', () => {
+  it('expires on its own', async () => {
     const t0 = 1_800_000_000_000;
     for (let i = 0; i < TOOL_REJECTION_LIMIT; i++) {
-      recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState(), t0);
+      await recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState(), t0);
     }
     expect(isToolBenched(PLATFORM, models[0].model_id, '', t0 + TOOL_BENCH_MS - 1)).toBe(true);
     expect(isToolBenched(PLATFORM, models[0].model_id, '', t0 + TOOL_BENCH_MS + 1)).toBe(false);
@@ -164,39 +162,39 @@ describe('tool-request rejections are remembered per model (#1230)', () => {
 });
 
 describe('a served tool request settles who was at fault (#1230)', () => {
-  it('defers the models that rejected the same request straight away', () => {
+  it('defers the models that rejected the same request straight away', async () => {
     const state = toolState();
-    recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), state);
-    recordRetryableFailure(routeFor(models[1], keyA), BAD_REQUEST(), state);
+    await recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), state);
+    await recordRetryableFailure(routeFor(models[1], keyA), BAD_REQUEST(), state);
     expect(benched(models[0])).toBe(false);
-    recordUpstreamSuccess(routeFor(models[2], keyA), 100, state);
+    await recordUpstreamSuccess(routeFor(models[2], keyA), 100, state);
     expect(benched(models[0])).toBe(true);
     expect(benched(models[1])).toBe(true);
     expect(benched(models[2])).toBe(false);
   });
 
-  it('clears a model that serves a tool request after all', () => {
+  it('clears a model that serves a tool request after all', async () => {
     for (let i = 0; i < TOOL_REJECTION_LIMIT; i++) {
-      recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState());
+      await recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState());
     }
     expect(benched(models[0])).toBe(true);
-    recordUpstreamSuccess(routeFor(models[0], keyA), 100, toolState());
+    await recordUpstreamSuccess(routeFor(models[0], keyA), 100, toolState());
     expect(benched(models[0])).toBe(false);
   });
 
-  it('a malformed tool request that every model rejects defers nothing on its own', () => {
+  it('a malformed tool request that every model rejects defers nothing on its own', async () => {
     // One broken client payload: every model 400s, nothing succeeds.
     const state = toolState();
-    for (const m of models.slice(0, 3)) recordRetryableFailure(routeFor(m, keyA), BAD_REQUEST(), state);
+    for (const m of models.slice(0, 3)) await recordRetryableFailure(routeFor(m, keyA), BAD_REQUEST(), state);
     expect(models.slice(0, 3).some(m => benched(m))).toBe(false);
   });
 
-  it('a success without tools teaches nothing about tool support', () => {
+  it('a success without tools teaches nothing about tool support', async () => {
     for (let i = 0; i < TOOL_REJECTION_LIMIT; i++) {
-      recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState());
+      await recordRetryableFailure(routeFor(models[0], keyA), BAD_REQUEST(), toolState());
     }
-    recordUpstreamSuccess(routeFor(models[0], keyA), 100, newFallbackState());
-    recordUpstreamSuccess(routeFor(models[0], keyA), 100);
+    await recordUpstreamSuccess(routeFor(models[0], keyA), 100, newFallbackState());
+    await recordUpstreamSuccess(routeFor(models[0], keyA), 100);
     expect(benched(models[0])).toBe(true);
   });
 });

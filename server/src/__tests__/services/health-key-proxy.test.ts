@@ -3,7 +3,8 @@ import { EventEmitter } from 'events';
 import https from 'https';
 import { encrypt } from '../../lib/crypto.js';
 import { encryptProxyUrl } from '../../lib/key-proxy.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const validateKey = vi.hoisted(() => vi.fn());
 
@@ -42,9 +43,9 @@ function stubHttpsRequest() {
 describe('Key health — per-key proxy override (#590)', () => {
   let nextId = 7000;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   beforeEach(() => {
@@ -60,15 +61,15 @@ describe('Key health — per-key proxy override (#590)', () => {
     vi.restoreAllMocks();
   });
 
-  function seedKey(proxyUrl: string): number {
+  async function seedKey(proxyUrl: string): number {
     const id = ++nextId;
     const key = encrypt('mistral-health-test-key');
     const proxy = encryptProxyUrl(proxyUrl);
-    getDb().prepare(`
+    await getDb().run(`
       INSERT INTO api_keys
         (id, platform, label, encrypted_key, iv, auth_tag, enabled, status, proxy_encrypted, proxy_iv, proxy_auth_tag)
       VALUES (?, 'mistral', 'health-test', ?, ?, ?, 1, 'unknown', ?, ?, ?)
-    `).run(id, key.encrypted, key.iv, key.authTag, proxy.encrypted, proxy.iv, proxy.authTag);
+    `, [id, key.encrypted, key.iv, key.authTag, proxy.encrypted, proxy.iv, proxy.authTag]);
     return id;
   }
 
@@ -84,7 +85,7 @@ describe('Key health — per-key proxy override (#590)', () => {
     ((spy.mock.calls[0]?.[0] as any)?.agent)?.proxy?.port;
 
   it('checkKeyHealth validates through the key\'s own proxy', async () => {
-    const id = seedKey('socks5h://127.0.0.1:1091');
+    const id = await seedKey('socks5h://127.0.0.1:1091');
     validatingProvider();
     const reqSpy = stubHttpsRequest();
 
@@ -93,7 +94,7 @@ describe('Key health — per-key proxy override (#590)', () => {
   });
 
   it('checkKeyHealth uses the global proxy for a key with no override', async () => {
-    const id = seedKey('');
+    const id = await seedKey('');
     applyProxyUrl('socks5://127.0.0.1:1090');
     validatingProvider();
     const reqSpy = stubHttpsRequest();
@@ -103,7 +104,7 @@ describe('Key health — per-key proxy override (#590)', () => {
   });
 
   it('probeKeyValidity probes through the key\'s own proxy too', async () => {
-    const id = seedKey('socks5://127.0.0.1:1092');
+    const id = await seedKey('socks5://127.0.0.1:1092');
     applyProxyUrl('socks5://127.0.0.1:1090');
     validatingProvider();
     const reqSpy = stubHttpsRequest();

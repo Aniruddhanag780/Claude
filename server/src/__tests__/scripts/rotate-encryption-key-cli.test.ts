@@ -1,11 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'child_process';
 import { createRequire } from 'module';
-import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 import { encryptWith, decryptWith } from '../../scripts/rotate-encryption-key.js';
 
 // End-to-end coverage for the CLI itself, not just the exported helpers. The
@@ -14,6 +13,11 @@ import { encryptWith, decryptWith } from '../../scripts/rotate-encryption-key.js
 // scope" the moment `npm run rotate-encryption-key` is invoked — a failure the
 // unit tests cannot see, because they import rotateSecrets() directly. Only
 // actually running the script catches it.
+//
+// PG adaptation: the CLI connects via DATABASE_URL (the `--db <sqlite file>`
+// flag is gone with the file-backed database). The spawned process inherits
+// this file's per-test clone URL, so the child hits the SAME database the
+// parent seeds and reads.
 
 const require_ = createRequire(import.meta.url);
 const TSX_CLI = path.join(path.dirname(require_.resolve('tsx/package.json')), 'dist', 'cli.mjs');
@@ -28,44 +32,33 @@ const API_KEY_SECRET = 'sk-live-rotate-me';
 const PROFILE_SECRET = 'cp-live-rotate-me';
 const RELAY_TOKEN = 'relay-bearer-rotate-me';
 
-let tmpDir: string;
-let dbPath: string;
-
-/** A real on-disk DB with the production schema, seeded under the OLD key. */
-function seedTempDb(): void {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rotate-cli-'));
-  dbPath = path.join(tmpDir, 'freeapi.db');
-
-  // Set before initDb so crypto.ts takes the env key and never writes a
-  // .encryption-key file next to the temp DB.
+/** Seed the per-file test database under the OLD key. */
+async function seedTempDb(): Promise<void> {
   process.env.ENCRYPTION_KEY = OLD_HEX;
-  const db = initDb(dbPath);
+  await initTestDb();
+  const db = getDb();
 
   const keyEnc = encryptWith(OLD_KEY, API_KEY_SECRET);
-  db.prepare('INSERT INTO api_keys (platform, encrypted_key, iv, auth_tag, status, enabled) VALUES (?,?,?,?,?,?)')
-    .run('openai', keyEnc.encrypted, keyEnc.iv, keyEnc.authTag, 'unknown', 1);
+  await db.run('INSERT INTO api_keys (platform, encrypted_key, iv, auth_tag, status, enabled) VALUES (?,?,?,?,?,?)',
+    ['openai', keyEnc.encrypted, keyEnc.iv, keyEnc.authTag, 'unknown', 1]);
 
   const profileEnc = encryptWith(OLD_KEY, PROFILE_SECRET);
-  db.prepare('INSERT INTO client_profiles (name, token_hash, encrypted_key, iv, auth_tag, enabled) VALUES (?,?,?,?,?,?)')
-    .run('claude', 'hash-cli', profileEnc.encrypted, profileEnc.iv, profileEnc.authTag, 1);
+  await db.run('INSERT INTO client_profiles (name, token_hash, encrypted_key, iv, auth_tag, enabled) VALUES (?,?,?,?,?,?)',
+    ['claude', 'hash-cli', profileEnc.encrypted, profileEnc.iv, profileEnc.authTag, 1]);
 
   // Same encoding encodeFetchRelayToken() writes: JSON.stringify(encrypt(v)).
   const relayEnc = encryptWith(OLD_KEY, RELAY_TOKEN);
-  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
-    .run('fetch_relay_token', JSON.stringify(relayEnc));
-
-  db.close?.();
+  await db.run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+    ['fetch_relay_token', JSON.stringify(relayEnc)]);
 }
 
-/** Read every seeded ciphertext straight out of the file, no server involved. */
-function readSecrets(): { key: [string, string, string]; profile: [string, string, string]; relay: [string, string, string] } {
-  process.env.ENCRYPTION_KEY = OLD_HEX;
-  const db = initDb(dbPath);
-  const k = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_keys').get() as { encrypted_key: string; iv: string; auth_tag: string };
-  const p = db.prepare('SELECT encrypted_key, iv, auth_tag FROM client_profiles').get() as { encrypted_key: string; iv: string; auth_tag: string };
-  const s = db.prepare("SELECT value FROM settings WHERE key = 'fetch_relay_token'").get() as { value: string };
+/** Read every seeded ciphertext straight out of the database, no server involved. */
+async function readSecrets(): Promise<{ key: [string, string, string]; profile: [string, string, string]; relay: [string, string, string] }> {
+  const db = getDb();
+  const k = await db.get('SELECT encrypted_key, iv, auth_tag FROM api_keys') as { encrypted_key: string; iv: string; auth_tag: string };
+  const p = await db.get('SELECT encrypted_key, iv, auth_tag FROM client_profiles') as { encrypted_key: string; iv: string; auth_tag: string };
+  const s = await db.get("SELECT value FROM settings WHERE key = 'fetch_relay_token'") as { value: string };
   const relay = JSON.parse(s.value) as { encrypted: string; iv: string; authTag: string };
-  db.close?.();
   return {
     key: [k.encrypted_key, k.iv, k.auth_tag],
     profile: [p.encrypted_key, p.iv, p.auth_tag],
@@ -83,25 +76,24 @@ function runScript(args: string[]): { status: number | null; stdout: string; std
 }
 
 describe('rotate-encryption-key CLI (end to end)', () => {
-  beforeEach(() => {
-    seedTempDb();
+  beforeEach(async () => {
+    await seedTempDb();
   });
 
   afterEach(() => {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
     delete process.env.ENCRYPTION_KEY;
   });
 
-  it('rotates every stored secret to the new key and leaves the old key unable to read them', () => {
-    const before = readSecrets();
+  it('rotates every stored secret to the new key and leaves the old key unable to read them', async () => {
+    const before = await readSecrets();
 
-    const run = runScript(['--old-key', OLD_HEX, '--new-key', NEW_HEX, '--db', dbPath]);
+    const run = runScript(['--old-key', OLD_HEX, '--new-key', NEW_HEX]);
     expect(run.stderr).toBe('');
     expect(run.status).toBe(0);
     // api key + client profile + relay token.
     expect(run.stdout).toContain('Rotated 3 value(s)');
 
-    const after = readSecrets();
+    const after = await readSecrets();
 
     expect(decryptWith(NEW_KEY, ...after.key)).toBe(API_KEY_SECRET);
     expect(decryptWith(NEW_KEY, ...after.profile)).toBe(PROFILE_SECRET);
@@ -118,10 +110,10 @@ describe('rotate-encryption-key CLI (end to end)', () => {
     expect(after.relay[0]).not.toBe(before.relay[0]);
   }, 60_000);
 
-  it('--dry-run reports the work without changing a single row', () => {
-    const before = readSecrets();
+  it('--dry-run reports the work without changing a single row', async () => {
+    const before = await readSecrets();
 
-    const run = runScript(['--old-key', OLD_HEX, '--new-key', NEW_HEX, '--db', dbPath, '--dry-run']);
+    const run = runScript(['--old-key', OLD_HEX, '--new-key', NEW_HEX, '--dry-run']);
     expect(run.stderr).toBe('');
     expect(run.status).toBe(0);
     expect(run.stdout).toContain('[dry-run] would rotate 3 value(s)');
@@ -129,20 +121,20 @@ describe('rotate-encryption-key CLI (end to end)', () => {
     // Plaintext is never printed in full.
     expect(run.stdout).not.toContain(API_KEY_SECRET);
 
-    const after = readSecrets();
+    const after = await readSecrets();
     expect(after).toEqual(before);
     // And the old key still opens everything.
     expect(decryptWith(OLD_KEY, ...after.key)).toBe(API_KEY_SECRET);
     expect(decryptWith(OLD_KEY, ...after.relay)).toBe(RELAY_TOKEN);
   }, 60_000);
 
-  it('exits non-zero and writes nothing when the old key is wrong', () => {
-    const before = readSecrets();
+  it('exits non-zero and writes nothing when the old key is wrong', async () => {
+    const before = await readSecrets();
 
-    const run = runScript(['--old-key', 'c'.repeat(64), '--new-key', NEW_HEX, '--db', dbPath]);
+    const run = runScript(['--old-key', 'c'.repeat(64), '--new-key', NEW_HEX]);
     expect(run.status).toBe(1);
     expect(run.stderr).toMatch(/cannot decrypt/);
 
-    expect(readSecrets()).toEqual(before);
+    expect(await readSecrets()).toEqual(before);
   }, 60_000);
 });

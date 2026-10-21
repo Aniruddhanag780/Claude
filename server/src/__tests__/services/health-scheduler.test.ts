@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
-import { initDb } from '../../db/index.js';
 import { startHealthChecker, stopHealthChecker, HEALTH_CHECK_INTERVAL_MS } from '../../services/health.js';
 import type { Scheduler } from '../../lib/scheduler.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 function makeScheduler() {
   const after: { ms: number; fn: () => void | Promise<void> }[] = [];
@@ -21,9 +21,9 @@ function makeScheduler() {
 }
 
 describe('startHealthChecker / stopHealthChecker', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   afterEach(() => {

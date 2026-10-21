@@ -10,10 +10,13 @@ const ENGINES = [
   { platform: 'linkup', engineId: 'linkup-search', displayName: 'Linkup Search', quotaLabel: '€5/month in credits', meta: { creditsPerQuery: 1, features: { news: false, answer: true, fullContent: false } } },
 ];
 
-export function seedSearchEngines(): void {
-  const insert = getDb().prepare(`
-    INSERT OR IGNORE INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
-    VALUES (?, ?, ?, 'search', ?, 1, ?, ?)
-  `);
-  ENGINES.forEach((e, i) => insert.run(e.platform, e.engineId, e.displayName, i, e.quotaLabel, JSON.stringify(e.meta)));
+export async function seedSearchEngines(): Promise<void> {
+  const db = getDb();
+  for (const [i, e] of ENGINES.entries()) {
+    await db.run(`
+      INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
+      VALUES (?, ?, ?, 'search', ?, 1, ?, ?)
+      ON CONFLICT DO NOTHING
+    `, [e.platform, e.engineId, e.displayName, i, e.quotaLabel, JSON.stringify(e.meta)]);
+  }
 }

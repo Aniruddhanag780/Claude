@@ -1,17 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { runTranscription, MediaError, listMediaModels, MAX_TRANSCRIPTION_BYTES } from '../../services/media.js';
 import { isOnCooldown, clearCooldownsForKey } from '../../services/ratelimit.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const realFetch = globalThis.fetch;
 
-function addKey(platform: string, raw = `${platform}-test-key`): number {
+async function addKey(platform: string, raw = `${platform}-test-key`): number {
   const { encrypted, iv, authTag } = encrypt(raw);
-  const row = getDb().prepare(`
+  const row = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'test', ?, ?, ?, 'healthy', 1)
-  `).run(platform, encrypted, iv, authTag);
+    VALUES (?, 'test', ?, ?, ?, 'healthy', 1) RETURNING id`, [platform, encrypted, iv, authTag]));
   return Number(row.lastInsertRowid);
 }
 
@@ -22,19 +22,19 @@ function jsonResponse(body: unknown, status = 200) {
 /** Seed the catalog-delivered STT registry (media_models, modality
  *  'transcription') exactly as the published `transcriptionModels` fragment
  *  would land it via catalog-sync. */
-function seedTranscriptionModels(): void {
-  const insert = getDb().prepare(`
+async function seedTranscriptionModels(): void {
+  (await getDb().run(`
     INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
-    VALUES (?, ?, ?, 'transcription', ?, 1, '', ?)
-  `);
-  insert.run('groq', 'whisper-large-v3-turbo', 'Whisper Large v3 Turbo (Groq)', 0,
-    JSON.stringify({ maxBytes: 25 * 1024 * 1024 }));
-  insert.run('groq', 'whisper-large-v3', 'Whisper Large v3 (Groq)', 1,
-    JSON.stringify({ maxBytes: 25 * 1024 * 1024 }));
-  insert.run('cloudflare', '@cf/openai/whisper-large-v3-turbo', 'Whisper Large v3 Turbo (Cloudflare Workers AI)', 2,
-    JSON.stringify({ subtitleFormats: ['vtt'], requestStyle: 'json' }));
-  insert.run('cloudflare', '@cf/openai/whisper', 'Whisper (Cloudflare Workers AI)', 3,
-    JSON.stringify({ subtitleFormats: ['vtt'], requestStyle: 'binary' }));
+    VALUES (?, ?, ?, 'transcription', ?, 1, '', ?) RETURNING id`, ['groq', 'whisper-large-v3-turbo', 'Whisper Large v3 Turbo (Groq)', 0, JSON.stringify({ maxBytes: 25 * 1024 * 1024 })]));
+  (await getDb().run(`
+    INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
+    VALUES (?, ?, ?, 'transcription', ?, 1, '', ?) RETURNING id`, ['groq', 'whisper-large-v3', 'Whisper Large v3 (Groq)', 1, JSON.stringify({ maxBytes: 25 * 1024 * 1024 })]));
+  (await getDb().run(`
+    INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
+    VALUES (?, ?, ?, 'transcription', ?, 1, '', ?) RETURNING id`, ['cloudflare', '@cf/openai/whisper-large-v3-turbo', 'Whisper Large v3 Turbo (Cloudflare Workers AI)', 2, JSON.stringify({ subtitleFormats: ['vtt'], requestStyle: 'json' })]));
+  (await getDb().run(`
+    INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
+    VALUES (?, ?, ?, 'transcription', ?, 1, '', ?) RETURNING id`, ['cloudflare', '@cf/openai/whisper', 'Whisper (Cloudflare Workers AI)', 3, JSON.stringify({ subtitleFormats: ['vtt'], requestStyle: 'binary' })]));
 }
 
 const AUDIO = Buffer.from('RIFFfakewavbytes');
@@ -50,13 +50,13 @@ function params(overrides: Record<string, unknown> = {}) {
 }
 
 describe('transcription service', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     // Cooldowns live in a module-level map that outlives the per-test :memory:
     // DB; key ids restart at 1 in every test, so stale entries must be purged.
-    for (let id = 1; id <= 10; id++) clearCooldownsForKey(id);
-    seedTranscriptionModels();
+    for (let id = 1; id <= 10; id++) await clearCooldownsForKey(id);
+    await seedTranscriptionModels();
   });
 
   afterEach(() => {
@@ -64,30 +64,28 @@ describe('transcription service', () => {
     vi.restoreAllMocks();
   });
 
-  it('registry: enabled DB rows ordered by priority, groq ahead of cloudflare', () => {
-    const rows = listMediaModels('transcription');
+  it('registry: enabled DB rows ordered by priority, groq ahead of cloudflare', async () => {
+    const rows = await listMediaModels('transcription');
     expect(rows.map(m => m.platform)).toEqual(['groq', 'groq', 'cloudflare', 'cloudflare']);
     expect(rows.map(m => m.model_id)).toContain('whisper-large-v3-turbo');
     expect(rows.map(m => m.model_id)).toContain('@cf/openai/whisper');
   });
 
   it('empty registry (never-synced install) → 503 no_transcription_models, no fetch', async () => {
-    getDb().prepare("DELETE FROM media_models WHERE modality = 'transcription'").run();
-    addKey('groq');
+    (await getDb().run("DELETE FROM media_models WHERE modality = 'transcription'"));
+    await addKey('groq');
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as any;
-    await expect(runTranscription('auto', params()))
+    await expect(await runTranscription('auto', params()))
       .rejects.toMatchObject({ status: 503, code: 'no_transcription_models' });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('a locally disabled row leaves the chain (pinning it → 400 unknown model)', async () => {
-    getDb()
-      .prepare("UPDATE media_models SET enabled = 0 WHERE model_id = 'whisper-large-v3'")
-      .run();
-    addKey('groq');
+    (await getDb().run("UPDATE media_models SET enabled = 0 WHERE model_id = 'whisper-large-v3'"));
+    await addKey('groq');
     globalThis.fetch = vi.fn(async () => jsonResponse({ text: 'ok' })) as any;
-    await expect(runTranscription('whisper-large-v3', params()))
+    await expect(await runTranscription('whisper-large-v3', params()))
       .rejects.toMatchObject({ status: 400 });
     // auto still routes via the remaining rows.
     const r = await runTranscription('auto', params());
@@ -95,7 +93,7 @@ describe('transcription service', () => {
   });
 
   it('groq: sends multipart form to the OpenAI-compatible audio endpoint', async () => {
-    addKey('groq');
+    await addKey('groq');
     const fetchMock = vi.fn(async () => jsonResponse({ text: 'hello world' }));
     globalThis.fetch = fetchMock as any;
 
@@ -124,7 +122,7 @@ describe('transcription service', () => {
   });
 
   it('groq: requests verbose_json upstream and passes segments through', async () => {
-    addKey('groq');
+    await addKey('groq');
     const segments = [{ id: 0, start: 0, end: 1.5, text: 'hello' }];
     const fetchMock = vi.fn(async () =>
       jsonResponse({ text: 'hello', language: 'en', duration: 1.5, segments }));
@@ -139,7 +137,7 @@ describe('transcription service', () => {
   });
 
   it('cloudflare @cf/openai/whisper: raw bytes body, account-scoped URL', async () => {
-    addKey('cloudflare', 'acct123:token456');
+    await addKey('cloudflare', 'acct123:token456');
     const fetchMock = vi.fn(async () =>
       jsonResponse({ result: { text: 'transcribed', word_count: 1, vtt: 'WEBVTT\n\n1' }, success: true }));
     globalThis.fetch = fetchMock as any;
@@ -158,7 +156,7 @@ describe('transcription service', () => {
   });
 
   it('cloudflare whisper-large-v3-turbo: JSON body with base64 audio', async () => {
-    addKey('cloudflare', 'acct123:token456');
+    await addKey('cloudflare', 'acct123:token456');
     const fetchMock = vi.fn(async () =>
       jsonResponse({ result: { text: 'turbo text', transcription_info: { language: 'en', duration: 2 } }, success: true }));
     globalThis.fetch = fetchMock as any;
@@ -178,8 +176,8 @@ describe('transcription service', () => {
   });
 
   it('falls back to cloudflare when groq returns 429, and benches the groq key', async () => {
-    const groqKeyId = addKey('groq');
-    addKey('cloudflare', 'acct123:token456');
+    const groqKeyId = await addKey('groq');
+    await addKey('cloudflare', 'acct123:token456');
     const fetchMock = vi.fn(async (url: string) => {
       if (String(url).includes('groq.com')) {
         return jsonResponse({ error: { message: 'rate limited' } }, 429);
@@ -192,8 +190,8 @@ describe('transcription service', () => {
     expect(r.platform).toBe('cloudflare');
     expect(r.text).toBe('cf fallback');
     // Both groq models were attempted and benched via the standard cooldown machinery.
-    expect(isOnCooldown('groq', 'whisper-large-v3-turbo', groqKeyId)).toBe(true);
-    expect(isOnCooldown('groq', 'whisper-large-v3', groqKeyId)).toBe(true);
+    expect(await isOnCooldown('groq', 'whisper-large-v3-turbo', groqKeyId)).toBe(true);
+    expect(await isOnCooldown('groq', 'whisper-large-v3', groqKeyId)).toBe(true);
 
     // A second request skips the benched groq key entirely.
     fetchMock.mockClear();
@@ -204,21 +202,21 @@ describe('transcription service', () => {
   });
 
   it("'whisper-1' routes like auto (stock OpenAI clients send it by default)", async () => {
-    addKey('groq');
+    await addKey('groq');
     globalThis.fetch = vi.fn(async () => jsonResponse({ text: 'ok' })) as any;
     const r = await runTranscription('whisper-1', params());
     expect(r.platform).toBe('groq');
   });
 
   it('unknown model → 400 MediaError', async () => {
-    addKey('groq');
-    await expect(runTranscription('not-a-model', params()))
+    await addKey('groq');
+    await expect(await runTranscription('not-a-model', params()))
       .rejects.toMatchObject({ status: 400 });
   });
 
   it('vtt restricts the chain to natively capable providers (cloudflare)', async () => {
-    addKey('groq');
-    addKey('cloudflare', 'acct123:token456');
+    await addKey('groq');
+    await addKey('cloudflare', 'acct123:token456');
     const fetchMock = vi.fn(async () =>
       jsonResponse({ result: { text: 'x', vtt: 'WEBVTT\n\n00:00.000 --> 00:01.000\nx' }, success: true }));
     globalThis.fetch = fetchMock as any;
@@ -231,18 +229,18 @@ describe('transcription service', () => {
   });
 
   it('vtt pinned to a groq model → 400 (not produced natively)', async () => {
-    addKey('groq');
-    await expect(runTranscription('whisper-large-v3', params({ responseFormat: 'vtt' })))
+    await addKey('groq');
+    await expect(await runTranscription('whisper-large-v3', params({ responseFormat: 'vtt' })))
       .rejects.toMatchObject({ status: 400 });
   });
 
   it('oversized file → 413 before any provider is called', async () => {
-    addKey('groq');
-    addKey('cloudflare', 'acct123:token456');
+    await addKey('groq');
+    await addKey('cloudflare', 'acct123:token456');
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as any;
     const big = Buffer.alloc(MAX_TRANSCRIPTION_BYTES + 1);
-    await expect(runTranscription('auto', params({ file: big })))
+    await expect(await runTranscription('auto', params({ file: big })))
       .rejects.toMatchObject({ status: 413 });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -250,7 +248,7 @@ describe('transcription service', () => {
   it('no usable keys → 503-family MediaError, no fetch', async () => {
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as any;
-    await expect(runTranscription('auto', params())).rejects.toBeInstanceOf(MediaError);
+    await expect(await runTranscription('auto', params())).rejects.toBeInstanceOf(MediaError);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -258,22 +256,20 @@ describe('transcription service', () => {
   // is bound to one api_keys row that carries the base_url —
   // getProviderCredential refuses to guess a key for 'custom', so the
   // candidate MUST carry key_id or the row is silently skipped.
-  function addCustomStt(model = 'local-whisper', secret = 'stt-secret', baseUrl = 'http://127.0.0.1:9911/v1'): number {
+  async function addCustomStt(model = 'local-whisper', secret = 'stt-secret', baseUrl = 'http://127.0.0.1:9911/v1'): number {
     const { encrypted, iv, authTag } = encrypt(secret);
-    const key = getDb().prepare(`
+    const key = (await getDb().run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
-      VALUES ('custom', 'Local STT', ?, ?, ?, 'unknown', 1, ?)
-    `).run(encrypted, iv, authTag, baseUrl);
+      VALUES ('custom', 'Local STT', ?, ?, ?, 'unknown', 1, ?) RETURNING id`, [encrypted, iv, authTag, baseUrl]));
     const keyId = Number(key.lastInsertRowid);
-    getDb().prepare(`
+    (await getDb().run(`
       INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, key_id)
-      VALUES ('custom', ?, 'Local Whisper', 'transcription', 99, 1, 'custom endpoint', ?)
-    `).run(model, keyId);
+      VALUES ('custom', ?, 'Local Whisper', 'transcription', 99, 1, 'custom endpoint', ?) RETURNING id`, [model, keyId]));
     return keyId;
   }
 
   it('custom: multipart POST to the endpoint\'s own /audio/transcriptions with its key', async () => {
-    addCustomStt();
+    await addCustomStt();
     const fetchMock = vi.fn(async () => jsonResponse({ text: 'local text', language: 'en', duration: 3 }));
     globalThis.fetch = fetchMock as any;
 
@@ -303,8 +299,8 @@ describe('transcription service', () => {
   it('custom: the row is NOT skipped for want of a key (key_id must reach getProviderCredential)', async () => {
     // No catalog rows at all: if the custom candidate dropped its key_id the
     // chain would come up empty and this would throw instead of transcribing.
-    getDb().prepare("DELETE FROM media_models WHERE platform IN ('groq', 'cloudflare')").run();
-    addCustomStt();
+    (await getDb().run("DELETE FROM media_models WHERE platform IN ('groq', 'cloudflare')"));
+    await addCustomStt();
     const fetchMock = vi.fn(async () => jsonResponse({ text: 'reached' }));
     globalThis.fetch = fetchMock as any;
 
@@ -315,7 +311,7 @@ describe('transcription service', () => {
   });
 
   it('custom: verbose_json is asked for upstream and segments pass through', async () => {
-    addCustomStt();
+    await addCustomStt();
     const segments = [{ id: 0, start: 0, end: 1, text: 'local text' }];
     const fetchMock = vi.fn(async () => jsonResponse({ text: 'local text', segments }));
     globalThis.fetch = fetchMock as any;
@@ -327,26 +323,24 @@ describe('transcription service', () => {
   });
 
   it('custom: an endpoint whose key row lost its base_url fails loudly, not silently', async () => {
-    const keyId = addCustomStt();
-    getDb().prepare('UPDATE api_keys SET base_url = NULL WHERE id = ?').run(keyId);
+    const keyId = await addCustomStt();
+    (await getDb().run('UPDATE api_keys SET base_url = NULL WHERE id = ?', [keyId]));
     globalThis.fetch = vi.fn() as any;
-    await expect(runTranscription('local-whisper', params()))
+    await expect(await runTranscription('local-whisper', params()))
       .rejects.toMatchObject({ status: 502 }); // chainError wraps the 500 adapter error
   });
 
   it("custom: vtt is refused — no custom row declares native subtitles", async () => {
-    addCustomStt();
-    await expect(runTranscription('local-whisper', params({ responseFormat: 'vtt' })))
+    await addCustomStt();
+    await expect(await runTranscription('local-whisper', params({ responseFormat: 'vtt' })))
       .rejects.toMatchObject({ status: 400 });
   });
 
   it('logs transcription requests with request_type=transcription', async () => {
-    addKey('groq');
+    await addKey('groq');
     globalThis.fetch = vi.fn(async () => jsonResponse({ text: 'logged' })) as any;
     await runTranscription('auto', params());
-    const row = getDb()
-      .prepare("SELECT platform, model_id, status, request_type FROM requests ORDER BY id DESC LIMIT 1")
-      .get() as any;
+    const row = (await getDb().get("SELECT platform, model_id, status, request_type FROM requests ORDER BY id DESC LIMIT 1")) as any;
     expect(row.platform).toBe('groq');
     expect(row.request_type).toBe('transcription');
     expect(row.status).toBe('success');

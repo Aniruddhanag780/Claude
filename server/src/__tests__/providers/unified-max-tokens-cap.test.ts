@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
-import { initDb, setSetting } from '../../db/index.js';
+import { setSetting } from '../../db/index.js';
 import { OpenAICompatProvider } from '../../providers/openai-compat.js';
 import { CloudflareProvider } from '../../providers/cloudflare.js';
 import { CohereProvider } from '../../providers/cohere.js';
 import { GoogleProvider } from '../../providers/google.js';
 import { AIHordeProvider } from '../../providers/aihorde.js';
+import { initTestDb } from '../helpers/test-db.js';
 import {
   defaultMaxTokensFor,
   UNIFIED_MAX_TOKENS_SETTING,
@@ -122,13 +123,13 @@ const ADAPTERS: Array<{
   },
 ];
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
-beforeEach(() => {
-  setSetting(UNIFIED_MAX_TOKENS_SETTING, 'off');
+beforeEach(async () => {
+  await setSetting(UNIFIED_MAX_TOKENS_SETTING, 'off');
 });
 
 afterEach(() => {
@@ -138,17 +139,17 @@ afterEach(() => {
 describe('the unified cap reaches every adapter', () => {
   for (const adapter of ADAPTERS) {
     it(`${adapter.name} clamps an excessive client max_tokens`, async () => {
-      setSetting(UNIFIED_MAX_TOKENS_SETTING, 'auto');
+      await setSetting(UNIFIED_MAX_TOKENS_SETTING, 'auto');
       expect(await adapter.send({ max_tokens: CLIENT_ASKED })).toBe(UNIFIED_MAX_TOKENS_AUTO);
     });
 
     it(`${adapter.name} honors an explicit integer cap`, async () => {
-      setSetting(UNIFIED_MAX_TOKENS_SETTING, '4096');
+      await setSetting(UNIFIED_MAX_TOKENS_SETTING, '4096');
       expect(await adapter.send({ max_tokens: CLIENT_ASKED })).toBe(4096);
     });
 
     it(`${adapter.name} leaves a value below the cap alone`, async () => {
-      setSetting(UNIFIED_MAX_TOKENS_SETTING, '4096');
+      await setSetting(UNIFIED_MAX_TOKENS_SETTING, '4096');
       expect(await adapter.send({ max_tokens: 512 })).toBe(512);
     });
 
@@ -161,28 +162,28 @@ describe('the unified cap reaches every adapter', () => {
 describe('the cap applies to values the client never sent', () => {
   it("clamps cloudflare's platform default (#553) when the cap is lower", async () => {
     const cfDefault = defaultMaxTokensFor('cloudflare')!;
-    setSetting(UNIFIED_MAX_TOKENS_SETTING, String(cfDefault - 1));
+    await setSetting(UNIFIED_MAX_TOKENS_SETTING, String(cfDefault - 1));
     const cap = captureBody(openAiJsonResponse);
     await new CloudflareProvider().chatCompletion('acct:token', MESSAGES, '@cf/openai/gpt-oss-120b');
     expect(cap.body().max_tokens).toBe(cfDefault - 1);
   });
 
   it("clamps aihorde's own default", async () => {
-    setSetting(UNIFIED_MAX_TOKENS_SETTING, '64');
+    await setSetting(UNIFIED_MAX_TOKENS_SETTING, '64');
     const cap = captureBody(hordeJsonResponse);
     await new AIHordeProvider().chatCompletion('no-key', MESSAGES, 'm');
     expect(cap.body().max_tokens).toBe(64);
   });
 
   it("never drops aihorde below the proxy's 16-token floor", async () => {
-    setSetting(UNIFIED_MAX_TOKENS_SETTING, '4');
+    await setSetting(UNIFIED_MAX_TOKENS_SETTING, '4');
     const cap = captureBody(hordeJsonResponse);
     await new AIHordeProvider().chatCompletion('no-key', MESSAGES, 'm', { max_tokens: 1000 });
     expect(cap.body().max_tokens).toBe(16);
   });
 
   it('still omits max_tokens for a platform with no default', async () => {
-    setSetting(UNIFIED_MAX_TOKENS_SETTING, 'auto');
+    await setSetting(UNIFIED_MAX_TOKENS_SETTING, 'auto');
     const cap = captureBody(openAiJsonResponse);
     const p = new OpenAICompatProvider({ platform: 'groq', name: 'Groq', baseUrl: 'https://api.test.com/v1' });
     await p.chatCompletion('sk-test', MESSAGES, 'llama-3.3-70b');

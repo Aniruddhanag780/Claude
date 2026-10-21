@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+import { initTestDb } from '../helpers/test-db.js';
 
 const validateKey = vi.fn();
 vi.mock('../../providers/index.js', async (importOriginal) => {
@@ -9,7 +10,7 @@ vi.mock('../../providers/index.js', async (importOriginal) => {
   };
 });
 
-const { initDb, getDb } = await import('../../db/index.js');
+const { getDb } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const {
   checkKeyHealth,
@@ -27,9 +28,9 @@ const {
 describe('last_healthy_at (#1493)', () => {
   let nextId = 8200;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
   beforeEach(() => {
@@ -40,82 +41,80 @@ describe('last_healthy_at (#1493)', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
   });
 
-  function seedKey(status: string): number {
+  async function seedKey(status: string): number {
     const id = ++nextId;
     const enc = encrypt(`last-healthy-${id}`);
-    getDb().prepare(`
+    (await getDb().run(`
       INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, enabled, status)
-      VALUES (?, 'mistral', ?, ?, ?, ?, 1, ?)
-    `).run(id, `lh-${id}`, enc.encrypted, enc.iv, enc.authTag, status);
+      VALUES (?, 'mistral', ?, ?, ?, ?, 1, ?) RETURNING id`, [id, `lh-${id}`, enc.encrypted, enc.iv, enc.authTag, status]));
     return id;
   }
 
-  function row(id: number): { last_healthy_at: string | null; last_checked_at: string | null; status: string } {
-    return getDb().prepare('SELECT last_healthy_at, last_checked_at, status FROM api_keys WHERE id = ?')
-      .get(id) as any;
+  async function row(id: number): { last_healthy_at: string | null; last_checked_at: string | null; status: string } {
+    return (await getDb().get('SELECT last_healthy_at, last_checked_at, status FROM api_keys WHERE id = ?', [id])) as any;
   }
 
   it('a valid probe stamps last_healthy_at', async () => {
-    const id = seedKey('unknown');
+    const id = await seedKey('unknown');
     validateKey.mockResolvedValue(true);
 
     expect(await checkKeyHealth(id)).toBe('healthy');
-    expect(row(id).last_healthy_at).not.toBeNull();
+    expect((await row(id)).last_healthy_at).not.toBeNull();
   });
 
   it('an invalid verdict stamps last_checked_at but NOT last_healthy_at', async () => {
-    const id = seedKey('healthy');
+    const id = await seedKey('healthy');
     validateKey.mockResolvedValue(false);
 
     expect(await checkKeyHealth(id)).toBe('invalid');
-    expect(row(id).last_checked_at).not.toBeNull();
-    expect(row(id).last_healthy_at).toBeNull();
+    expect((await row(id)).last_checked_at).not.toBeNull();
+    expect((await row(id)).last_healthy_at).toBeNull();
   });
 
   it('a transport error refreshes last_checked_at but NOT last_healthy_at', async () => {
-    const id = seedKey('healthy');
+    const id = await seedKey('healthy');
     validateKey.mockRejectedValue(new Error('getaddrinfo ENOTFOUND api.mistral.ai'));
 
     expect(await checkKeyHealth(id)).toBe('healthy');
-    expect(row(id).last_checked_at).not.toBeNull();
+    expect((await row(id)).last_checked_at).not.toBeNull();
     // This is exactly the #1493 gap: checked recently, never proven to work.
-    expect(row(id).last_healthy_at).toBeNull();
+    expect((await row(id)).last_healthy_at).toBeNull();
   });
 
   it('a served request stamps last_healthy_at even on an already-healthy key', async () => {
     // The probe path never touched this key's last_healthy_at (transport-error
     // streak), and its status is healthy — the stamp must fire regardless of
     // current status, or the #1459 providers (no probes at all) never get one.
-    const id = seedKey('healthy');
-    expect(row(id).last_healthy_at).toBeNull();
+    const id = await seedKey('healthy');
+    expect((await row(id)).last_healthy_at).toBeNull();
 
     markKeyHealthyFromRequest(id);
 
-    expect(row(id).last_healthy_at).not.toBeNull();
-    expect(row(id).status).toBe('healthy');
+    expect((await row(id)).last_healthy_at).not.toBeNull();
+    expect((await row(id)).status).toBe('healthy');
   });
 
   it('the traffic stamp is throttled in memory (no per-request DB write)', async () => {
-    const id = seedKey('error');
+    const id = await seedKey('error');
 
     // First call stamps; a second immediate call must skip the write. Prove it
     // by nulling the column in between: only a real second write would refill it.
     markKeyHealthyFromRequest(id);
-    expect(row(id).last_healthy_at).not.toBeNull();
-    getDb().prepare('UPDATE api_keys SET last_healthy_at = NULL WHERE id = ?').run(id);
+    expect((await row(id)).last_healthy_at).not.toBeNull();
+    (await getDb().run('UPDATE api_keys SET last_healthy_at = NULL WHERE id = ?', [id]));
 
     markKeyHealthyFromRequest(id);
-    expect(row(id).last_healthy_at).toBeNull();
+    expect((await row(id)).last_healthy_at).toBeNull();
 
     // After clearing the throttle state, the next call stamps again.
     clearLastHealthyStampState();
     markKeyHealthyFromRequest(id);
-    expect(row(id).last_healthy_at).not.toBeNull();
+    expect((await row(id)).last_healthy_at).not.toBeNull();
   });
 
-  it('markKeyHealthyFromRequest still promotes error/unknown keys', () => {
-    const id = seedKey('error');
+  it('markKeyHealthyFromRequest still promotes error/unknown keys', async () => {
+    const id = await seedKey('error');
     markKeyHealthyFromRequest(id);
-    expect(row(id).status).toBe('healthy');
+    expect((await row(id)).status).toBe('healthy');
   });
 });

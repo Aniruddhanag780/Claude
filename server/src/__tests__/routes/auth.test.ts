@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function call(app: Express, method: string, path: string, body?: any, token?: string) {
   const server = app.listen(0, '127.0.0.1');
@@ -24,9 +24,9 @@ async function call(app: Express, method: string, path: string, body?: any, toke
 // real bootstrap sequence: needs-setup → setup → gated access → login → logout.
 describe('Dashboard auth (#35)', () => {
   let app: Express;
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
   });
 

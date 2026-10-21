@@ -8,17 +8,17 @@ import { describe, it, expect, beforeAll, vi } from 'vitest';
 
 vi.mock('../../services/health.js', () => ({ checkKeyHealth: vi.fn() }));
 
-import { initDb } from '../../db/index.js';
 import {
   isProviderBadRequestError,
   isProviderDegradedError,
   isRetryableError,
 } from '../../lib/error-classify.js';
 import { classifyAttemptError, exhaustedRetryError } from '../../lib/fallback-loop.js';
+import { initTestDb } from '../helpers/test-db.js';
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.ENCRYPTION_KEY = '0'.repeat(64);
-  initDb(':memory:');
+  await initTestDb();
 });
 
 function nimDegraded400(): Error & { status?: number } {
@@ -62,16 +62,16 @@ describe('degraded 400 classification', () => {
 });
 
 describe('exhaustedRetryError on a degraded last error', () => {
-  it('renders 503 service_unavailable instead of 400 invalid_request_error', () => {
-    const body = exhaustedRetryError(nimDegraded400(), 3);
+  it('renders 503 service_unavailable instead of 400 invalid_request_error', async () => {
+    const body = await exhaustedRetryError(nimDegraded400(), 3);
     expect(body.status).toBe(503);
     expect(body.type).toBe('service_unavailable');
     expect(body.kind).toBe('unavailable');
     expect(body.message).toContain('degraded');
   });
 
-  it('still renders 400 invalid_request_error for a genuine whole-chain bad request', () => {
-    const body = exhaustedRetryError(plainBadRequest400(), 3);
+  it('still renders 400 invalid_request_error for a genuine whole-chain bad request', async () => {
+    const body = await exhaustedRetryError(plainBadRequest400(), 3);
     expect(body.status).toBe(400);
     expect(body.type).toBe('invalid_request_error');
   });

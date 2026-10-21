@@ -1,9 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { logRequest } from '../../lib/request-log.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -22,16 +23,15 @@ async function request(app: Express, path: string) {
   return { status: res.status, body: data };
 }
 
-function insertRequest(createdAt: string) {
+async function insertRequest(createdAt: string) {
   const db = getDb();
-  db.prepare(`
+  (await db.run(`
     INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, error, created_at)
-    VALUES ('test', 'test-model', 'success', 1, 2, 3, NULL, ?)
-  `).run(createdAt);
-  upsertAggregate(db, createdAt, 'success', 1, 2);
+    VALUES ('test', 'test-model', 'success', 1, 2, 3, NULL, ?) RETURNING id`, [createdAt]));
+  await upsertAggregate(db, createdAt, 'success', 1, 2);
 }
 
-function insertTokensRequest(
+async function insertTokensRequest(
   platform: string,
   modelId: string,
   status: 'success' | 'error',
@@ -40,17 +40,16 @@ function insertTokensRequest(
   createdAt: string,
 ) {
   const db = getDb();
-  db.prepare(`
+  (await db.run(`
     INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, error, created_at)
-    VALUES (?, ?, ?, ?, ?, 3, NULL, ?)
-  `).run(platform, modelId, status, inputTokens, outputTokens, createdAt);
-  upsertAggregate(db, createdAt, status, inputTokens, outputTokens);
+    VALUES (?, ?, ?, ?, ?, 3, NULL, ?) RETURNING id`, [platform, modelId, status, inputTokens, outputTokens, createdAt]));
+  await upsertAggregate(db, createdAt, status, inputTokens, outputTokens);
 }
 
 // Mirror the production aggregates written by lib/request-log.logRequest so the
 // summary endpoint (which now reads from request_hourly + settings) stays
 // faithful to what real traffic produces.
-function upsertAggregate(
+async function upsertAggregate(
   db: ReturnType<typeof getDb>,
   createdAt: string,
   status: 'success' | 'error',
@@ -63,42 +62,47 @@ function upsertAggregate(
   const hour = createdAt.slice(0, 13) + ':00:00';
   const isSuccess = status === 'success' ? 1 : 0;
   const isError = status === 'error' ? 1 : 0;
-  db.prepare(`
+  (await db.run(`
     INSERT INTO request_hourly (hour, total_requests, success_count, error_count, input_tokens, output_tokens)
     VALUES (?, 1, ?, ?, ?, ?)
     ON CONFLICT(hour) DO UPDATE SET
-      total_requests = total_requests + 1,
-      success_count  = success_count + ?,
-      error_count    = error_count + ?,
-      input_tokens   = input_tokens + ?,
-      output_tokens  = output_tokens + ?
-  `).run(hour, isSuccess, isError, inputTokens, outputTokens, isSuccess, isError, inputTokens, outputTokens);
+      total_requests = request_hourly.total_requests + 1,
+      success_count  = request_hourly.success_count + ?,
+      error_count    = request_hourly.error_count + ?,
+      input_tokens   = request_hourly.input_tokens + ?,
+      output_tokens  = request_hourly.output_tokens + ?
+  `, [hour, isSuccess, isError, inputTokens, outputTokens, isSuccess, isError, inputTokens, outputTokens]));
 
-  const incr = db.prepare(`
+  (await db.run(`
     INSERT INTO settings (key, value) VALUES (?, ?)
-    ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ? AS TEXT)
-  `);
-  incr.run('total_requests', '1', 1);
-  incr.run('total_input_tokens', String(inputTokens), inputTokens);
-  incr.run('total_output_tokens', String(outputTokens), outputTokens);
-  db.prepare(`INSERT INTO settings (key, value) VALUES ('first_request_at', ?)
-    ON CONFLICT(key) DO NOTHING`).run(createdAt);
+    ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(settings.value AS INTEGER) + ? AS TEXT)
+  `, ['total_requests', '1', 1]));
+  (await db.run(`
+    INSERT INTO settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(settings.value AS INTEGER) + ? AS TEXT)
+  `, ['total_input_tokens', String(inputTokens), inputTokens]));
+  (await db.run(`
+    INSERT INTO settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(settings.value AS INTEGER) + ? AS TEXT)
+  `, ['total_output_tokens', String(outputTokens), outputTokens]));
+  (await db.run(`INSERT INTO settings (key, value) VALUES ('first_request_at', ?)
+    ON CONFLICT(key) DO NOTHING`, [createdAt]));
 }
 
 describe('Analytics API', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
   });
 
-  beforeEach(() => {
-    getDb().prepare('DELETE FROM requests').run();
-    getDb().prepare('DELETE FROM request_hourly').run();
-    getDb().prepare(`DELETE FROM settings WHERE key IN ('total_requests','total_input_tokens','total_output_tokens','first_request_at')`).run();
+  beforeEach(async () => {
+    (await getDb().run('DELETE FROM requests'));
+    (await getDb().run('DELETE FROM request_hourly'));
+    (await getDb().run(`DELETE FROM settings WHERE key IN ('total_requests','total_input_tokens','total_output_tokens','first_request_at')`));
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
   });
@@ -108,9 +112,9 @@ describe('Analytics API', () => {
   });
 
   it('uses a rolling 24-hour window for summary analytics', async () => {
-    insertRequest('2026-05-28 11:59:59');
-    insertRequest('2026-05-28 12:00:00');
-    insertRequest('2026-05-29 11:59:59');
+    await insertRequest('2026-05-28 11:59:59');
+    await insertRequest('2026-05-28 12:00:00');
+    await insertRequest('2026-05-29 11:59:59');
 
     const { status, body } = await request(app, '/api/analytics/summary?range=24h');
 
@@ -124,9 +128,9 @@ describe('Analytics API', () => {
     ['7d', '2026-05-22 11:59:59', '2026-05-22 12:00:00'],
     ['30d', '2026-04-29 11:59:59', '2026-04-29 12:00:00'],
   ])('uses a rolling %s window for summary analytics', async (range, outside, boundary) => {
-    insertRequest(outside);
-    insertRequest(boundary);
-    insertRequest('2026-05-29 11:59:59');
+    await insertRequest(outside);
+    await insertRequest(boundary);
+    await insertRequest('2026-05-29 11:59:59');
 
     const { status, body } = await request(app, `/api/analytics/summary?range=${range}`);
 
@@ -144,16 +148,14 @@ describe('Analytics API', () => {
   // and getSinceTimestamp() agree on "now".
   it('logRequest writes space-format hour keys and they round-trip through summary', async () => {
     vi.useRealTimers();
-    logRequest('groq', 'llama-3.3-70b-versatile', 0, 'success', 100, 50, 12, null);
-    logRequest('groq', 'llama-3.3-70b-versatile', 0, 'success', 200, 70, 15, null);
-    logRequest('groq', 'llama-3.3-70b-versatile', 0, 'error', 30, 0, 9, 'boom');
+    await logRequest('groq', 'llama-3.3-70b-versatile', 0, 'success', 100, 50, 12, null);
+    await logRequest('groq', 'llama-3.3-70b-versatile', 0, 'success', 200, 70, 15, null);
+    await logRequest('groq', 'llama-3.3-70b-versatile', 0, 'error', 30, 0, 9, 'boom');
 
     // Tight, clock-independent guard: the stored key must match SQLite's
     // created_at text shape (space separator), never a 'T'. A 'T' here is the
     // exact desync that made the summary undercount the boundary day.
-    const hours = getDb()
-      .prepare('SELECT hour FROM request_hourly')
-      .all() as Array<{ hour: string }>;
+    const hours = (await getDb().all('SELECT hour FROM request_hourly')) as Array<{ hour: string }>;
     expect(hours.length).toBeGreaterThanOrEqual(1); // normally 1 bucket; >1 only if the run straddled an hour tick
     for (const { hour } of hours) {
       expect(hour).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:00:00$/);
@@ -172,9 +174,9 @@ describe('Analytics API', () => {
 
   it("counts 'canceled' rows in totals but in no success/error rate (#752)", async () => {
     vi.useRealTimers();
-    logRequest('groq', 'llama-3.3-70b-versatile', 0, 'success', 100, 50, 12, null);
-    logRequest('groq', 'llama-3.3-70b-versatile', 0, 'error', 30, 0, 9, 'boom');
-    logRequest('groq', 'llama-3.3-70b-versatile', 0, 'canceled', 0, 0, 800,
+    await logRequest('groq', 'llama-3.3-70b-versatile', 0, 'success', 100, 50, 12, null);
+    await logRequest('groq', 'llama-3.3-70b-versatile', 0, 'error', 30, 0, 9, 'boom');
+    await logRequest('groq', 'llama-3.3-70b-versatile', 0, 'canceled', 0, 0, 800,
       'client disconnected after 0.8s; upstream request canceled');
 
     const summary = await request(app, '/api/analytics/summary?range=24h');
@@ -194,7 +196,7 @@ describe('Analytics API', () => {
   it('prices savings at the served model paid-equivalent rate', async () => {
     // groq/llama-3.3-70b-versatile is mapped at $0.10/M in, $0.32/M out
     // (db/model-pricing.ts): 10M in + 5M out → 1.00 + 1.60 = $2.60
-    insertTokensRequest('groq', 'llama-3.3-70b-versatile', 'success', 10_000_000, 5_000_000, '2026-05-29 11:00:00');
+    await insertTokensRequest('groq', 'llama-3.3-70b-versatile', 'success', 10_000_000, 5_000_000, '2026-05-29 11:00:00');
 
     const { status, body } = await request(app, '/api/analytics/summary?range=24h');
 
@@ -206,7 +208,7 @@ describe('Analytics API', () => {
 
   it('falls back to modest default pricing for unmapped models', async () => {
     // Unknown model → $0.20/M in, $0.80/M out: 10M in + 5M out → 2.00 + 4.00 = $6.00
-    insertTokensRequest('custom', 'mystery-model', 'success', 10_000_000, 5_000_000, '2026-05-29 11:00:00');
+    await insertTokensRequest('custom', 'mystery-model', 'success', 10_000_000, 5_000_000, '2026-05-29 11:00:00');
 
     const { status, body } = await request(app, '/api/analytics/summary?range=24h');
 
@@ -215,7 +217,7 @@ describe('Analytics API', () => {
   });
 
   it('excludes failed requests from savings', async () => {
-    insertTokensRequest('groq', 'llama-3.3-70b-versatile', 'error', 10_000_000, 0, '2026-05-29 11:00:00');
+    await insertTokensRequest('groq', 'llama-3.3-70b-versatile', 'error', 10_000_000, 0, '2026-05-29 11:00:00');
 
     const { status, body } = await request(app, '/api/analytics/summary?range=24h');
 
@@ -224,7 +226,7 @@ describe('Analytics API', () => {
   });
 
   it('returns per-model estimated cost in the by-model breakdown', async () => {
-    insertTokensRequest('groq', 'llama-3.3-70b-versatile', 'success', 10_000_000, 5_000_000, '2026-05-29 11:00:00');
+    await insertTokensRequest('groq', 'llama-3.3-70b-versatile', 'success', 10_000_000, 5_000_000, '2026-05-29 11:00:00');
 
     const { status, body } = await request(app, '/api/analytics/by-model?range=24h');
 
@@ -233,18 +235,17 @@ describe('Analytics API', () => {
   });
 
   describe('pinned vs auto tracking', () => {
-    function insertPinnedRequest(modelId: string, requestedModel: string | null, createdAt: string) {
-      getDb().prepare(`
+    async function insertPinnedRequest(modelId: string, requestedModel: string | null, createdAt: string) {
+      (await getDb().run(`
         INSERT INTO requests (platform, model_id, requested_model, status, input_tokens, output_tokens, latency_ms, error, created_at)
-        VALUES ('test', ?, ?, 'success', 1, 2, 3, NULL, ?)
-      `).run(modelId, requestedModel, createdAt);
-      upsertAggregate(getDb(), createdAt, 'success', 1, 2);
+        VALUES ('test', ?, ?, 'success', 1, 2, 3, NULL, ?) RETURNING id`, [modelId, requestedModel, createdAt]));
+      await upsertAggregate(getDb(), createdAt, 'success', 1, 2);
     }
 
     it('summary splits pinned, honored, and auto requests', async () => {
-      insertPinnedRequest('model-a', 'model-a', '2026-05-29 11:00:00'); // pin honored
-      insertPinnedRequest('model-b', 'model-a', '2026-05-29 11:01:00'); // pin overridden by failover
-      insertPinnedRequest('model-b', null, '2026-05-29 11:02:00');      // auto-routed
+      await insertPinnedRequest('model-a', 'model-a', '2026-05-29 11:00:00'); // pin honored
+      await insertPinnedRequest('model-b', 'model-a', '2026-05-29 11:01:00'); // pin overridden by failover
+      await insertPinnedRequest('model-b', null, '2026-05-29 11:02:00');      // auto-routed
 
       const { status, body } = await request(app, '/api/analytics/summary?range=24h');
 
@@ -255,9 +256,9 @@ describe('Analytics API', () => {
     });
 
     it('by-model counts only requests the model served because it was pinned', async () => {
-      insertPinnedRequest('model-a', 'model-a', '2026-05-29 11:00:00'); // pinned + served
-      insertPinnedRequest('model-a', null, '2026-05-29 11:01:00');      // auto, same model
-      insertPinnedRequest('model-a', 'model-x', '2026-05-29 11:02:00'); // failover landed here
+      await insertPinnedRequest('model-a', 'model-a', '2026-05-29 11:00:00'); // pinned + served
+      await insertPinnedRequest('model-a', null, '2026-05-29 11:01:00');      // auto, same model
+      await insertPinnedRequest('model-a', 'model-x', '2026-05-29 11:02:00'); // failover landed here
 
       const { status, body } = await request(app, '/api/analytics/by-model?range=24h');
 
@@ -272,7 +273,7 @@ describe('Analytics API', () => {
   // per-row latency). These feed the latency-percentile, TTFT, per-type, and
   // per-key analytics that only exist on the raw table. No aggregate upsert:
   // these tests assert the raw-scoped fields, not the hourly totals.
-  function insertRaw(opts: {
+  async function insertRaw(opts: {
     platform?: string;
     modelId?: string;
     keyId?: number | null;
@@ -298,10 +299,9 @@ describe('Analytics API', () => {
       error = null,
       createdAt,
     } = opts;
-    getDb().prepare(`
+    (await getDb().run(`
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, ttfb_ms, request_type, error, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(platform, modelId, keyId, status, inputTokens, outputTokens, latencyMs, ttfbMs, requestType, error, createdAt);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`, [platform, modelId, keyId, status, inputTokens, outputTokens, latencyMs, ttfbMs, requestType, error, createdAt]));
   }
 
   describe('extended summary fields', () => {
@@ -309,7 +309,7 @@ describe('Analytics API', () => {
       // Latencies 10..100 in a 24h window → p50 = 50, p95 = 90 (nearest-rank),
       // avg = 55.
       for (let ms = 10; ms <= 100; ms += 10) {
-        insertRaw({ latencyMs: ms, createdAt: '2026-05-29 11:00:00' });
+        await insertRaw({ latencyMs: ms, createdAt: '2026-05-29 11:00:00' });
       }
 
       const { status, body } = await request(app, '/api/analytics/summary?range=24h');
@@ -330,9 +330,9 @@ describe('Analytics API', () => {
     });
 
     it('averages TTFT over rows that recorded it and ignores NULL ttfb', async () => {
-      insertRaw({ ttfbMs: 100, createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ ttfbMs: 200, createdAt: '2026-05-29 11:01:00' });
-      insertRaw({ ttfbMs: null, createdAt: '2026-05-29 11:02:00' });
+      await insertRaw({ ttfbMs: 100, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ ttfbMs: 200, createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ ttfbMs: null, createdAt: '2026-05-29 11:02:00' });
 
       const { status, body } = await request(app, '/api/analytics/summary?range=24h');
 
@@ -341,9 +341,9 @@ describe('Analytics API', () => {
     });
 
     it('splits requests into chat and embedding counts', async () => {
-      insertRaw({ requestType: 'chat', createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ requestType: 'chat', createdAt: '2026-05-29 11:01:00' });
-      insertRaw({ requestType: 'embedding', createdAt: '2026-05-29 11:02:00' });
+      await insertRaw({ requestType: 'chat', createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ requestType: 'chat', createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ requestType: 'embedding', createdAt: '2026-05-29 11:02:00' });
 
       const { status, body } = await request(app, '/api/analytics/summary?range=24h');
 
@@ -355,8 +355,8 @@ describe('Analytics API', () => {
   describe('extended by-platform fields', () => {
     it('adds p95 latency, avg TTFT, error count, and tokens/sec per platform', async () => {
       // groq: 1 success (100ms, ttfb 20, 1000 out tok) + 1 error (300ms, ttfb 40).
-      insertRaw({ platform: 'groq', status: 'success', outputTokens: 1000, latencyMs: 100, ttfbMs: 20, createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'groq', status: 'error', outputTokens: 0, latencyMs: 300, ttfbMs: 40, error: 'boom', createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ platform: 'groq', status: 'success', outputTokens: 1000, latencyMs: 100, ttfbMs: 20, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'groq', status: 'error', outputTokens: 0, latencyMs: 300, ttfbMs: 40, error: 'boom', createdAt: '2026-05-29 11:01:00' });
 
       const { status, body } = await request(app, '/api/analytics/by-platform?range=24h');
 
@@ -370,7 +370,7 @@ describe('Analytics API', () => {
     });
 
     it('reports null TTFT and tokens/sec when no rows qualify', async () => {
-      insertRaw({ platform: 'nokey', status: 'success', outputTokens: 0, latencyMs: 0, ttfbMs: null, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'nokey', status: 'success', outputTokens: 0, latencyMs: 0, ttfbMs: null, createdAt: '2026-05-29 11:00:00' });
 
       const { status, body } = await request(app, '/api/analytics/by-platform?range=24h');
 
@@ -383,21 +383,20 @@ describe('Analytics API', () => {
 
   describe('by-key endpoint', () => {
     it('groups usage per key, joins the label, and keeps deleted keys', async () => {
-      getDb().prepare('DELETE FROM api_keys').run();
-      getDb().prepare(`
+      (await getDb().run('DELETE FROM api_keys'));
+      (await getDb().run(`
         INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag)
-        VALUES (1, 'groq', 'Prod key', 'x', 'x', 'x')
-      `).run();
+        VALUES (1, 'groq', 'Prod key', 'x', 'x', 'x') RETURNING id`));
 
       // key 1 (exists): 3 rows, 2 success + 1 error, latency 100/200/300.
-      insertRaw({ keyId: 1, status: 'success', inputTokens: 10, outputTokens: 5, latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ keyId: 1, status: 'success', inputTokens: 20, outputTokens: 7, latencyMs: 200, createdAt: '2026-05-29 11:01:00' });
-      insertRaw({ keyId: 1, status: 'error', inputTokens: 0, outputTokens: 0, latencyMs: 300, error: 'boom', createdAt: '2026-05-29 11:02:00' });
+      await insertRaw({ keyId: 1, status: 'success', inputTokens: 10, outputTokens: 5, latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ keyId: 1, status: 'success', inputTokens: 20, outputTokens: 7, latencyMs: 200, createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ keyId: 1, status: 'error', inputTokens: 0, outputTokens: 0, latencyMs: 300, error: 'boom', createdAt: '2026-05-29 11:02:00' });
       // key 99 (deleted — no api_keys row): 2 rows.
-      insertRaw({ keyId: 99, status: 'success', latencyMs: 50, createdAt: '2026-05-29 11:03:00' });
-      insertRaw({ keyId: 99, status: 'success', latencyMs: 50, createdAt: '2026-05-29 11:04:00' });
+      await insertRaw({ keyId: 99, status: 'success', latencyMs: 50, createdAt: '2026-05-29 11:03:00' });
+      await insertRaw({ keyId: 99, status: 'success', latencyMs: 50, createdAt: '2026-05-29 11:04:00' });
       // key_id NULL row must be excluded entirely.
-      insertRaw({ keyId: null, status: 'success', createdAt: '2026-05-29 11:05:00' });
+      await insertRaw({ keyId: null, status: 'success', createdAt: '2026-05-29 11:05:00' });
 
       const { status, body } = await request(app, '/api/analytics/by-key?range=24h');
 
@@ -422,8 +421,8 @@ describe('Analytics API', () => {
 
   describe('timeline tzOffset', () => {
     it('buckets timeline days by the viewer timezone instead of UTC', async () => {
-      insertRequest('2026-05-28 15:30:00'); // UTC day 05-28; UTC+8 23:30, still day 05-28
-      insertRequest('2026-05-28 17:30:00'); // UTC day 05-28; UTC+8 01:30 on day 05-29
+      await insertRequest('2026-05-28 15:30:00'); // UTC day 05-28; UTC+8 23:30, still day 05-28
+      await insertRequest('2026-05-28 17:30:00'); // UTC day 05-28; UTC+8 01:30 on day 05-29
 
       const utc = await request(app, '/api/analytics/timeline?range=7d');
       expect(utc.status).toBe(200);
@@ -436,7 +435,7 @@ describe('Analytics API', () => {
     });
 
     it('shifts hour labels to the viewer timezone', async () => {
-      insertRequest('2026-05-28 17:30:00'); // UTC 17:00 → UTC+8 next-day 01:00
+      await insertRequest('2026-05-28 17:30:00'); // UTC 17:00 → UTC+8 next-day 01:00
 
       const { status, body } = await request(app, '/api/analytics/timeline?range=24h&tzOffset=480');
       expect(status).toBe(200);
@@ -444,7 +443,7 @@ describe('Analytics API', () => {
     });
 
     it('falls back to UTC bucketing for an invalid tzOffset', async () => {
-      insertRequest('2026-05-28 17:30:00');
+      await insertRequest('2026-05-28 17:30:00');
 
       for (const bad of ['abc', '9999', '1.5', '480; DROP TABLE request_hourly']) {
         const { status, body } = await request(app, `/api/analytics/timeline?range=7d&tzOffset=${encodeURIComponent(bad)}`);
@@ -456,9 +455,9 @@ describe('Analytics API', () => {
 
   describe('90d range', () => {
     it('accepts range=90d across the analytics endpoints', async () => {
-      insertRequest('2026-02-01 12:00:00'); // ~117 days ago — outside 90d
-      insertRequest('2026-03-15 12:00:00'); // ~75 days ago — inside 90d
-      insertRequest('2026-05-29 11:00:00'); // today — inside 90d
+      await insertRequest('2026-02-01 12:00:00'); // ~117 days ago — outside 90d
+      await insertRequest('2026-03-15 12:00:00'); // ~75 days ago — inside 90d
+      await insertRequest('2026-05-29 11:00:00'); // today — inside 90d
 
       const summary = await request(app, '/api/analytics/summary?range=90d');
       expect(summary.status).toBe(200);
@@ -487,37 +486,35 @@ describe('Analytics API', () => {
   describe('custom endpoint identifiers (#889)', () => {
     // Seed a custom endpoint key and return its id. base_url is the endpoint
     // identity; the credential itself is a placeholder (never read here).
-    function insertCustomKey(id: number, baseUrl: string, label: string): void {
-      getDb().prepare(`
+    async function insertCustomKey(id: number, baseUrl: string, label: string): void {
+      (await getDb().run(`
         INSERT INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, base_url)
-        VALUES (?, 'custom', ?, 'x', 'x', 'x', ?)
-      `).run(id, label, baseUrl);
+        VALUES (?, 'custom', ?, 'x', 'x', 'x', ?) RETURNING id`, [id, label, baseUrl]));
     }
 
     // A model row belonging to ONE endpoint (#651): `models` is unique on
     // (platform, model_id, endpoint_scope), so two relays can each hold their
     // own row for the same model id.
-    function insertScopedModel(modelId: string, displayName: string, endpointScope: string): void {
-      getDb().prepare(`
+    async function insertScopedModel(modelId: string, displayName: string, endpointScope: string): void {
+      (await getDb().run(`
         INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, endpoint_scope)
-        VALUES ('custom', ?, ?, 50, 50, ?)
-      `).run(modelId, displayName, endpointScope);
+        VALUES ('custom', ?, ?, 50, 50, ?) RETURNING id`, [modelId, displayName, endpointScope]));
     }
 
-    beforeEach(() => {
-      getDb().prepare('DELETE FROM api_keys').run();
+    beforeEach(async () => {
+      (await getDb().run('DELETE FROM api_keys'));
       // Only endpoint-scoped rows; the seeded catalog ('' scope) stays put.
-      getDb().prepare("DELETE FROM models WHERE endpoint_scope <> ''").run();
+      (await getDb().run("DELETE FROM models WHERE endpoint_scope <> ''"));
     });
 
     it('splits custom endpoints into per-endpoint rows instead of one "custom" row', async () => {
-      insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
-      insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
+      await insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
+      await insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
 
       // Two requests on relay A, one on relay B.
-      insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 120, createdAt: '2026-05-29 11:01:00' });
-      insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 900, createdAt: '2026-05-29 11:02:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 120, createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 900, createdAt: '2026-05-29 11:02:00' });
 
       const { status, body } = await request(app, '/api/analytics/by-platform?range=24h');
       expect(status).toBe(200);
@@ -543,11 +540,11 @@ describe('Analytics API', () => {
     it('groups a pooled endpoint (several keys, one base_url) into a single row', async () => {
       // Two credentials for the SAME relay — the pooling case (#619). They
       // share a base_url, so they must read as ONE endpoint, not two rows.
-      insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A key 1');
-      insertCustomKey(2, 'https://relay-a.example.com/v1', 'Relay A key 2');
+      await insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A key 1');
+      await insertCustomKey(2, 'https://relay-a.example.com/v1', 'Relay A key 2');
 
-      insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 110, createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 110, createdAt: '2026-05-29 11:01:00' });
 
       const { status, body } = await request(app, '/api/analytics/by-platform?range=24h');
       expect(status).toBe(200);
@@ -559,16 +556,16 @@ describe('Analytics API', () => {
     });
 
     it('scopes p95 latency per endpoint, not across all custom traffic', async () => {
-      insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
-      insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
+      await insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
+      await insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
 
       // Relay A: fast (100ms x10). Relay B: slow (1000ms x10). If p95 bled
       // across the whole "custom" platform, A's p95 would be ~1000, not 100.
       for (let i = 0; i < 10; i++) {
-        insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: `2026-05-29 10:${String(i).padStart(2, '0')}:00` });
+        await insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: `2026-05-29 10:${String(i).padStart(2, '0')}:00` });
       }
       for (let i = 0; i < 10; i++) {
-        insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 1000, createdAt: `2026-05-29 10:${String(i).padStart(2, '0')}:30` });
+        await insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 1000, createdAt: `2026-05-29 10:${String(i).padStart(2, '0')}:30` });
       }
 
       const { status, body } = await request(app, '/api/analytics/by-platform?range=24h');
@@ -581,7 +578,7 @@ describe('Analytics API', () => {
     });
 
     it('keeps catalog providers on their bare platform id (no custom: prefix)', async () => {
-      insertRaw({ platform: 'groq', keyId: null, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'groq', keyId: null, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
 
       const { status, body } = await request(app, '/api/analytics/by-platform?range=24h');
       expect(status).toBe(200);
@@ -594,7 +591,7 @@ describe('Analytics API', () => {
     it('falls back to the plain "custom" id when the key was deleted', async () => {
       // A custom request whose key no longer exists: base_url is unknown, so
       // the row keeps the pre-fix "custom" shape rather than a fake host.
-      insertRaw({ platform: 'custom', keyId: 99, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'custom', keyId: 99, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
 
       const { status, body } = await request(app, '/api/analytics/by-platform?range=24h');
       expect(status).toBe(200);
@@ -605,12 +602,12 @@ describe('Analytics API', () => {
     });
 
     it('filters recent calls by a custom endpoint providerId', async () => {
-      insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
-      insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
+      await insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
+      await insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
 
-      insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 120, createdAt: '2026-05-29 11:01:00' });
-      insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 900, createdAt: '2026-05-29 11:02:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 120, createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 900, createdAt: '2026-05-29 11:02:00' });
 
       const a = await request(app, '/api/analytics/requests?range=24h&provider=' + encodeURIComponent('custom:https://relay-a.example.com/v1'));
       expect(a.status).toBe(200);
@@ -627,11 +624,11 @@ describe('Analytics API', () => {
       // One gateway, two tenants. Host alone is the same string for both, so a
       // host-only display name would show two identical rows the operator
       // cannot match to an endpoint — the #889 collision one level down.
-      insertCustomKey(1, 'https://gw.example.com/tenant-a/v1', 'Tenant A');
-      insertCustomKey(2, 'https://gw.example.com/tenant-b/v1', 'Tenant B');
+      await insertCustomKey(1, 'https://gw.example.com/tenant-a/v1', 'Tenant A');
+      await insertCustomKey(2, 'https://gw.example.com/tenant-b/v1', 'Tenant B');
 
-      insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 200, createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 200, createdAt: '2026-05-29 11:01:00' });
 
       const { status, body } = await request(app, '/api/analytics/by-platform?range=24h');
       expect(status).toBe(200);
@@ -647,11 +644,11 @@ describe('Analytics API', () => {
     it('groups an endpoint stored with and without a trailing slash as one row', async () => {
       // keys.ts normalizes base_url on write, but rows written before it did
       // carry the raw string. Same endpoint, so: one row, one id.
-      insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A key 1');
-      insertCustomKey(2, 'https://relay-a.example.com/v1/', 'Relay A key 2');
+      await insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A key 1');
+      await insertCustomKey(2, 'https://relay-a.example.com/v1/', 'Relay A key 2');
 
-      insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 110, createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'custom', keyId: 2, status: 'success', latencyMs: 110, createdAt: '2026-05-29 11:01:00' });
 
       const { status, body } = await request(app, '/api/analytics/by-platform?range=24h');
       expect(status).toBe(200);
@@ -663,12 +660,12 @@ describe('Analytics API', () => {
     });
 
     it('names the endpoint behind each recent error', async () => {
-      insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
-      insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
+      await insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
+      await insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
 
-      insertRaw({ platform: 'custom', keyId: 1, status: 'error', error: 'relay A exploded', createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'custom', keyId: 2, status: 'error', error: 'relay B exploded', createdAt: '2026-05-29 11:01:00' });
-      insertRaw({ platform: 'groq', keyId: null, status: 'error', error: 'groq exploded', createdAt: '2026-05-29 11:02:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'error', error: 'relay A exploded', createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'custom', keyId: 2, status: 'error', error: 'relay B exploded', createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ platform: 'groq', keyId: null, status: 'error', error: 'groq exploded', createdAt: '2026-05-29 11:02:00' });
 
       const { status, body } = await request(app, '/api/analytics/errors?range=24h');
       expect(status).toBe(200);
@@ -687,7 +684,7 @@ describe('Analytics API', () => {
       expect(groq.providerId).toBe('groq');
       expect(groq.endpoint).toBe('groq');
       // An orphaned custom error keeps the pre-fix shape.
-      insertRaw({ platform: 'custom', keyId: 99, status: 'error', error: 'orphan exploded', createdAt: '2026-05-29 11:03:00' });
+      await insertRaw({ platform: 'custom', keyId: 99, status: 'error', error: 'orphan exploded', createdAt: '2026-05-29 11:03:00' });
       const again = await request(app, '/api/analytics/errors?range=24h');
       const orphan = again.body.find((r: any) => r.error === 'orphan exploded');
       expect(orphan.providerId).toBe('custom');
@@ -697,14 +694,14 @@ describe('Analytics API', () => {
     it('splits one model id across the relays that served it', async () => {
       // The same model name behind two relays is two different services with
       // two different latencies; one merged 'custom' row describes neither.
-      insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
-      insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
-      insertScopedModel('shared-model', 'Shared (A)', 'https://relay-a.example.com/v1');
-      insertScopedModel('shared-model', 'Shared (B)', 'https://relay-b.example.com/v1');
+      await insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
+      await insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
+      await insertScopedModel('shared-model', 'Shared (A)', 'https://relay-a.example.com/v1');
+      await insertScopedModel('shared-model', 'Shared (B)', 'https://relay-b.example.com/v1');
 
-      insertRaw({ platform: 'custom', keyId: 1, modelId: 'shared-model', status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'custom', keyId: 1, modelId: 'shared-model', status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:01:00' });
-      insertRaw({ platform: 'custom', keyId: 2, modelId: 'shared-model', status: 'success', latencyMs: 900, createdAt: '2026-05-29 11:02:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, modelId: 'shared-model', status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, modelId: 'shared-model', status: 'success', latencyMs: 100, createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ platform: 'custom', keyId: 2, modelId: 'shared-model', status: 'success', latencyMs: 900, createdAt: '2026-05-29 11:02:00' });
 
       const { status, body } = await request(app, '/api/analytics/by-model?range=24h');
       expect(status).toBe(200);
@@ -730,8 +727,8 @@ describe('Analytics API', () => {
     });
 
     it('keeps catalog models on one row per platform in by-model', async () => {
-      insertRaw({ platform: 'groq', keyId: null, modelId: 'llama-3.1-8b-instant', status: 'success', latencyMs: 50, createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'groq', keyId: null, modelId: 'llama-3.1-8b-instant', status: 'success', latencyMs: 70, createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ platform: 'groq', keyId: null, modelId: 'llama-3.1-8b-instant', status: 'success', latencyMs: 50, createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'groq', keyId: null, modelId: 'llama-3.1-8b-instant', status: 'success', latencyMs: 70, createdAt: '2026-05-29 11:01:00' });
 
       const { status, body } = await request(app, '/api/analytics/by-model?range=24h');
       expect(status).toBe(200);
@@ -744,13 +741,13 @@ describe('Analytics API', () => {
     });
 
     it('splits the error distribution per custom endpoint', async () => {
-      insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
-      insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
+      await insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
+      await insertCustomKey(2, 'https://relay-b.example.com/v1', 'Relay B');
 
-      insertRaw({ platform: 'custom', keyId: 1, status: 'error', error: '429 rate limit', createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'custom', keyId: 1, status: 'error', error: '429 rate limit', createdAt: '2026-05-29 11:01:00' });
-      insertRaw({ platform: 'custom', keyId: 2, status: 'error', error: 'timeout', createdAt: '2026-05-29 11:02:00' });
-      insertRaw({ platform: 'custom', keyId: 1, status: 'success', createdAt: '2026-05-29 11:03:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'error', error: '429 rate limit', createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'error', error: '429 rate limit', createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ platform: 'custom', keyId: 2, status: 'error', error: 'timeout', createdAt: '2026-05-29 11:02:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'success', createdAt: '2026-05-29 11:03:00' });
 
       const { status, body } = await request(app, '/api/analytics/error-distribution?range=24h');
       expect(status).toBe(200);
@@ -774,14 +771,14 @@ describe('Analytics API', () => {
       // in SQLite and the old '%invalid.*key%' pattern was regex syntax inside
       // a LIKE (where '.' and '*' are literals), so "Invalid API key" and
       // "Timeout" both fell into 'Other' and the dashboard hid auth failures.
-      insertRaw({ status: 'error', error: 'Invalid API key: sk-broken', createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ status: 'error', error: 'Unauthorized: token expired', createdAt: '2026-05-29 11:01:00' });
-      insertRaw({ status: 'error', error: 'Too Many Requests', createdAt: '2026-05-29 11:02:00' });
-      insertRaw({ status: 'error', error: 'Timeout awaiting response headers', createdAt: '2026-05-29 11:03:00' });
-      insertRaw({ status: 'error', error: 'ETIMEDOUT after 30000ms', createdAt: '2026-05-29 11:04:00' });
+      await insertRaw({ status: 'error', error: 'Invalid API key: sk-broken', createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ status: 'error', error: 'Unauthorized: token expired', createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ status: 'error', error: 'Too Many Requests', createdAt: '2026-05-29 11:02:00' });
+      await insertRaw({ status: 'error', error: 'Timeout awaiting response headers', createdAt: '2026-05-29 11:03:00' });
+      await insertRaw({ status: 'error', error: 'ETIMEDOUT after 30000ms', createdAt: '2026-05-29 11:04:00' });
       // "timed out" is how our own abort paths word it; the '%500%' rule used to
       // claim this one via the "5000ms" in the message.
-      insertRaw({ status: 'error', error: 'fusion tool call timed out after 5000ms', createdAt: '2026-05-29 11:05:00' });
+      await insertRaw({ status: 'error', error: 'fusion tool call timed out after 5000ms', createdAt: '2026-05-29 11:05:00' });
 
       const { status, body } = await request(app, '/api/analytics/error-distribution?range=24h');
       expect(status).toBe(200);
@@ -797,13 +794,13 @@ describe('Analytics API', () => {
       // The bare id is what /by-platform emits for rows whose endpoint is
       // unknown. Selecting it must return exactly the rows that row counted —
       // not every relay's traffic, which would contradict the count clicked.
-      insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
+      await insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
 
-      insertRaw({ platform: 'custom', keyId: 1, status: 'success', createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'custom', keyId: 1, status: 'success', createdAt: '2026-05-29 11:01:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'success', createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'success', createdAt: '2026-05-29 11:01:00' });
       // Key deleted after the fact (dangling id) and a row that never had one.
-      insertRaw({ platform: 'custom', keyId: 99, status: 'success', createdAt: '2026-05-29 11:02:00' });
-      insertRaw({ platform: 'custom', keyId: null, status: 'success', createdAt: '2026-05-29 11:03:00' });
+      await insertRaw({ platform: 'custom', keyId: 99, status: 'success', createdAt: '2026-05-29 11:02:00' });
+      await insertRaw({ platform: 'custom', keyId: null, status: 'success', createdAt: '2026-05-29 11:03:00' });
 
       const platforms = await request(app, '/api/analytics/by-platform?range=24h');
       const orphanRow = platforms.body.find((r: any) => r.providerId === 'custom');
@@ -824,9 +821,9 @@ describe('Analytics API', () => {
     });
 
     it('still accepts the legacy platform filter and rejects malformed provider ids', async () => {
-      insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
-      insertRaw({ platform: 'custom', keyId: 1, status: 'success', createdAt: '2026-05-29 11:00:00' });
-      insertRaw({ platform: 'groq', keyId: null, status: 'success', createdAt: '2026-05-29 11:01:00' });
+      await insertCustomKey(1, 'https://relay-a.example.com/v1', 'Relay A');
+      await insertRaw({ platform: 'custom', keyId: 1, status: 'success', createdAt: '2026-05-29 11:00:00' });
+      await insertRaw({ platform: 'groq', keyId: null, status: 'success', createdAt: '2026-05-29 11:01:00' });
 
       // Legacy platform filter still works.
       const legacy = await request(app, '/api/analytics/requests?range=24h&platform=groq');

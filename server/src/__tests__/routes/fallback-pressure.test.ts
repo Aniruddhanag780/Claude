@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { recordRateLimitHit, getAllPenalties } from '../../services/router.js';
 import { setCooldown, isOnCooldown, getNextCooldownDuration, getCooldownCeilingMs } from '../../services/ratelimit.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 let dashToken = '';
 
@@ -34,20 +35,19 @@ describe('Router pressure controls (#952)', () => {
   let platform: string;
   let modelId: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    dashToken = mintDashboardToken();
+    dashToken = await mintDashboardToken();
 
     const db = getDb();
-    const model = db.prepare('SELECT id, platform, model_id FROM models WHERE enabled = 1 LIMIT 1').get() as any;
+    const model = (await db.get('SELECT id, platform, model_id FROM models WHERE enabled = 1 LIMIT 1')) as any;
     modelDbId = model.id; platform = model.platform; modelId = model.model_id;
     const enc = encrypt('test-key-952');
-    const info = db.prepare(`
+    const info = (await db.run(`
       INSERT INTO api_keys (platform, encrypted_key, iv, auth_tag, label, status, enabled)
-      VALUES (?, ?, ?, ?, 'pressure-952', 'healthy', 1)
-    `).run(platform, enc.encrypted, enc.iv, enc.authTag);
+      VALUES (?, ?, ?, ?, 'pressure-952', 'healthy', 1) RETURNING id`, [platform, enc.encrypted, enc.iv, enc.authTag]));
     keyId = Number(info.lastInsertRowid);
   });
 
@@ -56,9 +56,9 @@ describe('Router pressure controls (#952)', () => {
     // two ladder steps so the next hit would otherwise be the 1h rung.
     setCooldown(platform, modelId, keyId, 24 * 60 * 60_000, 'heuristic');
     recordRateLimitHit(modelDbId);
-    getNextCooldownDuration(platform, modelId, keyId);
-    getNextCooldownDuration(platform, modelId, keyId);
-    expect(isOnCooldown(platform, modelId, keyId)).toBe(true);
+    await getNextCooldownDuration(platform, modelId, keyId);
+    await getNextCooldownDuration(platform, modelId, keyId);
+    expect(await isOnCooldown(platform, modelId, keyId)).toBe(true);
     expect(getAllPenalties().some(p => p.modelDbId === modelDbId)).toBe(true);
 
     const before = await request(app, 'GET', '/api/fallback/penalty-inspector');
@@ -71,10 +71,10 @@ describe('Router pressure controls (#952)', () => {
     expect(cleared.body.penalties).toBeGreaterThanOrEqual(1);
     expect(typeof cleared.body.failureWindows).toBe('number');
 
-    expect(isOnCooldown(platform, modelId, keyId)).toBe(false);
+    expect(await isOnCooldown(platform, modelId, keyId)).toBe(false);
     expect(getAllPenalties().some(p => p.modelDbId === modelDbId)).toBe(false);
     // Ladder restarted: the next hit is the first rung again, not the third.
-    expect(getNextCooldownDuration(platform, modelId, keyId)).toBe(2 * 60_000);
+    expect(await getNextCooldownDuration(platform, modelId, keyId)).toBe(2 * 60_000);
 
     const after = await request(app, 'GET', '/api/fallback/penalty-inspector');
     expect(after.body.rows.some((r: any) => r.cooldowns.length > 0 || r.penalty.value > 0)).toBe(false);
@@ -88,7 +88,7 @@ describe('Router pressure controls (#952)', () => {
     const set = await request(app, 'PUT', '/api/fallback/routing', { strategy: initial.body.strategy, cooldownCeilingMs: 3_600_000 });
     expect(set.status).toBe(200);
     expect(set.body.cooldownCeilingMs).toBe(3_600_000);
-    expect(getCooldownCeilingMs()).toBe(3_600_000);
+    expect(await getCooldownCeilingMs()).toBe(3_600_000);
 
     const read = await request(app, 'GET', '/api/fallback/routing');
     expect(read.body.cooldownCeilingMs).toBe(3_600_000);
@@ -109,6 +109,6 @@ describe('Router pressure controls (#952)', () => {
     const high = await request(app, 'PUT', '/api/fallback/routing', { strategy: routing.body.strategy, cooldownCeilingMs: 48 * 3_600_000 });
     expect(high.status).toBe(400);
     expect(high.body.error.message).toMatch(/at most/);
-    expect(getCooldownCeilingMs()).toBeNull();
+    expect(await getCooldownCeilingMs()).toBeNull();
   });
 });

@@ -1,8 +1,9 @@
-import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
-import { connectDb } from '../../../db/index.js';
+import type { Db } from '../../../db/types.js';
+import { closeDb, connectDb } from '../../../db/index.js';
 import { getMigrationStatuses, runMigrations } from '../../../db/migrate/runner.js';
 import { up as runLegacyBaseline } from '../../../db/migrations/20260101_000000_legacy_baseline.js';
+import { createEmptyTestDb } from '../../helpers/test-db.js';
 
 const LEGACY_BASELINE_FILENAME = '20260101_000000_legacy_baseline.ts';
 const CUSTOM_PROVIDER_MODALITIES_FILENAME = '20260627_000001_custom_provider_modalities.ts';
@@ -51,55 +52,49 @@ const REQUEST_FAILURE_ATTRIBUTION_FILENAME = '20261017_233153_request_failure_at
 const REMOVE_AURAY_PROVIDER_FILENAME = '20261019_000001_remove_auray_provider.ts';
 const KEY_LAST_HEALTHY_AT_FILENAME = '20261020_000001_key_last_healthy_at.ts';
 
-interface SchemaRow {
-  type: string;
-  name: string;
-  tbl_name: string;
-  sql: string | null;
-}
+// PG: every case runs on an EMPTY scratch database (the old throwaway
+// `new Database(':memory:')` equivalent). The schema snapshot is taken from
+// the PG catalogs (columns + indexes + constraints) instead of sqlite_master.
 
 interface DatabaseSnapshot {
-  schema: SchemaRow[];
+  schema: unknown[];
   rows: Record<string, unknown[]>;
 }
 
 describe('migration round trip', () => {
-  it('connectDb opens a connection without applying migrations', () => {
-    const originalNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = 'test';
-    const db = connectDb(':memory:');
+  it('connectDb opens a connection without applying migrations', async () => {
+    const scratch = await createEmptyTestDb();
+    // connectDb installs the process-global connection; closeDb clears it so
+    // the rest of this file keeps using its own scratch databases.
+    const db = await connectDb(scratch.url);
 
     try {
-      expect(hasTable(db, 'models')).toBe(false);
-      expect(hasTable(db, 'migrations')).toBe(false);
+      expect(await hasTable(db, 'models')).toBe(false);
+      expect(await hasTable(db, 'migrations')).toBe(false);
     } finally {
-      db.close();
-      if (originalNodeEnv === undefined) {
-        delete process.env.NODE_ENV;
-      } else {
-        process.env.NODE_ENV = originalNodeEnv;
-      }
+      await closeDb();
+      await scratch.cleanup();
     }
   });
 
   it('runs the legacy baseline against existing legacy DBs so rebased legacy changes apply', async () => {
-    const db = new Database(':memory:');
+    const { db, cleanup } = await createEmptyTestDb();
 
     try {
-      runLegacyBaseline(db);
-      db.prepare(`
+      await runLegacyBaseline(db);
+      (await db.run(`
         UPDATE models
            SET enabled = 1
          WHERE platform = 'opencode'
            AND model_id IN ('nemotron-3-super-free', 'minimax-m3-free')
-      `).run();
+      `));
 
-      expect(getEnabledZenDeadPromoCount(db)).toBe(2);
+      expect(await getEnabledZenDeadPromoCount(db)).toBe(2);
 
       await runMigrations(db, 'up');
 
-      expect(getEnabledZenDeadPromoCount(db)).toBe(0);
-      expect(getAppliedMigrationNames(db)).toEqual([
+      expect(await getEnabledZenDeadPromoCount(db)).toBe(0);
+      expect(await getAppliedMigrationNames(db)).toEqual([
         LEGACY_BASELINE_FILENAME,
         CUSTOM_PROVIDER_MODALITIES_FILENAME,
         CATALOG_MODEL_STATE_FILENAME,
@@ -148,163 +143,177 @@ describe('migration round trip', () => {
         KEY_LAST_HEALTHY_AT_FILENAME,
       ]);
     } finally {
-      db.close();
+      await cleanup();
     }
   });
 
   it('runs all migrations up, down to baseline, then up to the same schema', async () => {
-    const db = new Database(':memory:');
+    const { db, cleanup } = await createEmptyTestDb();
 
     try {
       await runMigrations(db, 'up');
-      expect(getPendingMigrationNames(db)).toEqual([]);
+      expect(await getPendingMigrationNames(db)).toEqual([]);
 
       // The catalog seed has no custom models, so the custom-model tool-support
       // backfill only alters state once a user endpoint exists. Seed one (in its
       // post-migration state, tools = 1) so the round trip actually exercises
       // that migration's down (tools -> 0) and up (tools -> 1).
-      db.prepare(`
+      (await db.run(`
         INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, supports_tools, supports_vision, enabled, source)
-        VALUES ('custom', 'roundtrip-custom', 'Roundtrip Custom', 50, 50, 1, 0, 1, 'user')
-      `).run();
+        VALUES ('custom', 'roundtrip-custom', 'Roundtrip Custom', 50, 50, 1, 0, 1, 'user') RETURNING id`));
 
       // Same reasoning for the endpoint-label rename (#704): it only touches
       // custom api_keys rows, so seed one in its post-migration state (labelled
       // with its host) for the down (host -> 'Custom') and up to exercise.
-      db.prepare(`
+      (await db.run(`
         INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, base_url)
-        VALUES ('custom', '127.0.0.1:11434', 'x', 'x', 'x', 'http://127.0.0.1:11434/v1')
-      `).run();
+        VALUES ('custom', '127.0.0.1:11434', 'x', 'x', 'x', 'http://127.0.0.1:11434/v1') RETURNING id`));
 
       // Same again for the /mcp lifecycle seed (#925): it reads api_keys, and
       // with the key above present its post-migration state is enabled ('1').
       // The first up ran against an empty api_keys and wrote '0', so pin the
       // post-seed value here for down (row removed) and up (row rewritten) to
       // round trip.
-      db.prepare(`
+      (await db.run(`
         INSERT INTO settings (key, value) VALUES ('enable_mcp', '1')
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run();
+      `));
 
-      const fullState = snapshotAppState(db);
+      const fullState = await snapshotAppState(db);
       await runDownToBaseline(db);
 
-      expect(getAppliedMigrationNames(db)).toEqual([LEGACY_BASELINE_FILENAME]);
+      expect(await getAppliedMigrationNames(db)).toEqual([LEGACY_BASELINE_FILENAME]);
 
       await runMigrations(db, 'up');
-      expect(getPendingMigrationNames(db)).toEqual([]);
-      expect(snapshotAppState(db)).toEqual(fullState);
+      expect(await getPendingMigrationNames(db)).toEqual([]);
+      expect(await snapshotAppState(db)).toEqual(fullState);
     } finally {
-      db.close();
+      await cleanup();
     }
-  });
+  }, 120_000); // 47 down-steps, each snapshotting every table
 });
 
-async function runDownToBaseline(db: Database.Database): Promise<void> {
-  while (getAppliedMigrationNames(db).length > 1) {
-    const migrationName = getLatestAppliedMigrationName(db);
-    const before = snapshotAppState(db);
+async function runDownToBaseline(db: Db): Promise<void> {
+  while ((await getAppliedMigrationNames(db)).length > 1) {
+    const migrationName = await getLatestAppliedMigrationName(db);
+    const before = await snapshotAppState(db);
 
     await runMigrations(db, 'down');
 
-    expect(snapshotAppState(db), `${migrationName} down() must alter app DB state or throw irreversible`)
+    expect(await snapshotAppState(db), `${migrationName} down() must alter app DB state or throw irreversible`)
       .not.toEqual(before);
   }
 }
 
-function getLatestAppliedMigrationName(db: Database.Database): string {
-  const row = db.prepare(`
+async function getLatestAppliedMigrationName(db: Db): Promise<string> {
+  const row = (await db.get(`
     SELECT filename
       FROM migrations
      ORDER BY id DESC
      LIMIT 1
-  `).get() as { filename: string } | undefined;
+  `)) as { filename: string } | undefined;
 
   if (!row) throw new Error('No applied migrations found');
   return row.filename;
 }
 
-function getAppliedMigrationNames(db: Database.Database): string[] {
-  return getMigrationStatuses(db)
+async function getAppliedMigrationNames(db: Db): Promise<string[]> {
+  return (await getMigrationStatuses(db))
     .filter(status => status.status === 'applied')
     .map(status => status.filename);
 }
 
-function getPendingMigrationNames(db: Database.Database): string[] {
-  return getMigrationStatuses(db)
+async function getPendingMigrationNames(db: Db): Promise<string[]> {
+  return (await getMigrationStatuses(db))
     .filter(status => status.status === 'pending')
     .map(status => status.filename);
 }
 
-function getEnabledZenDeadPromoCount(db: Database.Database): number {
-  const row = db.prepare(`
+async function getEnabledZenDeadPromoCount(db: Db): Promise<number> {
+  const row = (await db.get(`
     SELECT COUNT(*) AS count
       FROM models
      WHERE platform = 'opencode'
        AND model_id IN ('nemotron-3-super-free', 'minimax-m3-free')
        AND enabled = 1
-  `).get() as { count: number };
+  `)) as { count: number };
 
   return row.count;
 }
 
-function snapshotSchema(db: Database.Database): SchemaRow[] {
-  return db.prepare(`
-    SELECT type, name, tbl_name, sql
-      FROM sqlite_master
-     WHERE type IN ('index', 'table', 'trigger', 'view')
-       AND name NOT LIKE 'sqlite_%'
-     ORDER BY type, name
-  `).all() as SchemaRow[];
+/**
+ * Schema snapshot from the PG catalogs: every column (type, nullability,
+ * identity, default), every index, every constraint. Triggers are omitted —
+ * the app creates none.
+ */
+async function snapshotSchema(db: Db): Promise<unknown[]> {
+  const columns = (await db.all(`
+    SELECT table_name, column_name, data_type,
+           COALESCE(column_default, '') AS column_default,
+           is_nullable, is_identity, COALESCE(identity_generation, '') AS identity_generation
+      FROM information_schema.columns
+     WHERE table_schema = 'public'
+     ORDER BY table_name, ordinal_position
+  `));
+  const indexes = (await db.all(`
+    SELECT tablename, indexname, indexdef
+      FROM pg_indexes
+     WHERE schemaname = 'public'
+     ORDER BY tablename, indexname
+  `));
+  const constraints = (await db.all(`
+    SELECT conrelid::regclass::text AS table_name, conname, pg_get_constraintdef(oid) AS def
+      FROM pg_constraint
+     WHERE connamespace = 'public'::regnamespace
+     ORDER BY 1, conname
+  `));
+  return [...columns, ...indexes, ...constraints];
 }
 
-function snapshotAppState(db: Database.Database): DatabaseSnapshot {
-  const tableNames = getAppTableNames(db);
+async function snapshotAppState(db: Db): Promise<DatabaseSnapshot> {
+  const tableNames = await getAppTableNames(db);
   const rows: Record<string, unknown[]> = {};
 
   for (const tableName of tableNames) {
-    rows[tableName] = snapshotTableRows(db, tableName);
+    rows[tableName] = await snapshotTableRows(db, tableName);
   }
 
   return {
-    schema: snapshotSchema(db),
+    schema: await snapshotSchema(db),
     rows,
   };
 }
 
-function getAppTableNames(db: Database.Database): string[] {
-  const rows = db.prepare(`
-    SELECT name
-      FROM sqlite_master
-     WHERE type = 'table'
-       AND name NOT LIKE 'sqlite_%'
-       AND name <> 'migrations'
-     ORDER BY name
-  `).all() as { name: string }[];
+async function getAppTableNames(db: Db): Promise<string[]> {
+  const rows = (await db.all(`
+    SELECT table_name
+      FROM information_schema.tables
+     WHERE table_schema = 'public'
+       AND table_type = 'BASE TABLE'
+       AND table_name <> 'migrations'
+     ORDER BY table_name
+  `)) as { table_name: string }[];
 
-  return rows.map(row => row.name);
+  return rows.map(row => row.table_name);
 }
 
-function snapshotTableRows(db: Database.Database, tableName: string): unknown[] {
-  const columns = db.prepare(`PRAGMA table_info(${quoteIdentifier(tableName)})`).all() as { name: string }[];
-  const orderBy = columns.map(column => quoteIdentifier(column.name)).join(', ');
+async function snapshotTableRows(db: Db, tableName: string): Promise<unknown[]> {
+  const columns = (await db.all(
+    'SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position',
+    ['public', tableName],
+  )) as { column_name: string }[];
+  const orderBy = columns.map(column => quoteIdentifier(column.column_name)).join(', ');
 
-  return db.prepare(`
+  return (await db.all(`
     SELECT *
       FROM ${quoteIdentifier(tableName)}
      ORDER BY ${orderBy}
-  `).all() as unknown[];
+  `)) as unknown[];
 }
 
-function hasTable(db: Database.Database, tableName: string): boolean {
-  const row = db.prepare(`
-    SELECT name
-      FROM sqlite_master
-     WHERE type = 'table'
-       AND name = ?
-  `).get(tableName);
-
-  return Boolean(row);
+async function hasTable(db: Db, tableName: string): Promise<boolean> {
+  const row = (await db.get('SELECT to_regclass(?) AS reg', [tableName])) as { reg: string | null };
+  return row.reg !== null;
 }
 
 function quoteIdentifier(identifier: string): string {

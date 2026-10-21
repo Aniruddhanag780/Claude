@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeAll } from 'vitest';
-import Database from 'better-sqlite3';
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getSetting, getUnifiedApiKey } from '../../db/index.js';
+import { getSetting, getUnifiedApiKey } from '../../db/index.js';
 import { up as seedMcpDefault } from '../../db/migrations/20260903_000001_mcp_enabled_default.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { getDb } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 async function request(app: Express, method: string, path: string, body: any, token: string) {
   const server = app.listen(0, '127.0.0.1');
@@ -26,11 +27,11 @@ describe('/api/settings/enable-mcp', () => {
   let app: Express;
   let token: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    token = mintDashboardToken();
+    token = await mintDashboardToken();
   });
 
   it('reports false on a fresh install', async () => {
@@ -43,7 +44,7 @@ describe('/api/settings/enable-mcp', () => {
     const put = await request(app, 'PUT', '/api/settings/enable-mcp', { enabled: true }, token);
     expect(put.status).toBe(200);
     expect(put.body).toEqual({ enabled: true });
-    expect(getSetting('enable_mcp')).toBe('1');
+    expect(await getSetting('enable_mcp')).toBe('1');
 
     const get = await request(app, 'GET', '/api/settings/enable-mcp', undefined, token);
     expect(get.body).toEqual(put.body);
@@ -54,7 +55,7 @@ describe('/api/settings/enable-mcp', () => {
     const put = await request(app, 'PUT', '/api/settings/enable-mcp', { enabled: false }, token);
     expect(put.status).toBe(200);
     expect(put.body).toEqual({ enabled: false });
-    expect(getSetting('enable_mcp')).toBe('0');
+    expect(await getSetting('enable_mcp')).toBe('0');
   });
 
   const rejected: Array<[string, any]> = [
@@ -76,12 +77,12 @@ describe('/mcp lifecycle gate (#925)', () => {
   let token: string;
   let unifiedKey: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
     app = createApp();
-    token = mintDashboardToken();
-    unifiedKey = getUnifiedApiKey();
+    token = await mintDashboardToken();
+    unifiedKey = await getUnifiedApiKey();
   });
 
   it('off by default: POST /mcp answers 403 without touching auth', async () => {
@@ -125,42 +126,39 @@ describe('/mcp lifecycle gate (#925)', () => {
 });
 
 // The stored default is what decides whether an upgrade is a silent breakage.
+// PG: exercised against the real schema on this file's test database (the old
+// hand-built scratch SQLite tables are gone).
 describe('enable_mcp default seed (#925)', () => {
-  function makeDb(): Database.Database {
-    const db = new Database(':memory:');
-    db.exec(`
-      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL);
-    `);
-    return db;
-  }
+  beforeEach(async () => {
+    const db = getDb();
+    (await db.run("DELETE FROM settings WHERE key = 'enable_mcp'"));
+    (await db.run('DELETE FROM api_keys'));
+  });
 
-  function stored(db: Database.Database): string | undefined {
-    const row = db.prepare("SELECT value FROM settings WHERE key = 'enable_mcp'").get() as { value: string } | undefined;
+  async function stored(): string | undefined {
+    const row = (await getDb().get("SELECT value FROM settings WHERE key = 'enable_mcp'")) as { value: string } | undefined;
     return row?.value;
   }
 
-  it('starts off on a fresh install (no provider keys yet)', () => {
-    const db = makeDb();
-    seedMcpDefault(db as any);
-    expect(stored(db)).toBe('0');
-    db.close();
+  const addProviderKey = () => getDb().run(
+    "INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('groq', '', 'enc', 'iv', 'tag', 'unknown', 1) RETURNING id",
+  );
+
+  it('starts off on a fresh install (no provider keys yet)', async () => {
+    await seedMcpDefault(getDb() as any);
+    expect(await stored()).toBe('0');
   });
 
-  it('stays on for an install that already had provider keys', () => {
-    const db = makeDb();
-    db.prepare("INSERT INTO api_keys (platform) VALUES ('groq')").run();
-    seedMcpDefault(db as any);
-    expect(stored(db)).toBe('1');
-    db.close();
+  it('stays on for an install that already had provider keys', async () => {
+    await addProviderKey();
+    await seedMcpDefault(getDb() as any);
+    expect(await stored()).toBe('1');
   });
 
-  it('never overwrites a value the operator already chose', () => {
-    const db = makeDb();
-    db.prepare("INSERT INTO api_keys (platform) VALUES ('groq')").run();
-    db.prepare("INSERT INTO settings (key, value) VALUES ('enable_mcp', '0')").run();
-    seedMcpDefault(db as any);
-    expect(stored(db)).toBe('0');
-    db.close();
+  it('never overwrites a value the operator already chose', async () => {
+    await addProviderKey();
+    (await getDb().run("INSERT INTO settings (key, value) VALUES ('enable_mcp', '0')"));
+    await seedMcpDefault(getDb() as any);
+    expect(await stored()).toBe('0');
   });
 });

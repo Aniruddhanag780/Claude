@@ -9,7 +9,8 @@ import {
 } from '../../lib/tool-validate.js';
 import { isRetryableError } from '../../lib/error-classify.js';
 import { classifyAttemptError } from '../../lib/fallback-loop.js';
-import { initDb, getDb, setSetting } from '../../db/index.js';
+import { getDb, setSetting } from '../../db/index.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 const WEATHER_SCHEMA = {
   type: 'object',
@@ -143,33 +144,33 @@ describe('invalidToolArgumentsError', () => {
 });
 
 describe('isToolArgumentValidationEnabled', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     delete process.env.VALIDATE_TOOL_ARGUMENTS;
-    getDb().prepare('DELETE FROM settings WHERE key = ?').run(TOOL_ARGUMENT_VALIDATION_SETTING);
+    (await getDb().run('DELETE FROM settings WHERE key = ?', [TOOL_ARGUMENT_VALIDATION_SETTING]));
   });
 
-  it('is off by default — a false positive costs a failover hop', () => {
-    expect(isToolArgumentValidationEnabled()).toBe(false);
+  it('is off by default — a false positive costs a failover hop', async () => {
+    expect(await isToolArgumentValidationEnabled()).toBe(false);
   });
 
-  it('honours the settings-table value', () => {
-    setSetting(TOOL_ARGUMENT_VALIDATION_SETTING, '1');
-    expect(isToolArgumentValidationEnabled()).toBe(true);
+  it('honours the settings-table value', async () => {
+    await setSetting(TOOL_ARGUMENT_VALIDATION_SETTING, '1');
+    expect(await isToolArgumentValidationEnabled()).toBe(true);
   });
 
-  it('falls back to the env var when nothing is stored', () => {
+  it('falls back to the env var when nothing is stored', async () => {
     process.env.VALIDATE_TOOL_ARGUMENTS = 'true';
-    expect(isToolArgumentValidationEnabled()).toBe(true);
+    expect(await isToolArgumentValidationEnabled()).toBe(true);
   });
 
-  it('lets the settings table win over the env var', () => {
-    setSetting(TOOL_ARGUMENT_VALIDATION_SETTING, '0');
+  it('lets the settings table win over the env var', async () => {
+    await setSetting(TOOL_ARGUMENT_VALIDATION_SETTING, '0');
     process.env.VALIDATE_TOOL_ARGUMENTS = '1';
-    expect(isToolArgumentValidationEnabled()).toBe(false);
+    expect(await isToolArgumentValidationEnabled()).toBe(false);
   });
 });

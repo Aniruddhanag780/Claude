@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { getDb } from '../../db/index.js';
 import { parseProviderLimit, learnLimitFromError } from '../../services/ratelimit.js';
+import { initTestDb } from '../helpers/test-db.js';
 
 describe('parseProviderLimit', () => {
   it('parses a Groq 413 TPM body', () => {
@@ -38,52 +39,50 @@ describe('parseProviderLimit', () => {
 });
 
 describe('learnLimitFromError (persistence)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initTestDb();
   });
 
-  function insertModel(fields: { tpm?: number | null; rpm?: number | null } = {}): number {
-    const info = getDb().prepare(
-      `INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, tpm_limit, rpm_limit)
-       VALUES ('groq', ?, 'M', 50, 50, ?, ?)`,
-    ).run(`m-${Math.random().toString(36).slice(2)}`, fields.tpm ?? null, fields.rpm ?? null);
+  async function insertModel(fields: { tpm?: number | null; rpm?: number | null } = {}): number {
+    const info = (await getDb().run(`INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, tpm_limit, rpm_limit)
+       VALUES ('groq', ?, 'M', 50, 50, ?, ?) RETURNING id`, [`m-${Math.random().toString(36).slice(2)}`, fields.tpm ?? null, fields.rpm ?? null]));
     return info.lastInsertRowid as number;
   }
-  const tpmCol = (id: number) => (getDb().prepare('SELECT tpm_limit FROM models WHERE id = ?').get(id) as { tpm_limit: number | null }).tpm_limit;
+  const tpmCol = async (id: number) => ((await getDb().get('SELECT tpm_limit FROM models WHERE id = ?', [id])) as { tpm_limit: number | null }).tpm_limit;
 
-  it('fills a NULL limit from a learned ceiling', () => {
-    const id = insertModel({ tpm: null });
-    const r = learnLimitFromError(id, { message: 'tokens per minute (TPM): Limit 6000, Requested 9000' });
+  it('fills a NULL limit from a learned ceiling', async () => {
+    const id = await insertModel({ tpm: null });
+    const r = await learnLimitFromError(id, { message: 'tokens per minute (TPM): Limit 6000, Requested 9000' });
     expect(r).toEqual({ kind: 'tpm', limit: 6000 });
-    expect(tpmCol(id)).toBe(6000);
+    expect(await tpmCol(id)).toBe(6000);
   });
 
-  it('lowers an existing limit that was too high', () => {
-    const id = insertModel({ tpm: 40000 });
-    const r = learnLimitFromError(id, { message: 'tokens per minute (TPM): Limit 30000, Requested 33000' });
+  it('lowers an existing limit that was too high', async () => {
+    const id = await insertModel({ tpm: 40000 });
+    const r = await learnLimitFromError(id, { message: 'tokens per minute (TPM): Limit 30000, Requested 33000' });
     expect(r).toEqual({ kind: 'tpm', limit: 30000 });
-    expect(tpmCol(id)).toBe(30000);
+    expect(await tpmCol(id)).toBe(30000);
   });
 
-  it('never RAISES an already-lower limit', () => {
-    const id = insertModel({ tpm: 6000 });
-    const r = learnLimitFromError(id, { message: 'tokens per minute (TPM): Limit 30000, Requested 33000' });
+  it('never RAISES an already-lower limit', async () => {
+    const id = await insertModel({ tpm: 6000 });
+    const r = await learnLimitFromError(id, { message: 'tokens per minute (TPM): Limit 30000, Requested 33000' });
     expect(r).toBeNull();
-    expect(tpmCol(id)).toBe(6000);
+    expect(await tpmCol(id)).toBe(6000);
   });
 
-  it('is a no-op for an error with no parseable limit', () => {
-    const id = insertModel({ tpm: 12345 });
-    const r = learnLimitFromError(id, { message: 'API error 500: internal server error' });
+  it('is a no-op for an error with no parseable limit', async () => {
+    const id = await insertModel({ tpm: 12345 });
+    const r = await learnLimitFromError(id, { message: 'API error 500: internal server error' });
     expect(r).toBeNull();
-    expect(tpmCol(id)).toBe(12345);
+    expect(await tpmCol(id)).toBe(12345);
   });
 
-  it('writes to the correct column per axis (RPM)', () => {
-    const id = insertModel({ rpm: null });
-    learnLimitFromError(id, { message: 'requests per minute (RPM): Limit 20, Requested 21' });
-    const rpm = (getDb().prepare('SELECT rpm_limit FROM models WHERE id = ?').get(id) as { rpm_limit: number | null }).rpm_limit;
+  it('writes to the correct column per axis (RPM)', async () => {
+    const id = await insertModel({ rpm: null });
+    await learnLimitFromError(id, { message: 'requests per minute (RPM): Limit 20, Requested 21' });
+    const rpm = ((await getDb().get('SELECT rpm_limit FROM models WHERE id = ?', [id])) as { rpm_limit: number | null }).rpm_limit;
     expect(rpm).toBe(20);
   });
 });

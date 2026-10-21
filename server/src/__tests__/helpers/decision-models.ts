@@ -7,10 +7,13 @@ export const DECISION_MODELS = [
   { platform: 'openrouter', modelId: 'inception/mercury-decide:free', displayName: 'Mercury Decide (free)', quotaLabel: 'Free model, 50 or 1,000 requests/day', meta: { contextWindow: 65536 } },
 ];
 
-export function seedDecisionModels(): void {
-  const insert = getDb().prepare(`
-    INSERT OR IGNORE INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
-    VALUES (?, ?, ?, 'decision', ?, 1, ?, ?)
-  `);
-  DECISION_MODELS.forEach((m, i) => insert.run(m.platform, m.modelId, m.displayName, i, m.quotaLabel, JSON.stringify(m.meta)));
+export async function seedDecisionModels(): Promise<void> {
+  const db = getDb();
+  for (const [i, m] of DECISION_MODELS.entries()) {
+    await db.run(`
+      INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
+      VALUES (?, ?, ?, 'decision', ?, 1, ?, ?)
+      ON CONFLICT DO NOTHING
+    `, [m.platform, m.modelId, m.displayName, i, m.quotaLabel, JSON.stringify(m.meta)]);
+  }
 }

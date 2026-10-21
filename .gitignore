@@ -28,3 +28,6 @@ update-hermes.sh
 
 # Monetization planning — private, never committed
 monetization/
+
+# Test/runtime data dir under src (backups/nightly) — never commit dumps
+/server/src/data/
