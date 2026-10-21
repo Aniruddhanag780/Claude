@@ -55,6 +55,19 @@ async function withAdmin<T>(fn: (c: Client) => Promise<T>): Promise<T> {
   }
 }
 
+/** DROP DATABASE, first terminating any backend still attached to it. Without
+ *  this the drop blocks until PG reaps the connection itself, which times out
+ *  tests whose pool teardown races the drop (seen in migrate/runner.test.ts). */
+async function dropDatabase(name: string): Promise<void> {
+  await withAdmin(async (c) => {
+    await c.query(
+      'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
+      [name],
+    );
+    await c.query(`DROP DATABASE IF EXISTS ${name}`);
+  });
+}
+
 async function createFromTemplate(name: string, tpl: string): Promise<void> {
   // CREATE DATABASE ... TEMPLATE fails while any session is connected to the
   // template; a short retry covers lingering pool teardown.
@@ -62,6 +75,10 @@ async function createFromTemplate(name: string, tpl: string): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       await withAdmin(async (c) => {
+        await c.query(
+          'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
+          [name],
+        );
         await c.query(`DROP DATABASE IF EXISTS ${name}`);
         await c.query(`CREATE DATABASE ${name} TEMPLATE ${tpl}`);
       });
@@ -77,7 +94,7 @@ async function createFromTemplate(name: string, tpl: string): Promise<void> {
 async function buildTemplate(name: string): Promise<string> {
   const { connectDb, closeDb } = await import('../../db/index.js');
   const { runMigrations } = await import('../../db/migrate/runner.js');
-  await withAdmin((c) => c.query(`DROP DATABASE IF EXISTS ${name}`));
+  await dropDatabase(name);
   await withAdmin((c) => c.query(`CREATE DATABASE ${name}`));
   const db = await connectDb(urlFor(name));
   try {
@@ -131,7 +148,7 @@ export async function initTestDb(): Promise<Db> {
     } catch {
       /* already closed */
     }
-    await withAdmin((c) => c.query(`DROP DATABASE IF EXISTS ${name}`)).catch(() => {
+    await dropDatabase(name).catch(() => {
       /* best effort — global-setup reaps leftovers */
     });
   });
@@ -160,7 +177,7 @@ export async function createEmptyTestDb(): Promise<{ db: Db; url: string; cleanu
     url,
     cleanup: async () => {
       try { await db.close(); } catch { /* already closed */ }
-      await withAdmin((c) => c.query(`DROP DATABASE IF EXISTS ${name}`)).catch(() => {
+      await dropDatabase(name).catch(() => {
         /* best effort — global-setup reaps leftovers */
       });
     },
