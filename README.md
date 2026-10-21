@@ -129,15 +129,6 @@ Most agents configure themselves with one command that reads your live catalog, 
 npx freellmapi setup-claude --url http://localhost:3001 --api-key <unified-key>
 ```
 
-For **AtomCode**, set `FREELLMAPI_API_KEY` to your unified key, then run:
-
-```bash
-npx freellmapi setup-atomcode --url http://localhost:3001 --dry-run
-npx freellmapi setup-atomcode --url http://localhost:3001
-```
-
-`--dry-run` previews changes without writing files; add `--model <model-id>` to select a specific model. Setup updates `~/.atomcode/config.toml`, preserving unrelated settings. Restart AtomCode to load the updated configuration. [AtomCode setup details →](docs/en/clients/01-agent-clients.md#atomcode-atomcode)
-
 **[All supported agents and their setup commands →](docs/en/clients/02-supported-agents.md)** · [Per-tool recipes, MCP server and URL tokens →](docs/en/clients/01-agent-clients.md)
 
 ## How it compares
