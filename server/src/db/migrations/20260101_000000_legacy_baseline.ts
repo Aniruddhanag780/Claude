@@ -236,7 +236,7 @@ async function createTables(db: Db): Promise<void> {
 // requested_model = model_id means the pin was honored; a different model_id
 // means rate limits or failures forced a failover to another model.
 async function ensureRequestRequestedModelColumn(db: Db): Promise<void> {
-  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', ['requests']) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema AND table_name = ?', ['requests']) as { name: string }[];
   if (!columns.some(col => col.name === 'requested_model')) {
     await db.run('ALTER TABLE requests ADD COLUMN requested_model TEXT');
   }
@@ -246,14 +246,14 @@ async function ensureRequestRequestedModelColumn(db: Db): Promise<void> {
 // to the first chunk). NULL for non-streaming or pre-existing rows. Feeds the
 // bandit router's latency axis (server/src/services/scoring.ts).
 async function ensureRequestTtfbColumn(db: Db): Promise<void> {
-  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', ['requests']) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema AND table_name = ?', ['requests']) as { name: string }[];
   if (!columns.some(col => col.name === 'ttfb_ms')) {
     await db.run('ALTER TABLE requests ADD COLUMN ttfb_ms BIGINT');
   }
 }
 
 async function ensureRequestKeyIdColumn(db: Db): Promise<void> {
-  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', ['requests']) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema AND table_name = ?', ['requests']) as { name: string }[];
   if (!columns.some(col => col.name === 'key_id')) {
     await db.run('ALTER TABLE requests ADD COLUMN key_id BIGINT');
   }
@@ -263,7 +263,7 @@ async function ensureRequestKeyIdColumn(db: Db): Promise<void> {
 // `base_url` is the upstream endpoint for the user-configured 'custom' provider
 // (#117). NULL for every built-in platform — they use their hardcoded base URL.
 async function ensureApiKeysBaseUrlColumn(db: Db): Promise<void> {
-  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', ['api_keys']) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema AND table_name = ?', ['api_keys']) as { name: string }[];
   if (!columns.some(col => col.name === 'base_url')) {
     await db.run('ALTER TABLE api_keys ADD COLUMN base_url TEXT');
   }
@@ -273,7 +273,7 @@ async function ensureApiKeysBaseUrlColumn(db: Db): Promise<void> {
 // so several custom providers can coexist (#212). NULL for built-in platforms
 // (any key of the platform serves any of its models).
 async function ensureModelsKeyIdColumn(db: Db): Promise<void> {
-  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', ['models']) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema AND table_name = ?', ['models']) as { name: string }[];
   if (!columns.some(col => col.name === 'key_id')) {
     await db.run('ALTER TABLE models ADD COLUMN key_id BIGINT');
     // Backfill: bind pre-existing custom models to the (single) legacy custom
@@ -1407,7 +1407,7 @@ async function migrateModelsV15(db: Db): Promise<void> {
 // clear "no vision model" error, while a false positive routes an image to a
 // model that chokes. Idempotent — safe on fresh seeds and upgrades alike.
 async function migrateModelsV16Vision(db: Db): Promise<void> {
-  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', ['models']) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema AND table_name = ?', ['models']) as { name: string }[];
   if (!columns.some(col => col.name === 'supports_vision')) {
     await db.run('ALTER TABLE models ADD COLUMN supports_vision BIGINT NOT NULL DEFAULT 0');
   }
@@ -1717,7 +1717,7 @@ async function migrateModelsV21PruneDead(db: Db): Promise<void> {
 // pollinations). Idempotent — reset-then-set, safe on fresh seeds and
 // upgrades alike.
 async function migrateModelsV22Tools(db: Db): Promise<void> {
-  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', ['models']) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema AND table_name = ?', ['models']) as { name: string }[];
   if (!columns.some(col => col.name === 'supports_tools')) {
     await db.run('ALTER TABLE models ADD COLUMN supports_tools BIGINT NOT NULL DEFAULT 0');
   }
@@ -1947,7 +1947,7 @@ async function migrateEmbeddingsV1(db: Db): Promise<void> {
 
   // Tag request rows so embeddings traffic doesn't pollute the chat token
   // budget / headroom math. Existing rows backfill to 'chat' via the default.
-  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', ['requests']) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema AND table_name = ?', ['requests']) as { name: string }[];
   if (!columns.some(col => col.name === 'request_type')) {
     await db.run("ALTER TABLE requests ADD COLUMN request_type TEXT NOT NULL DEFAULT 'chat'");
   }

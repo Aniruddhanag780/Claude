@@ -17,7 +17,7 @@ import type { Db } from '../types.js';
  */
 async function tableExists(db: Db, name: string): Promise<boolean> {
   return !!await db.get(
-    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name = ?",
+    "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema AND table_type = 'BASE TABLE' AND table_name = ?",
     [name],
   );
 }

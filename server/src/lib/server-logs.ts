@@ -325,7 +325,7 @@ function tryDb(): Db | null {
 
 async function hasTable(db: Db): Promise<boolean> {
   try {
-    return !!await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='server_logs'");
+    return !!await db.get("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema AND table_name = 'server_logs'");
   } catch {
     return false;
   }

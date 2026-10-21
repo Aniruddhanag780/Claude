@@ -21,7 +21,7 @@ const TABLES = ['api_keys', 'models', 'embedding_models', 'media_models', 'model
 type Table = (typeof TABLES)[number];
 
 async function tableExists(db: Db, table: string): Promise<boolean> {
-  return await db.get("SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?", [table]) !== undefined;
+  return await db.get("SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema AND table_name = ?", [table]) !== undefined;
 }
 
 async function selectRows(db: Db, table: Table): Promise<Row[]> {

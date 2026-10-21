@@ -145,7 +145,7 @@ export async function pruneQuotaObservations(
   nowMs: number,
   budgetMs = QUOTA_OBSERVATIONS_PRUNE_BUDGET_MS,
 ): Promise<{ deleted: number; done: boolean }> {
-  const hasTable = !!await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='provider_quota_observations'");
+  const hasTable = !!await db.get("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema AND table_name = 'provider_quota_observations'");
   if (!hasTable) return { deleted: 0, done: true };
 
   const { retentionDays, maxRows } = getQuotaObservationRetentionConfig();
@@ -204,7 +204,7 @@ export async function pruneQuotaObservations(
  * with the in-memory ring and is not a timestamp.
  */
 export async function pruneServerLogs(db: RetentionDb, nowMs: number): Promise<number> {
-  const hasTable = !!await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='server_logs'");
+  const hasTable = !!await db.get("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema AND table_name = 'server_logs'");
   if (!hasTable) return 0;
 
   const { retentionDays, maxRows } = getServerLogRetentionConfig();
@@ -258,7 +258,7 @@ export async function pruneServerLogs(db: RetentionDb, nowMs: number): Promise<n
 export async function pruneExpiredClaims(db: RetentionDb, nowMs: number): Promise<number> {
   let deleted = 0;
   for (const table of ['idempotency_claims', 'response_cache', 'sessions'] as const) {
-    const present = await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name = ?", [table]);
+    const present = await db.get("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema AND table_name = ?", [table]);
     if (!present) continue;
     deleted += await (await db.run(`DELETE FROM ${table} WHERE expires_at_ms <= ?`, [nowMs])).changes;
   }
@@ -274,7 +274,7 @@ export async function pruneExpiredClaims(db: RetentionDb, nowMs: number): Promis
  * growth. Guarded against the table being absent like every other prune here.
  */
 export async function pruneSearchLogs(db: RetentionDb, nowMs: number): Promise<number> {
-  const hasTable = !!await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='search_requests'");
+  const hasTable = !!await db.get("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema AND table_name = 'search_requests'");
   if (!hasTable) return 0;
 
   const { retentionDays, maxRows } = getSearchLogRetentionConfig();
@@ -310,7 +310,7 @@ export async function pruneSearchLogs(db: RetentionDb, nowMs: number): Promise<n
  * every other prune here.
  */
 export async function pruneDecisionLogs(db: RetentionDb, nowMs: number): Promise<number> {
-  const hasTable = !!await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='decision_requests'");
+  const hasTable = !!await db.get("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema AND table_name = 'decision_requests'");
   if (!hasTable) return 0;
 
   const { retentionDays, maxRows } = getDecisionLogRetentionConfig();
@@ -398,7 +398,7 @@ export async function pruneRequestAnalytics(options: {
 
   if (nowMs >= nextHourlyPruneAtMs) {
     nextHourlyPruneAtMs = nowMs + HOURLY_PRUNE_INTERVAL_MS;
-    const hasHourly = !!await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='request_hourly'");
+    const hasHourly = !!await db.get("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema AND table_name = 'request_hourly'");
     if (hasHourly) {
       // Hour keys are created_at truncated to the hour, in SQLite's canonical
       // 'YYYY-MM-DD HH:00:00' text (space separator) — same as logRequest.hourKey()

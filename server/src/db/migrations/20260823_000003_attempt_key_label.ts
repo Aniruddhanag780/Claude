@@ -16,14 +16,14 @@ import type { Db } from '../types.js';
  * later, historical attempts keep the label they actually used.
  */
 export async function up(db: Db): Promise<void> {
-  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', ['request_attempts']) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema AND table_name = ?', ['request_attempts']) as { name: string }[];
   if (!columns.some((c) => c.name === 'key_label')) {
     await db.run('ALTER TABLE request_attempts ADD COLUMN key_label TEXT');
   }
 }
 
 export async function down(db: Db): Promise<void> {
-  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', ['request_attempts']) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema AND table_name = ?', ['request_attempts']) as { name: string }[];
   if (columns.some((c) => c.name === 'key_label')) {
     await db.run('ALTER TABLE request_attempts DROP COLUMN key_label');
   }

@@ -193,7 +193,7 @@ async function dropAllUserTables(db: Db): Promise<void> {
   const tables = await db.all<{ table_name: string }>(`
     SELECT table_name
       FROM information_schema.tables
-     WHERE table_schema = 'public'
+     WHERE table_schema = current_schema
        AND table_type = 'BASE TABLE'
      ORDER BY table_name ASC
   `);

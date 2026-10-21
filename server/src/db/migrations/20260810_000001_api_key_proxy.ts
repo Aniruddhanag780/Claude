@@ -16,7 +16,7 @@ import type { Db } from '../types.js';
 const COLUMNS = ['proxy_encrypted', 'proxy_iv', 'proxy_auth_tag'] as const;
 
 async function hasColumn(db: Db, table: string, column: string): Promise<boolean> {
-  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?', [table]) as { name: string }[];
+  const columns = await db.all('SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema AND table_name = ?', [table]) as { name: string }[];
   return columns.some((candidate) => candidate.name === column);
 }
 
