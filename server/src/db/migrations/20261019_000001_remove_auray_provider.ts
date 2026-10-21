@@ -20,6 +20,14 @@ type Row = Record<string, unknown>;
 const TABLES = ['api_keys', 'models', 'embedding_models', 'media_models', 'model_overrides', 'fallback_config', 'profile_models'] as const;
 type Table = (typeof TABLES)[number];
 
+// Deterministic parking order (PRIMARY KEY of each table): every table but
+// model_overrides is keyed by `id`. Without a stable order the parked JSON
+// rows can come back in a different sequence on the next up(), and a plain
+// snapshot of `settings` no longer round-trips byte-for-byte.
+function orderByOf(table: Table): string {
+  return table === 'model_overrides' ? 'platform, model_id' : 'id';
+}
+
 async function tableExists(db: Db, table: string): Promise<boolean> {
   return await db.get("SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema AND table_name = ?", [table]) !== undefined;
 }
@@ -28,10 +36,10 @@ async function selectRows(db: Db, table: Table): Promise<Row[]> {
   if (!await tableExists(db, table)) return [];
   if (table === 'fallback_config' || table === 'profile_models') {
     return await db.all(`
-      SELECT * FROM ${table} WHERE model_db_id IN (SELECT id FROM models WHERE platform = ?)
+      SELECT * FROM ${table} WHERE model_db_id IN (SELECT id FROM models WHERE platform = ?) ORDER BY ${orderByOf(table)}
     `, [PLATFORM]) as Row[];
   }
-  return await db.all(`SELECT * FROM ${table} WHERE platform = ?`, [PLATFORM]) as Row[];
+  return await db.all(`SELECT * FROM ${table} WHERE platform = ? ORDER BY ${orderByOf(table)}`, [PLATFORM]) as Row[];
 }
 
 // Encrypted key columns may be BLOBs; JSON keeps them as tagged base64.

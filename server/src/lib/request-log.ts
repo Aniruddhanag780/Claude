@@ -18,7 +18,7 @@ async function incrementSetting(db: LogTx, key: string, delta: number): Promise<
   // the first ever insert without a prior SELECT.
   await db.run(`
     INSERT INTO settings (key, value) VALUES (?, ?)
-    ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ? AS TEXT)
+    ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(settings.value AS INTEGER) + ? AS TEXT)
   `, [key, String(delta), delta]);
 }
 
@@ -133,11 +133,11 @@ export async function logRequest(
         INSERT INTO request_hourly (hour, total_requests, success_count, error_count, input_tokens, output_tokens)
         VALUES (?, 1, ?, ?, ?, ?)
         ON CONFLICT(hour) DO UPDATE SET
-          total_requests = total_requests + 1,
-          success_count  = success_count + ?,
-          error_count    = error_count + ?,
-          input_tokens   = input_tokens + ?,
-          output_tokens  = output_tokens + ?
+          total_requests = request_hourly.total_requests + 1,
+          success_count  = request_hourly.success_count + ?,
+          error_count    = request_hourly.error_count + ?,
+          input_tokens   = request_hourly.input_tokens + ?,
+          output_tokens  = request_hourly.output_tokens + ?
       `, [hour, isSuccess, isError, inputTokens, outputTokens, isSuccess, isError, inputTokens, outputTokens]);
 
       await incrementSetting(db, 'total_requests', 1);

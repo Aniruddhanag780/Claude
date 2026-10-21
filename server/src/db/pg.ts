@@ -116,9 +116,11 @@ export function resolveSslConfig(
  * Returns the rewritten SQL and how many placeholders were bound, which the
  * driver cross-checks against the supplied parameter count.
  */
-export function translatePlaceholders(sql: string): { text: string; count: number } {
+export function translatePlaceholders(sql: string): { text: string; count: number; named: string[] } {
   let out = '';
   let param = 0;
+  let maxDollar = 0;
+  const named: string[] = [];
   let i = 0;
   const n = sql.length;
 
@@ -189,6 +191,15 @@ export function translatePlaceholders(sql: string): { text: string; count: numbe
         i = end + tag.length;
         continue;
       }
+      // Native PG positional placeholder $N (kept verbatim; track the highest
+      // index so the parameter-count guard accepts SQL already written for PG).
+      const ph = /^\$(\d+)/.exec(sql.slice(i));
+      if (ph) {
+        maxDollar = Math.max(maxDollar, Number(ph[1]));
+        out += ph[0];
+        i += ph[0].length;
+        continue;
+      }
       out += ch;
       i += 1;
       continue;
@@ -201,11 +212,42 @@ export function translatePlaceholders(sql: string): { text: string; count: numbe
       continue;
     }
 
+    // better-sqlite3 named placeholder @name → $N (first-appearance order).
+    if (ch === '@') {
+      const nm = /^@([A-Za-z_][A-Za-z_0-9]*)/.exec(sql.slice(i));
+      if (nm) {
+        const name = nm[1];
+        let idx = named.indexOf(name);
+        if (idx === -1) {
+          named.push(name);
+          idx = named.length - 1;
+        }
+        out += `$${idx + 1}`;
+        i += nm[0].length;
+        continue;
+      }
+      out += ch;
+      i += 1;
+      continue;
+    }
+
     out += ch;
     i += 1;
   }
 
-  return { text: out, count: param };
+  // Mixing styles in one statement would renumber `?` onto a colliding $N.
+  if (param > 0 && (maxDollar > 0 || named.length > 0)) {
+    throw new Error('[db] mixing ? placeholders with $N/@name in one statement is not supported');
+  }
+  // Named-param SQL is driven by the object's keys (count = distinct names);
+  // otherwise the count is the number of bound positions (`?` and/or max `$N`).
+  const count = named.length > 0 ? named.length : Math.max(param, maxDollar);
+  return { text: out, count, named };
+}
+
+/** True for a plain object (the single-argument form of a named-param call). */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 /** Anything that can run a query: the shared pool, or a dedicated tx client. */
@@ -226,8 +268,10 @@ export function createPgPool(connectionString: string): pg.Pool {
   const poolConfig: pg.PoolConfig = {
     connectionString,
     max: Number(process.env.PG_MAX_CONNECTIONS || 10),
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
+    // Env overrides exist for tests (fake timers) and high-latency setups;
+    // 0 disables the timer entirely.
+    idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS ?? 30_000),
+    connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS ?? 10_000),
   };
   if (tls.ssl !== undefined) {
     poolConfig.ssl = tls.ssl;
@@ -267,14 +311,25 @@ export class PgDb implements Db {
   }
 
   private async runQuery<T>(sql: string, params: readonly unknown[]): Promise<QueryResult<T>> {
-    const { text, count } = translatePlaceholders(sql);
-    if (params.length !== count) {
+    const { text, count, named } = translatePlaceholders(sql);
+    let bound: readonly unknown[];
+    if (named.length > 0 && params.length === 1 && isPlainObject(params[0])) {
+      // better-sqlite3 convention: a single object supplies named params by key.
+      const obj = params[0] as Record<string, unknown>;
+      bound = named.map((name) => {
+        if (!(name in obj)) throw new Error(`[db] missing named parameter @${name}`);
+        return obj[name];
+      });
+    } else {
+      bound = params;
+    }
+    if (bound.length !== count) {
       throw new Error(
-        `[db] placeholder/parameter mismatch: SQL has ${count} ? but ${params.length} param(s) were supplied.\n` +
+        `[db] placeholder/parameter mismatch: SQL needs ${count} param(s) but ${bound.length} were supplied.\n` +
           `SQL: ${sql.trim().slice(0, 200)}`,
       );
     }
-    const res = await this.executor.query(text, params as unknown[]);
+    const res = await this.executor.query(text, bound as unknown[]);
     return { rows: res.rows as T[], rowCount: res.rowCount ?? 0 };
   }
 

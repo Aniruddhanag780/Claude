@@ -117,11 +117,11 @@ export async function registerCustomChatModels(
          COALESCE($7, 1), COALESCE($8, 0), 'user', $9)
       ON CONFLICT(platform, model_id, endpoint_scope)
       DO UPDATE SET
-        display_name = COALESCE($2, display_name),
+        display_name = COALESCE($2, models.display_name),
         key_id = excluded.key_id,
         enabled = 1,
-        supports_tools = COALESCE($7, supports_tools),
-        supports_vision = COALESCE($8, supports_vision)
+        supports_tools = COALESCE($7, models.supports_tools),
+        supports_vision = COALESCE($8, models.supports_vision)
     `, [modelId, displayName, seed.intelligenceRank, seed.speedRank, seed.sizeLabel, bindKeyId, toolsParam, visionParam, endpointScope]);
 
     // Read back rather than echo the submitted values: an omitted display name
