@@ -25,3 +25,6 @@ update-hermes.sh
 
 # Monetization planning — private, never committed
 monetization/
+
+# Local toolkit learning data (regenerated automatically)
+.cto-toolkit/learning/patterns.jsonl
