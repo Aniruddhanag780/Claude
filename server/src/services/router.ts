@@ -873,7 +873,7 @@ export async function refreshStatsCache(db: Db, force = false): Promise<void> {
       SUM(CASE WHEN status = 'success' AND ttfb_ms IS NOT NULL THEN ttfb_ms ELSE 0 END) AS succ_ttfb_sum,
       SUM(CASE WHEN status = 'success' AND ttfb_ms IS NOT NULL THEN 1 ELSE 0 END) AS succ_ttfb_cnt,
       SUM(CASE WHEN ${IS_TIMEOUT_SQL} THEN 1 ELSE 0 END) AS timeouts,
-      SUM(CASE WHEN ${IS_TIMEOUT_SQL} THEN MIN(MAX(latency_ms, 0), ${TIMEOUT_LATENCY_CAP_MS}) ELSE 0 END) AS timeout_lat
+      SUM(CASE WHEN ${IS_TIMEOUT_SQL} THEN LEAST(GREATEST(latency_ms, 0), ${TIMEOUT_LATENCY_CAP_MS}) ELSE 0 END) AS timeout_lat
     FROM requests
     WHERE created_at >= ? AND status <> 'canceled'${pmExcluded}
     GROUP BY platform, model_id, key_id, age_days
