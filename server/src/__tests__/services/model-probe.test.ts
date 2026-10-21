@@ -190,20 +190,21 @@ describe('probe pass', () => {
 });
 
 describe('kill switch and lifecycle', () => {
-  it('MODEL_PROBE_DISABLED=1 prevents the scheduler from starting', () => {
-    process.env.MODEL_PROBE_DISABLED = '1';
+  it('is off by default: the scheduler does not start without MODEL_PROBE_ENABLED=1', () => {
+    delete process.env.MODEL_PROBE_ENABLED;
     const scheduler = { every: vi.fn(() => () => undefined) };
     startModelProbe(scheduler as any);
     expect(scheduler.every).not.toHaveBeenCalled();
-    delete process.env.MODEL_PROBE_DISABLED;
     stopModelProbe();
   });
 
-  it('without the kill switch the job is scheduled on the 30m cadence', () => {
+  it('MODEL_PROBE_ENABLED=1 schedules the job on the 30m cadence', () => {
+    process.env.MODEL_PROBE_ENABLED = '1';
     const scheduler = { every: vi.fn(() => () => undefined) };
     startModelProbe(scheduler as any);
     expect(scheduler.every).toHaveBeenCalledTimes(1);
     expect(scheduler.every.mock.calls[0][0]).toBe(30 * 60 * 1000);
+    delete process.env.MODEL_PROBE_ENABLED;
     stopModelProbe();
   });
 });

@@ -23,8 +23,9 @@
 //     plus a small per-pass budget keep probe traffic bounded.
 //
 // Cadence: one pass every 30 minutes, at most MODEL_PROBE_MAX_PER_PASS probes
-// per pass (default 3). Kill switch: MODEL_PROBE_DISABLED=1. Per-pass budget:
-// MODEL_PROBE_MAX_PER_PASS.
+// per pass (default 3). OFF by default: probes spend the user's free-tier
+// quota and nothing consumes the labels yet, so the scheduled job only runs
+// with MODEL_PROBE_ENABLED=1. POST /api/health/probe-models always runs a pass.
 
 import type { Scheduler } from '../lib/scheduler.js';
 import type { Db } from '../db/types.js';
@@ -320,10 +321,7 @@ let cancelProbeJob: (() => void) | null = null;
 
 export function startModelProbe(scheduler: Scheduler): void {
   if (cancelProbeJob) return;
-  if (process.env.MODEL_PROBE_DISABLED === '1') {
-    console.log('[ModelProbe] disabled via MODEL_PROBE_DISABLED=1');
-    return;
-  }
+  if (process.env.MODEL_PROBE_ENABLED !== '1') return;
   console.log(`[ModelProbe] starting proactive model probes (every ${MODEL_PROBE_INTERVAL_MS / 60_000}m, max ${getMaxProbesPerPass()}/pass)`);
   cancelProbeJob = scheduler.every(
     MODEL_PROBE_INTERVAL_MS,

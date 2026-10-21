@@ -119,10 +119,6 @@ healthRouter.post('/quota/:keyId', async (req: Request, res: Response) => {
 // labels immediately instead of waiting for the next pass. Same shape as
 // POST /check-all: the operator pressed the button, so run a full pass.
 healthRouter.post('/probe-models', async (_req: Request, res: Response) => {
-  if (process.env.MODEL_PROBE_DISABLED === '1') {
-    res.status(409).json({ error: { message: 'Model probes are disabled (MODEL_PROBE_DISABLED=1)' } });
-    return;
-  }
   const result = await runModelProbePass();
   res.json({
     probed: result.probed.map(c => ({
