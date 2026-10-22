@@ -9,7 +9,7 @@ import type { Server } from 'node:http';
  */
 export function installGracefulShutdown(options: {
   servers: () => Server[];
-  closeDb: () => void;
+  closeDb: () => void | Promise<void>;
   graceMs?: number;
   proc?: Pick<NodeJS.Process, 'once' | 'exit'>;
   logger?: Pick<Console, 'log' | 'error'>;
@@ -32,13 +32,23 @@ export function installGracefulShutdown(options: {
     const servers = options.servers();
     let open = servers.length;
     const finish = () => {
+      const exitProcess = () => {
+        clearTimeout(force);
+        proc.exit(0);
+      };
       try {
-        options.closeDb();
+        const res = options.closeDb();
+        if (res && typeof (res as any).then === 'function') {
+          (res as Promise<void>).then(exitProcess).catch((err) => {
+            logger.error(`[server] closing the database failed: ${err instanceof Error ? err.message : String(err)}`);
+            exitProcess();
+          });
+          return;
+        }
       } catch (err) {
         logger.error(`[server] closing the database failed: ${err instanceof Error ? err.message : String(err)}`);
       }
-      clearTimeout(force);
-      proc.exit(0);
+      exitProcess();
     };
     if (open === 0) return finish();
     for (const server of servers) {

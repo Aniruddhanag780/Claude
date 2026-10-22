@@ -4,6 +4,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { getDb } from './db/index.js';
 import { keysRouter } from './routes/keys.js';
 import { clientProfilesRouter } from './routes/client-profiles.js';
 import { conversationsRouter } from './routes/conversations.js';
@@ -275,9 +276,19 @@ export function createApp(config?: Config) {
   app.use('/api/compression', requireAuth, compressionRouter);
   app.use('/api/update', requireAuth, updateRouter);
 
-  // Health check — no auth required.
-  app.get('/api/ping', (_req, res) => {
+  // Health check: liveness — no auth required.
+  app.get(['/api/ping', '/healthz'], (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  });
+
+  // Health check: readiness — verifies database connectivity without auth.
+  app.get(['/api/ready', '/ready'], async (_req, res) => {
+    try {
+      await getDb().query('SELECT 1');
+      res.json({ status: 'ready', database: 'connected', timestamp: new Date().toISOString() });
+    } catch (err: any) {
+      res.status(503).json({ status: 'unready', database: 'disconnected', error: err?.message ?? String(err) });
+    }
   });
 
   // Static, unauthenticated API reference: GET /v1/docs (viewer) and
