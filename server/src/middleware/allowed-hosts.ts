@@ -10,11 +10,13 @@ import type { Request, Response, NextFunction } from 'express';
 // status, first-run setup) and the login form itself are reachable that way.
 //
 // The fix is the standard one: unless the Host header names a host the operator
-// declared, reject with 403 before routing or auth runs. By default the allow
-// list is the loopback set only — localhost, 127.0.0.1, ::1, and *.localhost
-// (which browsers treat as loopback-equivalent secure contexts). LAN and
-// reverse-proxy installs opt their hostname in with ALLOWED_HOSTS; '*' turns
-// the guard off entirely.
+// declared, reject with 403 before routing or auth runs. The guard is OPT-IN:
+// with ALLOWED_HOSTS unset it does nothing, because a loopback-only default
+// would lock out every LAN, Docker-network, desktop-LAN and reverse-proxy
+// install on upgrade. Once ALLOWED_HOSTS lists any hostname, the allow list is
+// those names plus the loopback set — localhost, 127.0.0.1, ::1, and
+// *.localhost (which browsers treat as loopback-equivalent secure contexts).
+// '*' keeps it off explicitly.
 //
 // Matching is on the HOSTNAME ONLY, never host:port: Compose remaps the outer
 // port freely (HOST_BIND + ports: "127.0.0.1:${HOST_PORT:-3001}:3001") and the
@@ -39,8 +41,7 @@ function hostnameOf(hostHeader: string | undefined): string | null {
 
 /**
  * Express middleware enforcing the Host allowlist.
- * @param allowed raw host patterns from ALLOWED_HOSTS (empty → loopback-only
- *  default). Exact, case-insensitive hostnames; a single `*` disables the
+ * @param allowed raw host patterns from ALLOWED_HOSTS (empty → guard off). Exact, case-insensitive hostnames; a single `*` disables the
  *  guard. `*.example.com` entries match any single-label subdomain wildcard
  *  is NOT supported — name every host you serve.
  */
@@ -58,7 +59,7 @@ export function createHostGuard(allowed: string[]) {
     names.has(host);
 
   return function hostGuard(req: Request, res: Response, next: NextFunction): void {
-    if (wildcard) {
+    if (wildcard || names.size === 0) {
       next();
       return;
     }

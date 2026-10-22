@@ -107,8 +107,9 @@ export function createApp(config?: Config) {
   // the rate-limit middleware, which both resolve the client IP.
   app.set('trust proxy', cfg.trustProxy);
   // DNS-rebinding guard (#1637), first middleware so a rebinding request is
-  // rejected before helmet, CORS, body parsing, auth or routing. Loopback
-  // hosts always pass; ALLOWED_HOSTS extends the list ('*' disables). Must sit
+  // rejected before helmet, CORS, body parsing, auth or routing. Opt-in: off
+  // until ALLOWED_HOSTS lists a hostname, then loopback + those names pass
+  // ('*' keeps it off). Must sit
   // above everything below — its whole value is answering before any state or
   // credential is touched.
   app.use(createHostGuard(cfg.allowedHosts));

@@ -67,9 +67,10 @@ export interface Config {
   cspUpgradeInsecureRequests: boolean | undefined;
   /**
    * Extra Host-header names accepted by the DNS-rebinding guard (#1637),
-   * parsed from ALLOWED_HOSTS (comma-separated). The guard always accepts
-   * loopback (localhost / 127.0.0.1 / ::1 / *.localhost); this list adds LAN
-   * IPs and reverse-proxy names. A single `*` disables the guard outright.
+   * parsed from ALLOWED_HOSTS (comma-separated). Empty (the default) leaves
+   * the guard off. Once set, loopback (localhost / 127.0.0.1 / ::1 /
+   * *.localhost) is always accepted on top of these names. A single `*` also
+   * leaves the guard off.
    */
   allowedHosts: string[];
 }
@@ -100,7 +101,7 @@ export function loadConfig(): Config {
   };
 }
 
-// Parse ALLOWED_HOSTS (#1637). unset/empty → [] (loopback-only guard).
+// Parse ALLOWED_HOSTS (#1637). unset/empty → [] (guard off).
 // Otherwise a comma-separated list of exact hostnames (case-insensitive) that
 // the Host header may name, on top of the loopback default. A single '*'
 // disables the guard entirely — the middleware reads that sentinel.

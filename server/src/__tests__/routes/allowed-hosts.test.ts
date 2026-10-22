@@ -56,15 +56,30 @@ describe('Host-header guard (#1637)', () => {
     else process.env.ALLOWED_HOSTS = previousAllowed;
   });
 
-  describe('default (no ALLOWED_HOSTS)', () => {
+  describe('default (no ALLOWED_HOSTS): guard off', () => {
+    // Opt-in on purpose: a loopback-only default would 403 LAN, Docker-network,
+    // desktop-LAN and reverse-proxy installs the moment they upgraded.
+    it('lets any Host through, including LAN IPs, container names and proxies', async () => {
+      const app = appWithAllowed(undefined);
+      for (const host of ['localhost:3001', '192.168.1.50:3001', 'freellmapi:3001', 'proxy.example.com', 'evil.example:3001']) {
+        expect((await call(app, '/api/ping', host)).status, host).toBe(200);
+      }
+    });
+
+    it('an empty ALLOWED_HOSTS is also off', async () => {
+      expect((await call(appWithAllowed('  '), '/api/ping', '192.168.1.50:3001')).status).toBe(200);
+    });
+  });
+
+  describe('loopback-only (ALLOWED_HOSTS=localhost)', () => {
     it('rejects a rebinding hostname with 403 before routing', async () => {
-      const res = await call(appWithAllowed(undefined), '/api/ping', 'evil.example:3001');
+      const res = await call(appWithAllowed('localhost'), '/api/ping', 'evil.example:3001');
       expect(res.status).toBe(403);
       expect(JSON.parse(res.body).error.message).toContain('ALLOWED_HOSTS');
     });
 
     it('accepts the loopback names on any port', async () => {
-      const app = appWithAllowed(undefined);
+      const app = appWithAllowed('localhost');
       for (const host of ['localhost:3001', '127.0.0.1:3001', '[::1]:3001', 'app.localhost']) {
         const res = await call(app, '/api/ping', host);
         expect(res.status, host).toBe(200);
@@ -72,11 +87,11 @@ describe('Host-header guard (#1637)', () => {
     });
 
     it('accepts a bare 127.0.0.1 Host with no port', async () => {
-      expect((await call(appWithAllowed(undefined), '/api/ping', '127.0.0.1')).status).toBe(200);
+      expect((await call(appWithAllowed('localhost'), '/api/ping', '127.0.0.1')).status).toBe(200);
     });
 
-    it('rejects a LAN IP by default', async () => {
-      expect((await call(appWithAllowed(undefined), '/api/ping', '192.168.1.50:3001')).status).toBe(403);
+    it('rejects an unlisted LAN IP', async () => {
+      expect((await call(appWithAllowed('localhost'), '/api/ping', '192.168.1.50:3001')).status).toBe(403);
     });
   });
 
@@ -107,7 +122,7 @@ describe('Host-header guard (#1637)', () => {
 
   describe('guard runs before auth', () => {
     it('403s an unauthenticated /api/keys call on a bad Host (not 401)', async () => {
-      const res = await call(appWithAllowed(undefined), '/api/keys', 'evil.example:3001');
+      const res = await call(appWithAllowed('localhost'), '/api/keys', 'evil.example:3001');
       expect(res.status).toBe(403);
     });
   });
