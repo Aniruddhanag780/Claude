@@ -40,8 +40,8 @@ const sampleBody = (text: string) => ({
   usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
 });
 
-const store = (key: string, text: string, now?: number) =>
-  storeCachedResponse(key, {
+const store = async (key: string, text: string, now?: number) =>
+  await storeCachedResponse(key, {
     body: sampleBody(text),
     platform: 'groq',
     modelId: 'llama-3.3-70b',
@@ -59,11 +59,11 @@ describe('response cache', () => {
     // Fresh in-memory DB per test so the settings-backed toggle is isolated.
     await initTestDb();
     // The cache is module-level in-memory state: flush it between tests.
-    clearCache();
+    await clearCache();
   });
 
-  afterEach(() => {
-    clearCache();
+  afterEach(async () => {
+    await clearCache();
     for (const k of CACHE_ENV) {
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k]!;
@@ -204,14 +204,14 @@ describe('response cache', () => {
   });
 
   describe('store / get round-trip', () => {
-    it('returns null on a miss', () => {
-      expect(getCachedResponse('does-not-exist')).toBeNull();
+    it('returns null on a miss', async () => {
+      expect(await getCachedResponse('does-not-exist')).toBeNull();
     });
 
-    it('returns the stored body on a hit', () => {
+    it('returns the stored body on a hit', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'hi')] });
-      store(key, 'cached answer');
-      const hit = getCachedResponse(key);
+      await store(key, 'cached answer');
+      const hit = await getCachedResponse(key);
       expect(hit).not.toBeNull();
       expect((hit!.body as any).choices[0].message.content).toBe('cached answer');
       expect(hit!.platform).toBe('groq');
@@ -221,54 +221,54 @@ describe('response cache', () => {
       expect(hit!.completionTokens).toBe(5);
     });
 
-    it('overwrites and refreshes an existing entry', () => {
+    it('overwrites and refreshes an existing entry', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'hi')] });
-      store(key, 'first');
-      store(key, 'second');
-      expect((getCachedResponse(key)!.body as any).choices[0].message.content).toBe('second');
+      await store(key, 'first');
+      await store(key, 'second');
+      expect((await getCachedResponse(key)!.body as any).choices[0].message.content).toBe('second');
       expect(getCacheStats().entries).toBe(1);
     });
 
-    it('skips an unserializable body rather than throwing', () => {
+    it('skips an unserializable body rather than throwing', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'hi')] });
       const circular: any = {};
       circular.self = circular;
-      storeCachedResponse(key, {
+      await storeCachedResponse(key, {
         body: circular, platform: 'groq', modelId: 'm', keyId: 1, promptTokens: 1, completionTokens: 1,
       });
       expect(getCacheStats().entries).toBe(0);
-      expect(getCachedResponse(key)).toBeNull();
+      expect(await getCachedResponse(key)).toBeNull();
     });
   });
 
   describe('TTL expiry', () => {
-    it('treats an entry older than the TTL as a miss and deletes it', () => {
+    it('treats an entry older than the TTL as a miss and deletes it', async () => {
       process.env.RESPONSE_CACHE_TTL_SECONDS = '1';
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'hi')] });
       const t0 = 1_000_000;
-      store(key, 'stale', t0);
+      await store(key, 'stale', t0);
       // 2s later, past the 1s TTL → miss.
-      expect(getCachedResponse(key, t0 + 2000)).toBeNull();
+      expect(await getCachedResponse(key, t0 + 2000)).toBeNull();
       // The expired entry was purged.
       expect(getCacheStats().entries).toBe(0);
     });
 
-    it('serves an entry still within the TTL', () => {
+    it('serves an entry still within the TTL', async () => {
       process.env.RESPONSE_CACHE_TTL_SECONDS = '60';
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'hi')] });
       const t0 = 1_000_000;
-      store(key, 'fresh', t0);
-      expect(getCachedResponse(key, t0 + 30_000)).not.toBeNull();
+      await store(key, 'fresh', t0);
+      expect(await getCachedResponse(key, t0 + 30_000)).not.toBeNull();
     });
   });
 
   describe('hit accounting', () => {
-    it('counts hits and tallies saved tokens', () => {
+    it('counts hits and tallies saved tokens', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'hi')] });
-      store(key, 'answer');
-      getCachedResponse(key);
-      getCachedResponse(key);
-      getCachedResponse(key);
+      await store(key, 'answer');
+      await getCachedResponse(key);
+      await getCachedResponse(key);
+      await getCachedResponse(key);
       const stats = getCacheStats();
       expect(stats.entries).toBe(1);
       expect(stats.totalHits).toBe(3);
@@ -278,43 +278,43 @@ describe('response cache', () => {
   });
 
   describe('entry cap eviction (LRU)', () => {
-    it('evicts the oldest entries past RESPONSE_CACHE_MAX_ENTRIES', () => {
+    it('evicts the oldest entries past RESPONSE_CACHE_MAX_ENTRIES', async () => {
       process.env.RESPONSE_CACHE_MAX_ENTRIES = '3';
       // Realistic, increasing timestamps so reads stay inside the default TTL;
       // the point under test is eviction by count, not TTL expiry.
       const base = 1_700_000_000_000;
       const keys = ['a', 'b', 'c', 'd', 'e'].map(t =>
         computeCacheKey({ model: 'auto', messages: [msg('user', t)] }));
-      keys.forEach((k, i) => store(k, `v${i}`, base + i));
+      for (const [i, k] of keys.entries()) await store(k, `v${i}`, base + i);
 
       expect(getCacheStats().entries).toBe(3);
       // Two oldest gone, three newest survive.
-      expect(getCachedResponse(keys[0]!, base + 10)).toBeNull();
-      expect(getCachedResponse(keys[1]!, base + 10)).toBeNull();
-      expect(getCachedResponse(keys[4]!, base + 10)).not.toBeNull();
+      expect(await getCachedResponse(keys[0]!, base + 10)).toBeNull();
+      expect(await getCachedResponse(keys[1]!, base + 10)).toBeNull();
+      expect(await getCachedResponse(keys[4]!, base + 10)).not.toBeNull();
     });
 
-    it('spares a recently-read entry from eviction (true LRU, not FIFO)', () => {
+    it('spares a recently-read entry from eviction (true LRU, not FIFO)', async () => {
       process.env.RESPONSE_CACHE_MAX_ENTRIES = '3';
       const base = 1_700_000_000_000;
       const keys = ['a', 'b', 'c'].map(t =>
         computeCacheKey({ model: 'auto', messages: [msg('user', t)] }));
-      keys.forEach((k, i) => store(k, `v${i}`, base + i)); // a,b,c
+      for (const [i, k] of keys.entries()) await store(k, `v${i}`, base + i); // a,b,c
       // Touch 'a' so it becomes most-recently-used; 'b' is now the coldest.
-      expect(getCachedResponse(keys[0]!, base + 5)).not.toBeNull();
+      expect(await getCachedResponse(keys[0]!, base + 5)).not.toBeNull();
       // Insert a 4th → evicts the LRU, which is now 'b', NOT 'a'.
       const d = computeCacheKey({ model: 'auto', messages: [msg('user', 'd')] });
-      store(d, 'v3', base + 6);
-      expect(getCachedResponse(keys[0]!, base + 7)).not.toBeNull(); // 'a' survived
-      expect(getCachedResponse(keys[1]!, base + 7)).toBeNull();     // 'b' evicted
+      await store(d, 'v3', base + 6);
+      expect(await getCachedResponse(keys[0]!, base + 7)).not.toBeNull(); // 'a' survived
+      expect(await getCachedResponse(keys[1]!, base + 7)).toBeNull();     // 'b' evicted
     });
   });
 
   describe('clearCache', () => {
-    it('removes every entry', () => {
-      store(computeCacheKey({ model: 'auto', messages: [msg('user', 'x')] }), 'x');
-      store(computeCacheKey({ model: 'auto', messages: [msg('user', 'y')] }), 'y');
-      expect(clearCache()).toBe(2);
+    it('removes every entry', async () => {
+      await store(computeCacheKey({ model: 'auto', messages: [msg('user', 'x')] }), 'x');
+      await store(computeCacheKey({ model: 'auto', messages: [msg('user', 'y')] }), 'y');
+      expect(await clearCache()).toBe(2);
       expect(getCacheStats().entries).toBe(0);
     });
   });
@@ -350,15 +350,15 @@ describe('response cache', () => {
   });
 
   describe('cacheActive (env switch)', () => {
-    it('off directive always wins; on directive forces; default follows env', () => {
+    it('off directive always wins; on directive forces; default follows env', async () => {
       delete process.env.RESPONSE_CACHE;
-      expect(isCacheEnabled()).toBe(false);
-      expect(cacheActive('off')).toBe(false);
-      expect(cacheActive('on')).toBe(true);
-      expect(cacheActive('default')).toBe(false);
+      expect(await isCacheEnabled()).toBe(false);
+      expect(await cacheActive('off')).toBe(false);
+      expect(await cacheActive('on')).toBe(true);
+      expect(await cacheActive('default')).toBe(false);
       process.env.RESPONSE_CACHE = 'on';
-      expect(cacheActive('default')).toBe(true);
-      expect(cacheActive('off')).toBe(false);
+      expect(await cacheActive('default')).toBe(true);
+      expect(await cacheActive('off')).toBe(false);
     });
   });
 
@@ -372,9 +372,9 @@ describe('response cache', () => {
       expect(getCachedStreamResponse('does-not-exist')).toBeNull();
     });
 
-    it('replays the exact SSE frames on a streaming hit', () => {
+    it('replays the exact SSE frames on a streaming hit', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'stream me')] });
-      storeCachedStreamResponse(key, {
+      await storeCachedStreamResponse(key, {
         frames: frames('streamed answer'),
         platform: 'groq',
         modelId: 'llama-3.3-70b',
@@ -389,30 +389,30 @@ describe('response cache', () => {
       expect(hit!.modelId).toBe('llama-3.3-70b');
     });
 
-    it('keeps JSON and streaming entries separate for the same key', () => {
+    it('keeps JSON and streaming entries separate for the same key', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'both')] });
-      store(key, 'json answer');
-      storeCachedStreamResponse(key, {
+      await store(key, 'json answer');
+      await storeCachedStreamResponse(key, {
         frames: frames('stream answer'),
         platform: 'groq', modelId: 'm', keyId: 1, promptTokens: 1, completionTokens: 1,
       });
       // The JSON store still serves its entry; the stream store its own.
-      expect((getCachedResponse(key)!.body as any).choices[0].message.content).toBe('json answer');
+      expect((await getCachedResponse(key)!.body as any).choices[0].message.content).toBe('json answer');
       expect(getCachedStreamResponse(key)!.sse).toBe(frames('stream answer').join(''));
     });
 
-    it('rejects an empty frame list (nothing to replay)', () => {
+    it('rejects an empty frame list (nothing to replay)', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'empty')] });
-      storeCachedStreamResponse(key, {
+      await storeCachedStreamResponse(key, {
         frames: [],
         platform: 'groq', modelId: 'm', keyId: 1, promptTokens: 1, completionTokens: 1,
       });
       expect(getCachedStreamResponse(key)).toBeNull();
     });
 
-    it('counts streaming hits in the aggregated stats and clearCache clears both', () => {
+    it('counts streaming hits in the aggregated stats and clearCache clears both', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'stats')] });
-      storeCachedStreamResponse(key, {
+      await storeCachedStreamResponse(key, {
         frames: frames('a'), platform: 'groq', modelId: 'm', keyId: 1, promptTokens: 10, completionTokens: 5,
       });
       getCachedStreamResponse(key);
@@ -421,20 +421,20 @@ describe('response cache', () => {
       expect(stats.entries).toBe(1);
       expect(stats.totalHits).toBe(2);
       expect(stats.savedPromptTokens).toBe(20); // 2 hits × 10
-      expect(clearCache()).toBe(1);
+      expect(await clearCache()).toBe(1);
       expect(getCacheStats().entries).toBe(0);
     });
 
-    it('counts streaming lookups in lookupHits / lookupMisses (dashboard hit rate)', () => {
+    it('counts streaming lookups in lookupHits / lookupMisses (dashboard hit rate)', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'rate')] });
       // Two misses: an absent key, then an expired entry.
       expect(getCachedStreamResponse(key)).toBeNull();
-      storeCachedStreamResponse(key, {
+      await storeCachedStreamResponse(key, {
         frames: frames('a'), platform: 'groq', modelId: 'm', keyId: 1, promptTokens: 1, completionTokens: 1,
       }, 1_000);
       expect(getCachedStreamResponse(key, 1_000 + 2 * 3600 * 1000)).toBeNull(); // past the 1h TTL
       // Then a hit on a fresh entry.
-      storeCachedStreamResponse(key, {
+      await storeCachedStreamResponse(key, {
         frames: frames('a'), platform: 'groq', modelId: 'm', keyId: 1, promptTokens: 1, completionTokens: 1,
       }, 2_000);
       expect(getCachedStreamResponse(key, 2_100)).not.toBeNull();
@@ -445,10 +445,10 @@ describe('response cache', () => {
       expect(stats.hitRate).toBeCloseTo(1 / 3);
     });
 
-    it('skips a stream that outgrew the replay byte ceiling', () => {
+    it('skips a stream that outgrew the replay byte ceiling', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'huge')] });
       const huge = 'x'.repeat(STREAM_CACHE_MAX_BYTES + 1);
-      storeCachedStreamResponse(key, {
+      await storeCachedStreamResponse(key, {
         frames: [`data: ${huge}\n\n`],
         platform: 'groq', modelId: 'm', keyId: 1, promptTokens: 1, completionTokens: 1,
       });
@@ -456,64 +456,64 @@ describe('response cache', () => {
       expect(getCacheStats().entries).toBe(0);
     });
 
-    it('shares one RESPONSE_CACHE_MAX_ENTRIES budget with the JSON store', () => {
+    it('shares one RESPONSE_CACHE_MAX_ENTRIES budget with the JSON store', async () => {
       process.env.RESPONSE_CACHE_MAX_ENTRIES = '3';
       const base = 1_700_000_000_000;
       const k = (t: string) => computeCacheKey({ model: 'auto', messages: [msg('user', t)] });
-      store(k('j1'), 'v1', base + 1);
-      store(k('j2'), 'v2', base + 2);
-      storeCachedStreamResponse(k('s1'), {
+      await store(k('j1'), 'v1', base + 1);
+      await store(k('j2'), 'v2', base + 2);
+      await storeCachedStreamResponse(k('s1'), {
         frames: frames('s1'), platform: 'groq', modelId: 'm', keyId: 1, promptTokens: 1, completionTokens: 1,
       }, base + 3);
       expect(getCacheStats().entries).toBe(3); // full, counting both stores
 
       // A 4th entry (either kind) evicts the coldest across BOTH stores, so
       // the total never exceeds the documented cap.
-      storeCachedStreamResponse(k('s2'), {
+      await storeCachedStreamResponse(k('s2'), {
         frames: frames('s2'), platform: 'groq', modelId: 'm', keyId: 1, promptTokens: 1, completionTokens: 1,
       }, base + 4);
       expect(getCacheStats().entries).toBe(3);
-      expect(getCachedResponse(k('j1'), base + 5)).toBeNull();           // oldest overall, evicted
-      expect(getCachedResponse(k('j2'), base + 5)).not.toBeNull();
+      expect(await getCachedResponse(k('j1'), base + 5)).toBeNull();           // oldest overall, evicted
+      expect(await getCachedResponse(k('j2'), base + 5)).not.toBeNull();
       expect(getCachedStreamResponse(k('s1'), base + 5)).not.toBeNull();
       expect(getCachedStreamResponse(k('s2'), base + 5)).not.toBeNull();
 
       // And a JSON insert can evict a colder STREAM entry, not just its own kind.
-      store(k('j3'), 'v3', base + 6);
-      store(k('j4'), 'v4', base + 7);
+      await store(k('j3'), 'v3', base + 6);
+      await store(k('j4'), 'v4', base + 7);
       expect(getCacheStats().entries).toBe(3);
       expect(getCachedStreamResponse(k('s1'), base + 8)).toBeNull();
     });
   });
 
   describe('settings-backed toggle (no restart)', () => {
-    it('the stored setting enables the cache even with the env var unset', () => {
+    it('the stored setting enables the cache even with the env var unset', async () => {
       delete process.env.RESPONSE_CACHE;
-      expect(isCacheEnabled()).toBe(false);
-      setSetting(CACHE_ENABLED_SETTING, '1');
-      expect(isCacheEnabled()).toBe(true);
+      expect(await isCacheEnabled()).toBe(false);
+      await setSetting(CACHE_ENABLED_SETTING, '1');
+      expect(await isCacheEnabled()).toBe(true);
     });
 
-    it('the stored setting wins over the env var', () => {
+    it('the stored setting wins over the env var', async () => {
       process.env.RESPONSE_CACHE = 'on';
-      setSetting(CACHE_ENABLED_SETTING, '0');
-      expect(isCacheEnabled()).toBe(false); // explicit off beats env on
-      setSetting(CACHE_ENABLED_SETTING, ''); // cleared → fall back to env
-      expect(isCacheEnabled()).toBe(true);
+      await setSetting(CACHE_ENABLED_SETTING, '0');
+      expect(await isCacheEnabled()).toBe(false); // explicit off beats env on
+      await setSetting(CACHE_ENABLED_SETTING, ''); // cleared → fall back to env
+      expect(await isCacheEnabled()).toBe(true);
     });
   });
 
   describe('hit rate', () => {
-    it('counts every lookup, so an eviction cannot drag the rate down', () => {
+    it('counts every lookup, so an eviction cannot drag the rate down', async () => {
       process.env.RESPONSE_CACHE_MAX_ENTRIES = '1';
       const a = computeCacheKey({ model: 'auto', messages: [msg('user', 'a')] });
       const b = computeCacheKey({ model: 'auto', messages: [msg('user', 'b')] });
 
-      store(a, 'answer a');
-      expect(getCachedResponse(a)).not.toBeNull(); // 1 hit
+      await store(a, 'answer a');
+      expect(await getCachedResponse(a)).not.toBeNull(); // 1 hit
       // Storing b evicts a, taking a's hit_count with it.
-      store(b, 'answer b');
-      expect(getCachedResponse(b)).not.toBeNull(); // 2 hits
+      await store(b, 'answer b');
+      expect(await getCachedResponse(b)).not.toBeNull(); // 2 hits
 
       const stats = getCacheStats();
       expect(stats.lookupHits).toBe(2);
@@ -524,15 +524,15 @@ describe('response cache', () => {
       expect(stats.totalHits).toBe(1);
     });
 
-    it('counts misses, including a lookup that found an expired entry', () => {
+    it('counts misses, including a lookup that found an expired entry', async () => {
       process.env.RESPONSE_CACHE_TTL_SECONDS = '60';
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'rate')] });
       const t0 = 5_000_000;
 
-      expect(getCachedResponse(key, t0)).toBeNull(); // cold miss
-      store(key, 'answer', t0);
-      expect(getCachedResponse(key, t0 + 1_000)).not.toBeNull(); // hit
-      expect(getCachedResponse(key, t0 + 120_000)).toBeNull(); // expired: a miss
+      expect(await getCachedResponse(key, t0)).toBeNull(); // cold miss
+      await store(key, 'answer', t0);
+      expect(await getCachedResponse(key, t0 + 1_000)).not.toBeNull(); // hit
+      expect(await getCachedResponse(key, t0 + 120_000)).toBeNull(); // expired: a miss
 
       const stats = getCacheStats();
       expect(stats.lookupHits).toBe(1);
@@ -547,13 +547,13 @@ describe('response cache', () => {
       expect(stats.hitRate).toBe(0);
     });
 
-    it('resets the tallies when the cache is flushed', () => {
+    it('resets the tallies when the cache is flushed', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'flush-rate')] });
-      store(key, 'answer');
-      getCachedResponse(key);
+      await store(key, 'answer');
+      await getCachedResponse(key);
       expect(getCacheStats().hitRate).toBe(1);
 
-      clearCache();
+      await clearCache();
       // A 100% hit rate beside zero entries would be nonsense.
       expect(getCacheStats().hitRate).toBe(0);
     });
@@ -571,16 +571,16 @@ describe('response cache', () => {
     const rowCount = async (): number =>
       ((await getDb().get('SELECT COUNT(*) AS n FROM response_cache')) as { n: number }).n;
 
-    it('survives a restart: store -> reload from DB -> hit', () => {
+    it('survives a restart: store -> reload from DB -> hit', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'persisted')] });
-      store(key, 'persisted answer');
+      await store(key, 'persisted answer');
       expect(getCacheStats().entries).toBe(1);
 
       __resetMemoryForTests();
       expect(getCacheStats().entries).toBe(0);
-      loadCacheFromDb();
+      await loadCacheFromDb();
 
-      const hit = getCachedResponse(key);
+      const hit = await getCachedResponse(key);
       expect(hit).not.toBeNull();
       expect((hit!.body as any).choices[0].message.content).toBe('persisted answer');
       expect(hit!.platform).toBe('groq');
@@ -590,7 +590,7 @@ describe('response cache', () => {
     it('persists nothing while the cache is off', async () => {
       process.env.RESPONSE_CACHE = 'false';
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'unpersisted')] });
-      store(key, 'answer');
+      await store(key, 'answer');
       __flushPersistenceForTests();
       expect(await rowCount()).toBe(0);
     });
@@ -598,25 +598,25 @@ describe('response cache', () => {
     it('persists nothing when RESPONSE_CACHE_PERSIST is off', async () => {
       process.env.RESPONSE_CACHE_PERSIST = 'false';
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'memory-only')] });
-      store(key, 'answer');
+      await store(key, 'answer');
       __flushPersistenceForTests();
       expect(await rowCount()).toBe(0);
       // Still cached in memory: only the disk half is disabled.
-      expect(getCachedResponse(key)).not.toBeNull();
+      expect(await getCachedResponse(key)).not.toBeNull();
     });
 
-    it('carries the rolling hit count across a restart', () => {
+    it('carries the rolling hit count across a restart', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'counted')] });
-      store(key, 'answer');
-      getCachedResponse(key);
-      getCachedResponse(key);
+      await store(key, 'answer');
+      await getCachedResponse(key);
+      await getCachedResponse(key);
       expect(getCacheStats().totalHits).toBe(2);
 
       __resetMemoryForTests();
-      loadCacheFromDb();
+      await loadCacheFromDb();
       // The hits reached the row, so the savings numbers do not reset to zero.
       expect(getCacheStats().totalHits).toBe(2);
-      getCachedResponse(key);
+      await getCachedResponse(key);
       expect(getCacheStats().totalHits).toBe(3);
     });
 
@@ -624,17 +624,17 @@ describe('response cache', () => {
       process.env.RESPONSE_CACHE_TTL_SECONDS = '60';
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'stale-persisted')] });
       const t0 = 1_000_000;
-      store(key, 'stale', t0);
+      await store(key, 'stale', t0);
 
       __resetMemoryForTests();
       // 10 minutes later (past the 60s TTL): startup purge drops the row.
-      loadCacheFromDb(t0 + 600_000);
-      expect(getCachedResponse(key, t0 + 600_000)).toBeNull();
+      await loadCacheFromDb(t0 + 600_000);
+      expect(await getCachedResponse(key, t0 + 600_000)).toBeNull();
       expect(getCacheStats().entries).toBe(0);
       expect(await rowCount()).toBe(0);
     });
 
-    it('respects RESPONSE_CACHE_MAX_ENTRIES when reloading', () => {
+    it('respects RESPONSE_CACHE_MAX_ENTRIES when reloading', async () => {
       process.env.RESPONSE_CACHE_MAX_ENTRIES = '2';
       const base = 1_700_000_000_000;
       const keys = ['p1', 'p2', 'p3'].map(t =>
@@ -642,43 +642,43 @@ describe('response cache', () => {
       // Stored with the cap raised so all three reach the table, then reloaded
       // under the cap — the load path has its own bound, separate from the LRU.
       process.env.RESPONSE_CACHE_MAX_ENTRIES = '10';
-      keys.forEach((k, i) => store(k, `v${i}`, base + i));
+      for (const [i, k] of keys.entries()) await store(k, `v${i}`, base + i);
       __flushPersistenceForTests();
       process.env.RESPONSE_CACHE_MAX_ENTRIES = '2';
 
       __resetMemoryForTests();
-      loadCacheFromDb(base + 10);
+      await loadCacheFromDb(base + 10);
       // Newest two win; the oldest row is dropped past the cap.
       expect(getCacheStats().entries).toBe(2);
-      expect(getCachedResponse(keys[0]!, base + 10)).toBeNull();
-      expect(getCachedResponse(keys[2]!, base + 10)).not.toBeNull();
+      expect(await getCachedResponse(keys[0]!, base + 10)).toBeNull();
+      expect(await getCachedResponse(keys[2]!, base + 10)).not.toBeNull();
     });
 
     it('drops the row when the LRU evicts the entry', async () => {
       process.env.RESPONSE_CACHE_MAX_ENTRIES = '1';
       const first = computeCacheKey({ model: 'auto', messages: [msg('user', 'evicted')] });
       const second = computeCacheKey({ model: 'auto', messages: [msg('user', 'survivor')] });
-      store(first, 'gone');
-      store(second, 'kept');
+      await store(first, 'gone');
+      await store(second, 'kept');
       __flushPersistenceForTests();
 
       expect(await rowCount()).toBe(1);
       __resetMemoryForTests();
-      loadCacheFromDb();
+      await loadCacheFromDb();
       // The evicted entry must not come back from disk.
-      expect(getCachedResponse(first)).toBeNull();
-      expect(getCachedResponse(second)).not.toBeNull();
+      expect(await getCachedResponse(first)).toBeNull();
+      expect(await getCachedResponse(second)).not.toBeNull();
     });
 
     it('drops the row when a read finds the entry expired', async () => {
       process.env.RESPONSE_CACHE_TTL_SECONDS = '60';
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'ttl-row')] });
       const t0 = 2_000_000;
-      store(key, 'stale', t0);
+      await store(key, 'stale', t0);
       __flushPersistenceForTests();
       expect(await rowCount()).toBe(1);
 
-      expect(getCachedResponse(key, t0 + 120_000)).toBeNull();
+      expect(await getCachedResponse(key, t0 + 120_000)).toBeNull();
       __flushPersistenceForTests();
       expect(await rowCount()).toBe(0);
     });
@@ -692,11 +692,11 @@ describe('response cache', () => {
       it('writes many hits in one debounced pass', async () => {
         const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'batched')] });
         const t0 = 5_000_000;
-        store(key, 'answer', t0);
+        await store(key, 'answer', t0);
         __flushPersistenceForTests();
-        getCachedResponse(key, t0 + 1);
-        getCachedResponse(key, t0 + 2);
-        getCachedResponse(key, t0 + 3);
+        await getCachedResponse(key, t0 + 1);
+        await getCachedResponse(key, t0 + 2);
+        await getCachedResponse(key, t0 + 3);
         __flushPersistenceForTests();
         // Nothing written per hit: the row still holds the stored value.
         expect(await hitRow(key)!.hit_count).toBe(0);
@@ -708,13 +708,13 @@ describe('response cache', () => {
 
       it('clearCache() drops pending counts so they never land on a re-stored entry', async () => {
         const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'cleared-pending')] });
-        store(key, 'old answer');
+        await store(key, 'old answer');
         __flushPersistenceForTests();
-        getCachedResponse(key);
-        getCachedResponse(key);
+        await getCachedResponse(key);
+        await getCachedResponse(key);
 
-        clearCache();
-        store(key, 'fresh answer');
+        await clearCache();
+        await store(key, 'fresh answer');
         __flushPersistenceForTests();
         vi.advanceTimersByTime(2_000);
         __flushPersistenceForTests();
@@ -725,20 +725,20 @@ describe('response cache', () => {
 
       it('a re-store drops the old entry\'s pending count', async () => {
         const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'restored-pending')] });
-        store(key, 'old answer');
+        await store(key, 'old answer');
         __flushPersistenceForTests();
-        getCachedResponse(key);
-        getCachedResponse(key);
+        await getCachedResponse(key);
+        await getCachedResponse(key);
 
         // Overwrite before the flush timer fires: the fresh row starts at 0.
-        store(key, 'new answer');
+        await store(key, 'new answer');
         __flushPersistenceForTests();
         vi.advanceTimersByTime(2_000);
         __flushPersistenceForTests();
         expect(await hitRow(key)!.hit_count).toBe(0);
 
         // Hits on the new entry still flush normally.
-        getCachedResponse(key);
+        await getCachedResponse(key);
         vi.advanceTimersByTime(2_000);
         __flushPersistenceForTests();
         expect(await hitRow(key)!.hit_count).toBe(1);
@@ -747,14 +747,14 @@ describe('response cache', () => {
 
     it('clearCache() purges SQLite too, so a restart does not resurrect entries', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'flushed')] });
-      store(key, 'answer');
+      await store(key, 'answer');
       __flushPersistenceForTests();
       expect(await rowCount()).toBe(1);
 
-      expect(clearCache()).toBe(1);
+      expect(await clearCache()).toBe(1);
       expect(await rowCount()).toBe(0);
-      loadCacheFromDb();
-      expect(getCachedResponse(key)).toBeNull();
+      await loadCacheFromDb();
+      expect(await getCachedResponse(key)).toBeNull();
     });
   });
 });

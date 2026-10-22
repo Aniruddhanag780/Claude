@@ -83,11 +83,11 @@ beforeAll(async () => {
   expect(models.length).toBeGreaterThanOrEqual(3);
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   // Memory AND disk: isOnCooldown falls back to the in-process map when no
   // persisted row exists, so a table wipe alone leaks the last case's bench.
-  clearCooldownsForKey(keyA);
-  clearCooldownsForKey(keyB);
+  await clearCooldownsForKey(keyA);
+  await clearCooldownsForKey(keyB);
   resetModelFailureWindows();
 });
 
@@ -110,17 +110,17 @@ describe('isAccountSuspendedError', () => {
 });
 
 describe('a suspended account benches the whole key, not one model', () => {
-  it('cools every enabled model of the platform on the failing key for the credit window', () => {
+  it('cools every enabled model of the platform on the failing key for the credit window', async () => {
     const state = newFallbackState();
-    recordRetryableFailure(routeFor(models[0], keyA), SUSPENDED(), state);
+    await recordRetryableFailure(routeFor(models[0], keyA), SUSPENDED(), state);
 
     for (const m of models) {
-      expect(isOnCooldown(PLATFORM, m.model_id, keyA), m.model_id).toBe(true);
+      expect(await isOnCooldown(PLATFORM, m.model_id, keyA), m.model_id).toBe(true);
     }
     // Credit-length bench (a day), on the sibling models too, not the 90s
     // transient or the per-model tier window.
-    expect(cooldownDecisionForError(routeFor(models[0], keyA), SUSPENDED()).source).toBe('credit');
-    const cds = getActiveCooldownsForKeys([keyA]).get(keyA) ?? [];
+    expect((await cooldownDecisionForError(routeFor(models[0], keyA), SUSPENDED())).source).toBe('credit');
+    const cds = (await getActiveCooldownsForKeys([keyA])).get(keyA) ?? [];
     const sibling = cds.find(c => c.modelId === models[1].model_id);
     expect(sibling).toBeDefined();
     expect(sibling!.expiresAtMs - Date.now()).toBeGreaterThan(PAYMENT_REQUIRED_COOLDOWN_MS - 60_000);
@@ -128,36 +128,36 @@ describe('a suspended account benches the whole key, not one model', () => {
     expect(state.skipPlatforms.has(PLATFORM)).toBe(true);
   });
 
-  it('leaves a sibling key on the same platform alone', () => {
-    recordRetryableFailure(routeFor(models[0], keyA), SUSPENDED(), newFallbackState());
+  it('leaves a sibling key on the same platform alone', async () => {
+    await recordRetryableFailure(routeFor(models[0], keyA), SUSPENDED(), newFallbackState());
     for (const m of models) {
-      expect(isOnCooldown(PLATFORM, m.model_id, keyB), m.model_id).toBe(false);
+      expect(await isOnCooldown(PLATFORM, m.model_id, keyB), m.model_id).toBe(false);
     }
   });
 
-  it('keeps a model-tier 403 on the per-model path', () => {
+  it('keeps a model-tier 403 on the per-model path', async () => {
     const state = newFallbackState();
-    recordRetryableFailure(routeFor(models[0], keyA), TIER_403(), state);
-    expect(isOnCooldown(PLATFORM, models[0].model_id, keyA)).toBe(true);
-    expect(isOnCooldown(PLATFORM, models[1].model_id, keyA)).toBe(false);
+    await recordRetryableFailure(routeFor(models[0], keyA), TIER_403(), state);
+    expect(await isOnCooldown(PLATFORM, models[0].model_id, keyA)).toBe(true);
+    expect(await isOnCooldown(PLATFORM, models[1].model_id, keyA)).toBe(false);
     expect(state.skipPlatforms.has(PLATFORM)).toBe(false);
-    expect(cooldownDecisionForError(routeFor(models[0], keyA), TIER_403()).source).toBe('tier');
+    expect((await cooldownDecisionForError(routeFor(models[0], keyA), TIER_403())).source).toBe('tier');
   });
 
 
   // #952: the bench is one of the router's OWN guesses, so an operator ceiling
   // caps it like the 402/403 benches it borrows its duration from.
-  it('honours the operator cooldown ceiling', () => {
-    setCooldownCeilingMs(10 * 60_000);
+  it('honours the operator cooldown ceiling', async () => {
+    await setCooldownCeilingMs(10 * 60_000);
     try {
-      recordRetryableFailure(routeFor(models[0], keyA), SUSPENDED(), newFallbackState());
-      const cds = getActiveCooldownsForKeys([keyA]).get(keyA) ?? [];
+      await recordRetryableFailure(routeFor(models[0], keyA), SUSPENDED(), newFallbackState());
+      const cds = (await getActiveCooldownsForKeys([keyA])).get(keyA) ?? [];
       expect(cds.length).toBeGreaterThan(1);
       for (const cd of cds) {
         expect(cd.expiresAtMs - Date.now()).toBeLessThanOrEqual(10 * 60_000 + 1_000);
       }
     } finally {
-      setCooldownCeilingMs(null);
+      await setCooldownCeilingMs(null);
     }
   });
   it('classifies for the attempt trail as forbidden (a 403 is what the client sees)', () => {
@@ -178,42 +178,42 @@ describe('distinct model_not_found hops short-circuit the platform within one re
     { status: 400 },
   );
 
-  it('rules the platform out from the Nth DISTINCT model miss', () => {
+  it('rules the platform out from the Nth DISTINCT model miss', async () => {
     const state = newFallbackState();
-    recordRetryableFailure(routeFor(models[0], keyA), notFoundErr(), state);
-    recordRetryableFailure(routeFor(models[1], keyA), notFoundErr(), state);
+    await recordRetryableFailure(routeFor(models[0], keyA), notFoundErr(), state);
+    await recordRetryableFailure(routeFor(models[1], keyA), notFoundErr(), state);
     // Under the limit: the platform stays reachable for the next hop.
     expect(state.skipPlatforms.has(PLATFORM)).toBe(false);
-    recordRetryableFailure(routeFor(models[2], keyA), notFoundErr(), state);
+    await recordRetryableFailure(routeFor(models[2], keyA), notFoundErr(), state);
     expect(state.skipPlatforms.has(PLATFORM)).toBe(true);
   });
 
-  it('repeated misses on the SAME model do not count toward the limit', () => {
+  it('repeated misses on the SAME model do not count toward the limit', async () => {
     const state = newFallbackState();
     for (let i = 0; i < 5; i++) {
-      recordRetryableFailure(routeFor(models[0], keyA), notFoundErr(), state);
+      await recordRetryableFailure(routeFor(models[0], keyA), notFoundErr(), state);
     }
     expect(state.skipPlatforms.has(PLATFORM)).toBe(false);
   });
 
-  it('never rules out the shared custom platform: each relay has its own catalog', () => {
+  it('never rules out the shared custom platform: each relay has its own catalog', async () => {
     const state = newFallbackState();
     // Three different relays, one stale model each. They all carry the platform
     // id 'custom', so a platform-wide skip would take healthy relays with it.
-    models.slice(0, 3).forEach((model, i) => {
+    for (const [i, model] of models.slice(0, 3).entries()) {
       const route = { ...routeFor(model, keyA), platform: 'custom', endpointScope: `https://relay-${i}.example/v1` };
-      recordRetryableFailure(route, notFoundErr(), state);
-    });
+      await recordRetryableFailure(route, notFoundErr(), state);
+    }
     expect(state.skipPlatforms.has('custom')).toBe(false);
     // The per-model skip still applies.
     expect(state.skipModels.size).toBe(3);
   });
 
-  it('misses on sibling keys of the same platform tally together (the catalog is shared)', () => {
+  it('misses on sibling keys of the same platform tally together (the catalog is shared)', async () => {
     const state = newFallbackState();
-    recordRetryableFailure(routeFor(models[0], keyA), notFoundErr(), state);
-    recordRetryableFailure(routeFor(models[1], keyB), notFoundErr(), state);
-    recordRetryableFailure(routeFor(models[2], keyA), notFoundErr(), state);
+    await recordRetryableFailure(routeFor(models[0], keyA), notFoundErr(), state);
+    await recordRetryableFailure(routeFor(models[1], keyB), notFoundErr(), state);
+    await recordRetryableFailure(routeFor(models[2], keyA), notFoundErr(), state);
     expect(state.skipPlatforms.has(PLATFORM)).toBe(true);
   });
 });

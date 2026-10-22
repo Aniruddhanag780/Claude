@@ -30,7 +30,10 @@ describe('initDb connection resolution (PG)', () => {
     await closeDb();
 
     expect(mkdirSpy).not.toHaveBeenCalled();
-    expect(openSpy).not.toHaveBeenCalled();
+    // Nothing may be CREATED on disk. Reading is fine — and unavoidable:
+    // importing the pg driver reads its own module files (mode "r").
+    const created = openSpy.mock.calls.filter((c) => c[1] && c[1] !== 'r');
+    expect(created).toEqual([]);
   });
 
   it('fails loudly when no connection string is configured', async () => {
