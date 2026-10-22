@@ -32,6 +32,7 @@ const { createApp } = await import('../../app.js');
 const { initDb, getDb, setSetting, getUnifiedApiKey } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const { setRoutingStrategy } = await import('../../services/router.js');
+const { TOOL_ARGUMENT_VALIDATION_SETTING } = await import('../../lib/tool-validate.js');
 
 async function post(app: Express, body: Record<string, unknown>, path = '/api/chat', headers: Record<string, string> = {}) {
   const server = app.listen(0, '127.0.0.1');
@@ -235,5 +236,98 @@ describe('long reasoning commits and keeps the stream alive (#1642)', () => {
     expect(streamChatCompletion).toHaveBeenCalledTimes(1);
     expect(raw).toContain('stream_error');
     expect(raw).toContain('data: [DONE]');
+  });
+
+  describe('after an early commit', () => {
+    const schema = { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] };
+    function* longReasoningThenBadToolCall(prefix = '') {
+      yield { choices: [{ delta: { reasoning_content: 'deep thought ' } }] };
+      skew += 16_000;
+      yield { choices: [{ delta: { reasoning_content: 'still thinking' } }] };
+      if (prefix) yield { choices: [{ delta: { content: prefix } }] };
+      yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'lookup', arguments: '{}' } }] } }] };
+      yield { choices: [{ delta: {}, finish_reason: 'tool_calls' }] };
+    }
+    afterEach(() => { getDb().prepare('DELETE FROM settings WHERE key = ?').run(TOOL_ARGUMENT_VALIDATION_SETTING); });
+
+    it('/v1/messages: still validates tool arguments and ends with an error event', async () => {
+      setSetting(TOOL_ARGUMENT_VALIDATION_SETTING, '1');
+      streamChatCompletion.mockImplementation(() => longReasoningThenBadToolCall());
+      const { raw } = await post(app(), { ...req, tools: [{ name: 'lookup', description: 'find', input_schema: schema }] }, '/v1/messages', auth());
+      expect(raw).toContain('event: ping');
+      expect(raw).toContain('event: error');
+      expect(raw).not.toContain('"tool_use"');
+    });
+
+    it('/v1/chat/completions: still validates tool arguments and ends with stream_error', async () => {
+      setSetting(TOOL_ARGUMENT_VALIDATION_SETTING, '1');
+      streamChatCompletion.mockImplementation(() => longReasoningThenBadToolCall());
+      const tools = [{ type: 'function', function: { name: 'lookup', description: 'find', parameters: schema } }];
+      const { raw } = await post(app(), { ...req, tools }, '/v1/chat/completions', auth());
+      expect(raw).toContain('still thinking');
+      expect(raw).toContain('stream_error');
+      expect(raw).not.toContain('"tool_calls":[');
+    });
+
+    it.each([
+      ['no text', ''],
+      ['whitespace-only text', '\n\n'],
+    ])('/api/chat (Ollama lane): still validates tool arguments after %s, ending with an error frame', async (_label, prefix) => {
+      setSetting(TOOL_ARGUMENT_VALIDATION_SETTING, '1');
+      streamChatCompletion.mockImplementation(() => longReasoningThenBadToolCall(prefix));
+      const tools = [{ type: 'function', function: { name: 'lookup', description: 'find', parameters: schema } }];
+      const { raw } = await post(app(), { ...req, tools });
+      const frames = raw.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+      expect(readStream(raw).thinking).toContain('still thinking');
+      expect(raw).not.toContain('"lookup"');
+      expect(frames.at(-1)).toMatchObject({ error: expect.stringMatching(/argument/i), done: true });
+    });
+
+    it('/v1/chat/completions: json mode never commits early, so prose still fails over invisibly', async () => {
+      streamChatCompletion
+        .mockImplementationOnce(() => longReasoning('just some prose'))
+        .mockImplementationOnce(() => textTurn('{"ok":true}'));
+      const { status, raw } = await post(app(), { ...req, response_format: { type: 'json_object' } }, '/v1/chat/completions', auth());
+      expect(status).toBe(200);
+      expect(streamChatCompletion).toHaveBeenCalledTimes(2);
+      expect(raw).toContain('{\\"ok\\":true}');
+      expect(raw).not.toContain('deep thought');
+      expect(raw).not.toContain('stream_error');
+    });
+
+    it.each(['/v1/messages', '/v1/chat/completions'])('%s: a client that leaves after the early commit is not logged as a provider failure', async (path) => {
+      // The upstream stalls until the server has seen the hang-up, then ends empty.
+      let hungUp!: () => void;
+      const clientLeft = new Promise<void>(r => { hungUp = r; });
+      let finished!: () => void;
+      const attemptOver = new Promise<void>(r => { finished = r; });
+      async function* reasoningThenStall() {
+        try {
+          yield { choices: [{ delta: { reasoning_content: 'deep thought ' } }] };
+          skew += 16_000;
+          yield { choices: [{ delta: { reasoning_content: 'still thinking' } }] };
+          await clientLeft;
+          yield { choices: [{ delta: {}, finish_reason: 'stop' }] };
+        } finally { finished(); }
+      }
+      streamChatCompletion.mockImplementation(() => reasoningThenStall());
+      getDb().prepare('DELETE FROM requests').run();
+      const server = app().listen(0, '127.0.0.1');
+      if (!server.listening) await new Promise<void>(resolve => server.once('listening', () => resolve()));
+      server.on('connection', socket => socket.on('close', () => setImmediate(hungUp)));
+      const abort = new AbortController();
+      const res = await fetch(`http://127.0.0.1:${(server.address() as any).port}${path}`, {
+        method: 'POST', signal: abort.signal,
+        headers: { 'Content-Type': 'application/json', ...auth() },
+        body: JSON.stringify(req),
+      });
+      expect(res.status).toBe(200); // committed early: headers are out
+      abort.abort();
+      await attemptOver;
+      await new Promise(r => setImmediate(r));
+      server.close();
+      expect(streamChatCompletion).toHaveBeenCalledTimes(1);
+      expect(getDb().prepare("SELECT COUNT(*) AS n FROM requests WHERE status = 'error'").get()).toEqual({ n: 0 });
+    });
   });
 });

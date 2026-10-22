@@ -1041,10 +1041,11 @@ async function streamCompletion(
     // Opt-in schema verdict, same rule as the non-streaming surface above and
     // as /chat/completions: this is the surface the silent failure hurt most,
     // and Claude Code streams. Placed after the dialect rescue so a rescued
-    // call is judged too, and gated on `!messageStarted` — once message_start
-    // has gone out there is no failing over, and tearing the SSE stream down
-    // would be worse for the client than a tool_use the schema dislikes.
-    if (isToolArgumentValidationEnabled() && !messageStarted && completedCalls.length > 0) {
+    // call is judged too, and gated on `!textBlockOpen`: once text has gone
+    // out there is no failing over, and tearing the SSE stream down would be
+    // worse for the client than a tool_use the schema dislikes. A #1642 early
+    // commit sent only pings, so a bad call there ends in the catch's error event.
+    if (isToolArgumentValidationEnabled() && !textBlockOpen && completedCalls.length > 0) {
       const invalid = invalidToolCallReasons(
         completedCalls.map(c => ({ function: { name: c.name, arguments: c.arguments } })),
         schemas,

@@ -484,9 +484,10 @@ export async function runInboundChat(
         // Opt-in schema verdict, before the tool calls are committed. Tool
         // calls are buffered to the end of the stream on this path, so a
         // tool-only turn has sent nothing yet and can still fail over. A turn
-        // that already streamed text is past its commit point — leave it
+        // that already streamed real text is past its commit point — leave it
         // alone rather than tearing down a stream the client is reading.
-        if (isToolArgumentValidationEnabled() && toolCalls.length > 0 && !committed) {
+        // Whitespace or an early reasoning commit (#1642) is not real text.
+        if (isToolArgumentValidationEnabled() && toolCalls.length > 0 && (!committed || !text.trim())) {
           const invalid = invalidToolCallReasons(toolCalls, schemas);
           if (invalid.length > 0) throw invalidToolArgumentsError(route.displayName, invalid);
         }

@@ -2707,7 +2707,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
               // #764: thinking-only chunks still consumed tokens — count them.
               if (reasoning.length > 0) totalOutputTokens += Math.ceil(reasoning.length / 4);
               // #1642: long reasoning with nothing sent yet: commit, then stream it live.
-              if (reasoning.length > 0 && !headerSent && Date.now() - attemptStart >= REASONING_HOLD_MAX_MS) flushHeaders();
+              // Not for response_format: json mode keeps its free failover (#933).
+              if (reasoning.length > 0 && !headerSent && !samplingParams.response_format && Date.now() - attemptStart >= REASONING_HOLD_MAX_MS) flushHeaders();
               if (choice.delta && Object.keys(choice.delta).some(k => k !== 'content' && k !== 'tool_calls' && choice.delta[k] != null)) {
                 // `usage: undefined` (dropped by JSON.stringify): it was held
                 // above and is re-emitted once, after our finish chunk.
@@ -2788,8 +2789,9 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           // Opt-in schema verdict, taken AFTER the rescue so it covers the
           // calls the rescue reconstructed from prose — those are the ones
           // most likely to be malformed, and running first exempted exactly
-          // them. `!headerSent` is the whole licence to throw here: the commit
-          // point is held until the first meaningful content, so the common
+          // them. No prose flushed yet is the whole licence to throw here (after
+          // a #1642 reasoning-only commit the catch ends it with `stream_error`):
+          // the commit point is held until the first meaningful content, so the common
           // tool-call turn (no prose before the call) has sent no bytes yet and
           // can still fail over invisibly. A turn that already flushed prose is
           // past the point of no return — the catch below would have to tear
@@ -2797,7 +2799,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           // for the client than forwarding a tool call the schema dislikes.
           // Off-by-default or not, this check must never turn a served answer
           // into a broken one.
-          if (isToolArgumentValidationEnabled() && !headerSent && completedCalls.length > 0) {
+          if (isToolArgumentValidationEnabled() && mode !== 'passthrough' && completedCalls.length > 0) {
             const invalid = invalidToolCallReasons(completedCalls, schemas);
             if (invalid.length > 0) throw invalidToolArgumentsError(route.displayName, invalid);
           }
@@ -2808,7 +2810,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           // throw below, which would bench a healthy model+key for 90s and
           // log a provider error for every Ctrl-C during a reasoning model's
           // TTFB window.
-          if (clientGone && !headerSent && heldText.trim().length === 0 && completedCalls.length === 0) {
+          if (clientGone && mode !== 'passthrough' && heldText.trim().length === 0 && completedCalls.length === 0) {
             console.log(`[Proxy] client disconnected before first token from ${route.displayName} — dropping attempt without benching`);
             return 'committed';
           }
@@ -2842,9 +2844,10 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           // model that answers in prose despite the forwarded response_format
           // ships the essay as a "success" — the worst case for a
           // machine-readable request. json mode held every byte (headers never
-          // flushed), so failing over here is free: skipBench (provider
-          // healthy, the MODEL misbehaved) + skipModelForRequest (a sibling
-          // key would misbehave identically). Mirrors proxy.ts non-stream.
+          // flushed, and the #1642 long-reasoning commit is skipped for it), so
+          // failing over here is free: skipBench (provider healthy, the MODEL
+          // misbehaved) + skipModelForRequest (a sibling key would misbehave
+          // identically). Mirrors proxy.ts non-stream.
           if (mode === 'json' && samplingParams.response_format && completedCalls.length === 0) {
             const enforced = enforceJsonContent(heldText);
             if (!enforced.ok) {
