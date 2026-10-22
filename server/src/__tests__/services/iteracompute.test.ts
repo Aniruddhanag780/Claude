@@ -1,5 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getProvider } from '../../providers/index.js';
 import { IteraComputeProvider, ITERACOMPUTE_BASE_URL } from '../../providers/iteracompute.js';
 import { AUTH_JSON_PROVIDER_MAP, parseKeysFromFile } from '../../lib/key-parser.js';
@@ -10,8 +9,7 @@ const completion = (model?: string) => ({ id: 'c', object: 'chat.completion', cr
   choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
   usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 } });
 
-beforeEach(() => { process.env.ENCRYPTION_KEY = '0'.repeat(64); initDb(':memory:'); });
-afterEach(() => { vi.restoreAllMocks(); getDb().close(); });
+afterEach(() => { vi.restoreAllMocks(); });
 
 describe('iteracompute registration and import (#1649)', () => {
   it('registers the adapter, the env import alias and one shared monthly pool', () => {
