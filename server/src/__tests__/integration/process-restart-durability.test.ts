@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { initTestDb } from '../helpers/test-db.js';
-import { getDb, setSetting, getSetting } from '../../db/index.js';
+import { getSetting } from '../../db/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

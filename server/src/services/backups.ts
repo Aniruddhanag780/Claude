@@ -236,13 +236,7 @@ function sqliteEscape(value: unknown): string {
   return `'${s.replace(/'/g, "''")}'`;
 }
 
-// PostgreSQL has no "show me the CREATE TABLE" catalog entry, and the dump
-// only has to carry rows: restore targets a database whose schema the
-// migrations already own. The schema is pinned by the dump header instead (the
-// migration ledger), which restore checks before replaying anything.
-async function createTable(_db: Db, _table: string): Promise<string | null> {
-  return null;
-}
+
 
 const TABLE_DEPENDENCIES: Record<string, string[]> = {
   fallback_config: ['models'],

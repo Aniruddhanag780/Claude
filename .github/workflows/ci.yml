@@ -17,6 +17,23 @@ jobs:
         # 20 is the CI baseline that has historically caught crashes newer local
         # Node versions hid; 22 is the current LTS most contributors run.
         node-version: ['20', '22']
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: freellmapi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/freellmapi
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/freellmapi
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
