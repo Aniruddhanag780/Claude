@@ -108,6 +108,30 @@ describe('initEncryptionKey — key file (dev fallback)', () => {
     expect(decrypt(ciphertext.encrypted, ciphertext.iv, ciphertext.authTag)).toBe(secret);
   });
 
+  it('refuses to generate a new key when the key file is gone but ciphertext exists', () => {
+    const { db, keyFile } = fileDb();
+    db.exec('CREATE TABLE api_keys (id INTEGER PRIMARY KEY, encrypted_key TEXT NOT NULL, iv TEXT NOT NULL, auth_tag TEXT NOT NULL)');
+    initEncryptionKey(db);
+    const enc = encrypt('provider-secret');
+    db.prepare('INSERT INTO api_keys (encrypted_key, iv, auth_tag) VALUES (?, ?, ?)').run(enc.encrypted, enc.iv, enc.authTag);
+
+    // The key file disappears (e.g. a different data directory, a partial copy).
+    fs.rmSync(keyFile);
+
+    expect(() => initEncryptionKey(db)).toThrow(/Refusing to generate a new key/);
+    // No replacement key was written over the gap.
+    expect(fs.existsSync(keyFile)).toBe(false);
+  });
+
+  it('still generates a key when the encrypted tables exist but are empty', () => {
+    const { db, keyFile } = fileDb();
+    db.exec('CREATE TABLE api_keys (id INTEGER PRIMARY KEY, encrypted_key TEXT NOT NULL, iv TEXT NOT NULL, auth_tag TEXT NOT NULL)');
+
+    initEncryptionKey(db);
+
+    expect(fs.existsSync(keyFile)).toBe(true);
+  });
+
   it('prefers the ENCRYPTION_KEY env over an existing key file', () => {
     const { db, keyFile } = fileDb();
     fs.writeFileSync(keyFile, 'a'.repeat(64));

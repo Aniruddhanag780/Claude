@@ -83,13 +83,30 @@ function writeKeyFileAtomic(keyFile: string, hex: string): void {
   }
 }
 
+// Tables that hold AES-256-GCM ciphertext written under the current key. Only
+// tables that exist are counted: the baseline migration calls
+// initEncryptionKey before later migrations have created client_profiles.
+const ENCRYPTED_TABLES = ['api_keys', 'client_profiles'] as const;
+
+function countEncryptedRows(db: Db): number {
+  let total = 0;
+  for (const table of ENCRYPTED_TABLES) {
+    const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    if (!exists) continue;
+    const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE encrypted_key IS NOT NULL`).get() as { n: number };
+    total += row.n;
+  }
+  return total;
+}
+
 /**
  * Initialize encryption key from env or an explicit local-dev fallback.
  * Must be called after DB is initialized.
  *
  * Precedence (dev fallback): ENCRYPTION_KEY env > existing key file next to the
  * DB > legacy `settings` table row (migrated to the file, then deleted) >
- * freshly generated key written to the file.
+ * freshly generated key written to the file. A fresh key is only generated when
+ * the DB holds no ciphertext; otherwise this throws rather than orphan it.
  */
 export function initEncryptionKey(db: Db): void {
   // 1. Explicit env key always wins.
@@ -146,7 +163,20 @@ export function initEncryptionKey(db: Db): void {
     return;
   }
 
-  // 4. Generate a fresh key and persist it to the file.
+  // 4. Generate a fresh key and persist it to the file — but only when nothing
+  //    in the DB was encrypted under a previous key. If ciphertext exists, the
+  //    key that wrote it has gone missing; generating a new one would leave
+  //    every stored provider key silently undecryptable, so refuse loudly.
+  const encryptedRows = countEncryptedRows(db);
+  if (encryptedRows > 0) {
+    cachedKey = null;
+    throw new Error(
+      `[crypto] Encryption key file ${keyFile} is missing, but the database at ${db.name} holds ` +
+      `${encryptedRows} encrypted row(s) written under a previous key. Refusing to generate a new key, ` +
+      'which would make them undecryptable. Restore the original key file (or set ENCRYPTION_KEY to the ' +
+      'original key), or point the server at a fresh database.',
+    );
+  }
   cachedKey = crypto.randomBytes(KEY_BYTES);
   writeKeyFileAtomic(keyFile, cachedKey.toString('hex'));
   console.warn(`[crypto] No ENCRYPTION_KEY set — generated a local dev key at ${keyFile}. Set ENCRYPTION_KEY for production.`);

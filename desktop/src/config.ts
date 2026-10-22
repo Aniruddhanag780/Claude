@@ -29,19 +29,48 @@ function configPath(): string {
   return path.join(app.getPath('userData'), 'config.json');
 }
 
+// A missing file is a first run and yields defaults. A file that exists but
+// cannot be read or parsed is NOT treated as empty: the next saveConfig would
+// overwrite it with defaults and the user's settings would be gone without a
+// trace. Move it aside so it survives for inspection, and say so loudly.
 export function loadConfig(): DesktopConfig {
+  const file = configPath();
+  let raw: string;
   try {
-    return JSON.parse(fs.readFileSync(configPath(), 'utf8')) as DesktopConfig;
-  } catch {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.error(`[desktop] could not read ${file}; using defaults for this session:`, err);
+    }
+    return {};
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as DesktopConfig;
+    throw new Error('config root is not a JSON object');
+  } catch (err) {
+    const quarantined = `${file}.corrupt-${Date.now()}`;
+    try {
+      fs.renameSync(file, quarantined);
+      console.error(`[desktop] ${file} is corrupt; moved it to ${quarantined} and using defaults:`, err);
+    } catch (renameErr) {
+      console.error(`[desktop] ${file} is corrupt and could not be moved aside; using defaults:`, err, renameErr);
+    }
     return {};
   }
 }
 
+// Write to a temp file in the same directory and rename it over config.json,
+// so a crash or full disk mid-write can never leave a truncated config behind.
 export function saveConfig(cfg: DesktopConfig): void {
+  const file = configPath();
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
   try {
-    fs.mkdirSync(app.getPath('userData'), { recursive: true });
-    fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+    fs.renameSync(tmp, file);
   } catch (err) {
-    console.warn('[desktop] could not persist config:', err);
+    try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    console.error('[desktop] could not persist config:', err);
   }
 }
