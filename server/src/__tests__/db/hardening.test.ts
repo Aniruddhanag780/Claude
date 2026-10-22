@@ -2,286 +2,136 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
-import { connectDb, getDefaultDbPath, shouldHardenDataDir } from '../../db/index.js';
-import { aclEntries } from '../helpers/acl.js';
+import { connectDb, closeDb } from '../../db/index.js';
+import { createPgPool, PgDb } from '../../db/pg.js';
+import { createBackup } from '../../services/backups.js';
+import { initTestDb } from '../helpers/test-db.js';
 
-const isWindows = process.platform === 'win32';
-const itPosix = it.skipIf(isWindows);
-const itWindows = it.skipIf(!isWindows);
+// The SQLite version of this file asserted three things that only exist for a
+// SQLite database file:
+//
+//   * `pragma('busy_timeout')` — a file-level lock timeout;
+//   * `pragma('foreign_keys')` and `pragma('journal_mode') = wal`;
+//   * the mode of the database FILE and its -wal/-shm sidecars.
+//
+// PostgreSQL has no database file, no busy_timeout pragma and no WAL
+// sidecars, so none of those can be asserted here. The guarantees behind them
+// still have to hold, and each has a PostgreSQL form:
+//
+//   * concurrent writers must WAIT for the lock instead of erroring
+//     -> lock_timeout is unset, so a blocked writer blocks;
+//   * foreign keys must be enforced
+//     -> the schema declares FK constraints and a violating insert is rejected;
+//   * writes must be durable
+//     -> fsync / synchronous_commit are on;
+//   * the data must not be readable by other local accounts
+//     -> the surviving artifact that holds data on disk is the backup dump,
+//        and it is written owner-only (0600).
 
-const created: string[] = [];
-const createdDirs: string[] = [];
+const ORIGINAL_DATA_DIR = process.env.FREEAPI_DATA_DIR;
 
-const ORIGINAL_DIR_HARDENING = process.env.FREEAPI_DB_DIR_HARDENING;
-const ORIGINAL_DB_PATH = process.env.FREEAPI_DB_PATH;
-
-function tempDbPath(): string {
-  const p = path.join(os.tmpdir(), `freeapi-hardening-${Date.now()}-${Math.random()}.db`);
-  created.push(p);
-  return p;
-}
-
-/** A directory that already exists, like a mounted volume or a shared temp dir:
- *  connectDb finds it rather than creating it. */
-function existingDir(): string {
-  const p = fs.mkdtempSync(path.join(os.tmpdir(), 'freeapi-hardening-existing-'));
-  createdDirs.push(p);
-  return p;
-}
-
-/** A path connectDb has to create, which is what earns it the right to harden
- *  it. Returns the not-yet-existent directory and the DB path inside it. */
-function unbornDataDir(): { dataDir: string; dbPath: string } {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'freeapi-hardening-parent-'));
-  createdDirs.push(parent);
-  const dataDir = path.join(parent, 'data');
-  return { dataDir, dbPath: path.join(dataDir, 'freeapi.db') };
-}
-
-afterEach(() => {
-  if (ORIGINAL_DIR_HARDENING === undefined) delete process.env.FREEAPI_DB_DIR_HARDENING;
-  else process.env.FREEAPI_DB_DIR_HARDENING = ORIGINAL_DIR_HARDENING;
-  if (ORIGINAL_DB_PATH === undefined) delete process.env.FREEAPI_DB_PATH;
-  else process.env.FREEAPI_DB_PATH = ORIGINAL_DB_PATH;
-
-  for (const p of created.splice(0)) {
-    for (const suffix of ['', '-wal', '-shm']) {
-      try { fs.unlinkSync(`${p}${suffix}`); } catch { /* best effort */ }
-    }
-  }
-  for (const p of createdDirs.splice(0)) {
-    try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best effort */ }
-  }
+afterEach(async () => {
+  if (ORIGINAL_DATA_DIR === undefined) delete process.env.FREEAPI_DATA_DIR;
+  else process.env.FREEAPI_DATA_DIR = ORIGINAL_DATA_DIR;
+  await closeDb().catch(() => { /* not connected */ });
 });
 
-describe('database runtime hardening', () => {
-  it('sets a busy timeout so concurrent writers wait instead of erroring', async () => {
-    const db = await connectDb(tempDbPath());
-    // pragma() returns a scalar or a row list depending on driver; normalise.
-    const raw = db.pragma('busy_timeout');
-    const value = Array.isArray(raw)
-      ? Number((raw[0] as Record<string, unknown>).timeout ?? (raw[0] as Record<string, unknown>).busy_timeout)
-      : Number(raw);
-    expect(value).toBe(5000);
+describe('database runtime hardening (PG)', () => {
+  it('makes a concurrent writer wait for the lock instead of failing', async () => {
+    await initTestDb();
+    const db = await connectDb();
+    await db.run('CREATE TABLE IF NOT EXISTS lock_probe (id INTEGER PRIMARY KEY, v INTEGER)');
+    await db.run('INSERT INTO lock_probe (id, v) VALUES (1, 0)');
+
+    // A second, independent pool over the SAME database: a separate session,
+    // so the two statements really contend for the row lock.
+    const other = new PgDb(createPgPool(process.env.DATABASE_URL!), true);
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+
+      // Writer A takes the row lock and holds it until we open the gate.
+      const writerA = db.transaction(async (tx) => {
+        await tx.run('UPDATE lock_probe SET v = 1 WHERE id = 1');
+        await gate;
+        await tx.run('UPDATE lock_probe SET v = 2 WHERE id = 1');
+      });
+
+      // Writer B must block on the lock rather than raise "could not obtain
+      // lock" — the PostgreSQL equivalent of SQLite's busy_timeout.
+      let settled = false;
+      let failed: unknown = null;
+      const writerB = other
+        .run('UPDATE lock_probe SET v = 3 WHERE id = 1')
+        .then(() => { settled = true; })
+        .catch((err) => { failed = err; settled = true; });
+
+      await new Promise((r) => setTimeout(r, 300));
+      expect(failed).toBeNull();
+      expect(settled).toBe(false); // still waiting for A's lock
+
+      release!();
+      await writerA;
+      await writerB;
+      expect(failed).toBeNull();
+
+      const row = await db.get<{ v: number }>('SELECT v FROM lock_probe WHERE id = 1');
+      expect(row?.v).toBe(3);
+    } finally {
+      await other.close();
+    }
   });
 
-  it('keeps foreign keys and WAL on', async () => {
-    const db = await connectDb(tempDbPath());
-    const fk = db.pragma('foreign_keys');
-    const fkValue = Array.isArray(fk)
-      ? Number((fk[0] as Record<string, unknown>).foreign_keys)
-      : Number(fk);
-    expect(fkValue).toBe(1);
+  it('enforces foreign keys', async () => {
+    await initTestDb();
+    const db = await connectDb();
 
-    const jm = db.pragma('journal_mode');
-    const jmValue = Array.isArray(jm)
-      ? String((jm[0] as Record<string, unknown>).journal_mode)
-      : String(jm);
-    expect(jmValue.toLowerCase()).toBe('wal');
+    // The schema really declares foreign keys...
+    const fks = await db.get<{ n: number }>(`
+      SELECT count(*)::int AS n FROM pg_constraint
+      WHERE contype = 'f' AND connamespace = 'public'::regnamespace
+    `);
+    expect(fks?.n).toBeGreaterThan(0);
+
+    // ...and the database refuses a row that would violate one.
+    await expect(
+      db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (999999999, 1, 1)'),
+    ).rejects.toThrow(/foreign key/i);
   });
 
-  // The DB holds encrypted provider keys and the dashboard password hash, so it
-  // must not be readable by other local accounts. The guarantee is the same on
-  // both platforms; only the mechanism that expresses it differs, so each leg
-  // asserts what its own OS can actually enforce. Asserting POSIX modes on
-  // Windows is not a stricter test — it is an unfalsifiable one: Node
-  // synthesizes 0o666 there and chmod cannot clear it, so the assertion failed
-  // whether or not the file was protected.
+  it('keeps writes durable', async () => {
+    await initTestDb();
+    const db = await connectDb();
 
-  itPosix('restricts the database file to the owner', async () => {
-    const dbPath = tempDbPath();
-    await connectDb(dbPath);
+    const fsync = await db.get<{ fsync: string }>('SHOW fsync');
+    expect(fsync?.fsync).toBe('on');
 
-    const mode = fs.statSync(dbPath).mode & 0o777;
-    expect(mode & 0o077).toBe(0);
+    const sync = await db.get<{ synchronous_commit: string }>('SHOW synchronous_commit');
+    expect(['on', 'remote_apply', 'remote_write']).toContain(sync?.synchronous_commit);
   });
 
-  itPosix('restricts the WAL sidecars once they exist', async () => {
-    const dbPath = tempDbPath();
-    const db = await connectDb(dbPath);
-    // Force a write so -wal/-shm are created, then reconnect to chmod them.
-    db.exec('CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY)');
-    db.exec('INSERT INTO probe (id) VALUES (1)');
-    await connectDb(dbPath);
+  it('writes backup dumps owner-only', async () => {
+    // The data directory holds the dumps; point it at a scratch directory so
+    // the test never writes into the repository.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'freeapi-hardening-'));
+    process.env.FREEAPI_DATA_DIR = dir;
+    try {
+      await initTestDb();
+      const db = await connectDb();
 
-    for (const suffix of ['-wal', '-shm']) {
-      const target = `${dbPath}${suffix}`;
-      if (!fs.existsSync(target)) continue;
-      const mode = fs.statSync(target).mode & 0o777;
+      const meta = await createBackup(db, { tables: ['models'] });
+      const row = await db.get<{ filepath: string }>(
+        'SELECT filepath FROM backups WHERE id = ?',
+        [meta.id],
+      );
+      expect(row?.filepath).toBeTruthy();
+
+      const mode = fs.statSync(row!.filepath).mode & 0o777;
+      // No access for group or other — the dump holds encrypted provider keys
+      // and request history, so only the owner may read it.
       expect(mode & 0o077).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
-  });
-
-  itWindows('restricts the database file to the owner', async () => {
-    const dbPath = tempDbPath();
-    await connectDb(dbPath);
-
-    const entries = aclEntries(dbPath);
-    // Inherited ACEs are where the extra principals come from: a file created
-    // under %TEMP% or a shared profile inherits Modify for app containers and
-    // for other local accounts. If any (I) survives, hardening did not run.
-    expect(entries.filter(e => e.includes('(I)'))).toEqual([]);
-    // Exactly the owner, SYSTEM and Administrators — the POSIX 0600 equivalent,
-    // where root likewise keeps access.
-    expect(entries).toHaveLength(3);
-  });
-
-  itWindows('restricts the WAL sidecars once they exist', async () => {
-    const dbPath = tempDbPath();
-    const db = await connectDb(dbPath);
-    // Force a write so -wal/-shm are created, then reconnect to harden them.
-    db.exec('CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY)');
-    db.exec('INSERT INTO probe (id) VALUES (1)');
-    await connectDb(dbPath);
-
-    let checked = 0;
-    for (const suffix of ['-wal', '-shm']) {
-      const target = `${dbPath}${suffix}`;
-      if (!fs.existsSync(target)) continue;
-      checked++;
-      expect(aclEntries(target).filter(e => e.includes('(I)'))).toEqual([]);
-    }
-    // The original test silently passed when neither sidecar existed; make the
-    // Windows leg say so rather than pretending it verified something.
-    //
-    // Note what the reconnect above buys, and what it does not: it proves the
-    // file pass restricts sidecars THAT ALREADY EXIST, which is the unclean
-    // shutdown case. It says nothing about a normal start, where the sidecars
-    // appear after connectDb has already been and gone — that is what the
-    // "data directory" block below covers.
-    expect(checked).toBeGreaterThan(0);
-  });
-
-  itWindows('leaves an already-restricted file unchanged when reconnecting', async () => {
-    const dbPath = tempDbPath();
-    await connectDb(dbPath);
-    const first = aclEntries(dbPath);
-    await connectDb(dbPath);
-
-    expect(aclEntries(dbPath)).toEqual(first);
-  });
-
-  it('works for an in-memory database without touching the filesystem', () => {
-    expect(async () => await connectDb(':memory:')).not.toThrow();
-  });
-});
-
-describe('data directory hardening policy', () => {
-  it('claims a directory it just created', () => {
-    expect(shouldHardenDataDir(existingDir(), true)).toBe(true);
-  });
-
-  it('claims the built-in default data directory, so upgrades are covered too', () => {
-    // An install that predates this change already has server/data, so it never
-    // hits the "we created it" case. Without this leg the fix would reach new
-    // installs only.
-    delete process.env.FREEAPI_DB_PATH;
-    expect(shouldHardenDataDir(path.dirname(getDefaultDbPath()), false)).toBe(true);
-  });
-
-  it('matches the default directory case-insensitively on Windows', () => {
-    delete process.env.FREEAPI_DB_PATH;
-    const defaultDir = path.dirname(getDefaultDbPath());
-    expect(shouldHardenDataDir(defaultDir.toUpperCase(), false, 'win32')).toBe(true);
-    // POSIX paths really are case-sensitive; the same leniency there would be a bug.
-    expect(shouldHardenDataDir(defaultDir.toUpperCase(), false, 'linux')).toBe(false);
-  });
-
-  it('refuses a pre-existing directory it was merely pointed at', () => {
-    // The whole reason this predicate exists: FREEAPI_DB_PATH=/tmp/freeapi.db
-    // must never end in chmod 0700 /tmp.
-    expect(shouldHardenDataDir(os.tmpdir(), false)).toBe(false);
-    expect(shouldHardenDataDir(existingDir(), false)).toBe(false);
-  });
-
-  it('lets an operator force it on for a directory of their own', () => {
-    process.env.FREEAPI_DB_DIR_HARDENING = '1';
-    expect(shouldHardenDataDir(os.tmpdir(), false)).toBe(true);
-  });
-
-  it('lets an operator force it off even where the default would apply', () => {
-    process.env.FREEAPI_DB_DIR_HARDENING = '0';
-    expect(shouldHardenDataDir(existingDir(), true)).toBe(false);
-  });
-
-  it('ignores a value it cannot interpret rather than guessing', () => {
-    process.env.FREEAPI_DB_DIR_HARDENING = 'maybe';
-    expect(shouldHardenDataDir(os.tmpdir(), false)).toBe(false);
-    expect(shouldHardenDataDir(existingDir(), true)).toBe(true);
-  });
-});
-
-describe('WAL sidecars on a normal start', () => {
-  // The case the file-by-file pass structurally cannot reach. SQLite creates
-  // -wal/-shm on the first write and deletes them on the last clean close, so
-  // on a real start there is nothing to harden by the time connectDb looks —
-  // and a real server, unlike the tests above, never reconnects to get a second
-  // chance. Only the directory can carry the restriction forward.
-  //
-  // Each leg asserts the guarantee its own OS actually expresses, because the
-  // two platforms reach it by genuinely different mechanisms: Windows inherits
-  // the ACL onto the new child, while POSIX never propagates modes and instead
-  // makes the child unreachable by clearing the directory's search bit.
-
-  async function connectAndWrite(dbPath: string): void {
-    const db = await connectDb(dbPath);
-    // Deliberately no second connectDb: this must hold for a process that opens
-    // the database exactly once, which is what the server does.
-    db.exec('CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY)');
-    db.exec('INSERT INTO probe (id) VALUES (1)');
-  }
-
-  function sidecars(dbPath: string): string[] {
-    return ['-wal', '-shm'].map(s => `${dbPath}${s}`).filter(p => fs.existsSync(p));
-  }
-
-  itPosix('makes the directory it created unreachable to other accounts', async () => {
-    const { dataDir, dbPath } = unbornDataDir();
-    await connectAndWrite(dbPath);
-
-    expect(sidecars(dbPath).length).toBeGreaterThan(0);
-    expect(fs.statSync(dataDir).mode & 0o077).toBe(0);
-    // Owner search+write must survive: 0600 here would lock the server out of
-    // its own data directory.
-    expect(fs.statSync(dataDir).mode & 0o700).toBe(0o700);
-  });
-
-  itWindows('gives the sidecars the restricted ACL by inheritance', async () => {
-    const { dataDir, dbPath } = unbornDataDir();
-    await connectAndWrite(dbPath);
-
-    const dirEntries = aclEntries(dataDir);
-    expect(dirEntries.filter(e => e.includes('(I)'))).toEqual([]);
-    expect(dirEntries).toHaveLength(3);
-    // Without (OI)(CI) the ACEs apply to the directory alone and no child ever
-    // sees them — the flags are the entire mechanism.
-    expect(dirEntries.every(e => e.includes('(OI)') && e.includes('(CI)'))).toBe(true);
-
-    const found = sidecars(dbPath);
-    expect(found.length).toBeGreaterThan(0);
-    for (const target of found) {
-      // Exactly the owner, SYSTEM and Administrators — inherited from the
-      // directory, since nothing hardened these files directly.
-      expect(aclEntries(target)).toHaveLength(3);
-    }
-  });
-
-  itPosix('leaves a directory it did not create exactly as it found it', async () => {
-    // The safety property that makes the default acceptable. A group-readable
-    // shared directory must come out of connectDb unchanged.
-    const dir = existingDir();
-    fs.chmodSync(dir, 0o755);
-    await connectAndWrite(path.join(dir, 'freeapi.db'));
-
-    expect(fs.statSync(dir).mode & 0o777).toBe(0o755);
-  });
-
-  itPosix('hardens that same directory once the operator opts in', async () => {
-    const dir = existingDir();
-    fs.chmodSync(dir, 0o755);
-    process.env.FREEAPI_DB_DIR_HARDENING = '1';
-    await connectAndWrite(path.join(dir, 'freeapi.db'));
-
-    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
   });
 });

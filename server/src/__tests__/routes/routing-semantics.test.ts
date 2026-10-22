@@ -194,7 +194,7 @@ describe('routing semantics', () => {
     expect(thrown.status).toBe(400);
     expect(thrown.message).toMatch(/no enabled models/i);
     // The named form of the same chain already behaved this way; both agree now.
-    expect(async () => await resolveRoutingChain('auto:default')).toThrow(/no enabled models/i);
+    await expect(resolveRoutingChain('auto:default')).rejects.toThrow(/no enabled models/i);
   });
 
   it('routes an active chain whose models are all switched off nowhere either', async () => {
@@ -202,7 +202,7 @@ describe('routing semantics', () => {
     await addKey('groq');
     (await db.run('UPDATE profile_models SET enabled = 0 WHERE profile_id = ?', [await activeProfileId()]));
 
-    expect(async () => await resolveRoutingChain('auto')).toThrow(/no enabled models/i);
+    await expect(resolveRoutingChain('auto')).rejects.toThrow(/no enabled models/i);
   });
 
   it('explicit named routing can still use a model disabled only for auto routing', async () => {
@@ -238,7 +238,7 @@ describe('key selection by remaining quota (#919)', () => {
    *  round-robin cursor that starts on it) would pick exactly the wrong key.
    *  The model id is per-test because the rotation cursor is keyed on it and
    *  outlives the in-memory DB. */
-  async function seedTwoKeys(modelId: string): { drained: number; roomy: number } {
+  async function seedTwoKeys(modelId: string): Promise<{ drained: number; roomy: number }> {
     await clearChain();
     const drained = await addKey('cerebras', 'drained');
     const roomy = await addKey('cerebras', 'roomy');
@@ -249,7 +249,7 @@ describe('key selection by remaining quota (#919)', () => {
   }
 
   it('routes to the key with the MOST quota left, even though it was added last', async () => {
-    const { drained, roomy } = seedTwoKeys('roomiest-key-wins');
+    const { drained, roomy } = await seedTwoKeys('roomiest-key-wins');
     await setKeySelectionStrategy('least-remaining');
 
     const routed = await routeRequest(100);
@@ -260,7 +260,7 @@ describe('key selection by remaining quota (#919)', () => {
   });
 
   it("leaves the rotation alone under the default 'auto' selection", async () => {
-    const { drained } = seedTwoKeys('auto-keeps-rotation');
+    const { drained } = await seedTwoKeys('auto-keeps-rotation');
     // Same data, setting untouched: the round-robin cursor still starts on the
     // first key, which is what proves the reordering above came from the knob.
     const routed = await routeRequest(100);

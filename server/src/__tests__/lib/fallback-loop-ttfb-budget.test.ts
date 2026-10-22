@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getDb, setSetting } from '../../db/index.js';
 import { newClientAbortError, newHedgeAbortError } from '../../lib/error-classify.js';
 import { newFallbackState, runFallbackLoop, type FallbackHooks } from '../../lib/fallback-loop.js';
@@ -7,42 +7,42 @@ import { acquireLease, inFlightForKey, releaseLease, resetLeases } from '../../s
 import type { RouteResult } from '../../services/router.js';
 import { initTestDb } from '../helpers/test-db.js';
 
-// Real PostgreSQL means socket I/O between timer registrations, which fake
-// timers cannot see. Drain real event-loop turns (captured real setTimeout)
-// around every fake-time advance so the loop registers its next timer, and
-// keep advancing until the loop settles.
-const realSetTimeout = globalThis.setTimeout;
-async function ioTurns(times = 100): Promise<void> {
-  for (let i = 0; i < times; i++) await new Promise((r) => realSetTimeout(r, 0) as unknown as void);
+const realSetImmediate = globalThis.setImmediate ?? ((fn: () => void) => setTimeout(fn, 0));
+async function flushIo(): Promise<void> {
+  await new Promise((r) => realSetImmediate(r));
 }
+let currentScenarioStalled = false;
 let fakeBase = 0;
 
-// Advance fake time to `target` (ms after test start) in small steps,
-// draining real event-loop turns between steps so the loop's PostgreSQL
-// awaits register their next fake timer before the clock moves on — the
-// async equivalent of upstream's synchronous in-window registrations.
 async function advanceTo(target: number): Promise<void> {
-  for (let i = 0; i < 6000; i++) {
-    await ioTurns(10);
-    const remaining = fakeBase + target - Date.now();
-    if (remaining <= 0) break;
-    await vi.advanceTimersByTimeAsync(Math.min(remaining, 100));
+  const goal = fakeBase + target;
+  while (!currentScenarioStalled && Date.now() < goal) {
+    while (vi.getTimerCount() === 0 && !currentScenarioStalled) {
+      await flushIo();
+    }
+    if (currentScenarioStalled) break;
+    if (vi.getTimerCount() > 0) {
+      await vi.advanceTimersToNextTimerAsync();
+    }
+  }
+  const remaining = goal - Date.now();
+  if (remaining > 0) {
+    await vi.advanceTimersByTimeAsync(remaining);
   }
 }
 
-// Same, then keep ticking in small steps until `run` settles.
-async function advanceRun(run: Promise<unknown>, target: number): Promise<void> {
+async function advanceRun(run: Promise<unknown>, _target?: number): Promise<void> {
   let done = false;
   run.then(() => { done = true; }, () => { done = true; });
-  for (let i = 0; i < 6000 && !done; i++) {
-    await ioTurns(10);
-    const remaining = fakeBase + target - Date.now();
-    if (remaining > 0) {
-      await vi.advanceTimersByTimeAsync(Math.min(remaining, 100));
-    } else if (vi.getTimerCount() > 0) {
-      await vi.advanceTimersByTimeAsync(100);
-    } else {
-      break;
+
+  for (let i = 0; i < 500 && !done; i++) {
+    while (vi.getTimerCount() === 0 && !done) {
+      await flushIo();
+    }
+    if (done) break;
+
+    if (vi.getTimerCount() > 0) {
+      await vi.advanceTimersToNextTimerAsync();
     }
   }
   await run;
@@ -57,6 +57,7 @@ interface Attempt {
 
 let nextKey = 50_000;
 function scenario(plan: Attempt[], overrides: Partial<FallbackHooks> = {}) {
+  currentScenarioStalled = false;
   const controller = new AbortController();
   const routed: RouteResult[] = [];
   const hooks = {
@@ -89,6 +90,7 @@ function scenario(plan: Attempt[], overrides: Partial<FallbackHooks> = {}) {
     dispatch: vi.fn<FallbackHooks['dispatch']>(async (_route, attempt, ctx) => {
       const target = plan[attempt];
       if (target.result === 'stalled') {
+        currentScenarioStalled = true;
         return await new Promise<never>((_resolve, reject) => {
           controller.signal.addEventListener('abort', () => reject(newHedgeAbortError()), { once: true });
         });
@@ -112,7 +114,7 @@ function scenario(plan: Attempt[], overrides: Partial<FallbackHooks> = {}) {
   return { hooks, routed };
 }
 
-async function history(platform: string, ttfbMs: number, endpointScope = ''): void {
+async function history(platform: string, ttfbMs: number, endpointScope = ''): Promise<void> {
   let keyId: number | null = null;
   if (endpointScope) {
     const row = (await getDb().run(`
@@ -142,6 +144,10 @@ function expectReleased(routes: RouteResult[]): void {
 }
 
 describe('endpoint TTFB-aware fallback budget (#1262)', () => {
+  beforeAll(async () => {
+    await initTestDb();
+  });
+
   beforeEach(async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -150,7 +156,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
     vi.stubEnv('SLOW_ENDPOINT_BUFFER_MS', '10000');
     vi.stubEnv('TTFB_BUDGET_WINDOW_MS', '604800000');
     vi.stubEnv('TTFB_BUDGET_HALF_LIFE_MS', '172800000');
-    await initTestDb();
+    await getDb().exec("DELETE FROM requests; DELETE FROM api_keys WHERE platform = 'custom';");
     resetLeases();
     invalidateTtfbBudgetCache();
     vi.useFakeTimers();
@@ -171,7 +177,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
     const { hooks, routed } = scenario([
       ...warmups(), { platform: 'slow', delayMs: 50_000, result: 'done' },
     ]);
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceRun(run, 65_000);
 
     expect(hooks.dispatch).toHaveBeenCalledTimes(3);
@@ -185,7 +191,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
     const { hooks, routed } = scenario([
       ...warmups(), { platform: 'slow', delayMs: 0, result: 'stalled' },
     ]);
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceTo(59_999);
     expect(hooks.abortInFlight).not.toHaveBeenCalled();
     await advanceRun(run, 60_000);
@@ -204,7 +210,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
     const { hooks } = scenario([
       ...warmups(25_000), { platform: 'slow', delayMs: 10_000, result: 'done' },
     ]);
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceRun(run, 110_000);
 
     expect(hooks.dispatch).toHaveBeenCalledTimes(3);
@@ -220,7 +226,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
       { platform: 'slow', delayMs: 50_000, result: 'retry' },
       { platform: 'fast', delayMs: 0, result: 'done' },
     ]);
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceRun(run, 60_000);
 
     expect(hooks.route).toHaveBeenCalledTimes(4);
@@ -240,7 +246,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
       ...warmups(),
       { platform, endpointScope: platform === 'custom' ? 'https://fast-relay.example/v1' : '', delayMs: 0, result: 'stalled' },
     ]);
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceRun(run, 45_000);
 
     expect(hooks.abortInFlight).toHaveBeenCalledTimes(1);
@@ -252,7 +258,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
     const { hooks } = scenario([
       ...warmups(20_000), { platform: 'slow', delayMs: 0, result: 'stalled' },
     ]);
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceRun(run, 80_000);
 
     // The final attempt owned 40s of an 80s budget, not 40s of 45s.
@@ -266,7 +272,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
     const { hooks, routed } = scenario([
       ...warmups(), { platform: 'slow', delayMs: 50_000, result: 'stream' },
     ]);
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceRun(run, 160_000);
 
     expect(hooks.abortInFlight).not.toHaveBeenCalled();
@@ -279,7 +285,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
     const { hooks } = scenario([
       ...warmups(), { platform: 'slow', delayMs: 150_000, result: 'done' },
     ], { timeBudgetMs: 0 });
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceRun(run, 160_000);
 
     expect(hooks.abortInFlight).not.toHaveBeenCalled();
@@ -292,7 +298,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
     const { hooks } = scenario([
       ...warmups(), { platform: 'slow', delayMs: 0, result: 'stalled' },
     ]);
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceRun(run, 45_000);
 
     expect(hooks.onExhausted.mock.calls[0][0].message).toContain('retry time budget 45s');
@@ -304,7 +310,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
     const { hooks } = scenario([
       ...warmups(), { platform: 'slow', delayMs: 0, result: 'stalled' },
     ], { timeBudgetMs: undefined });
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceTo(119_999);
     expect(hooks.abortInFlight).not.toHaveBeenCalled();
     await advanceRun(run, 120_000);
@@ -317,7 +323,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
     const { hooks, routed } = scenario([
       ...warmups(), { platform: 'slow', delayMs: 50_000, result: 'client_abort' },
     ]);
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceRun(run, 110_000);
 
     expect(hooks.dispatch).toHaveBeenCalledTimes(3);
@@ -329,7 +335,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
 
   it('preserves timeout exhaustion when routing is also exhausted after the base deadline', async () => {
     const { hooks } = scenario(warmups(25_000));
-    const run = await runFallbackLoop(hooks);
+    const run = runFallbackLoop(hooks);
     await advanceRun(run, 50_000);
 
     expect(hooks.onExhausted.mock.calls[0][1].timedOut).toBe(true);

@@ -58,26 +58,26 @@ describe('Typhoon transcription and catalog integration', () => {
   it.each(['text', 'verbose_json'])('normalizes output for the existing %s route formatter', async responseFormat => {
     await seed();
     vi.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify({ text: 'สวัสดี' })));
-    await expect(await runTranscription(models[0], { ...params, responseFormat })).resolves.toMatchObject({ text: 'สวัสดี' });
+    await expect(runTranscription(models[0], { ...params, responseFormat })).resolves.toMatchObject({ text: 'สวัสดี' });
   });
 
   it('does not advertise native VTT support', async () => {
     await seed();
     const fetch = vi.spyOn(global, 'fetch');
-    await expect(await runTranscription(models[0], { ...params, responseFormat: 'vtt' })).rejects.toMatchObject({ status: 400 });
+    await expect(runTranscription(models[0], { ...params, responseFormat: 'vtt' })).rejects.toMatchObject({ status: 400 });
     expect(fetch).not.toHaveBeenCalled();
   });
 
   it.each([{}, { text: 123 }, null])('rejects a successful response without transcription text (%j)', async body => {
     await seed();
     vi.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify(body)));
-    await expect(await runTranscription(models[0], params)).rejects.toMatchObject({ status: 502 });
+    await expect(runTranscription(models[0], params)).rejects.toMatchObject({ status: 502 });
   });
 
   it('preserves a 429 retry delay and benches the affected key/model', async () => {
     const key = await seed();
     vi.spyOn(global, 'fetch').mockResolvedValue(new Response('Rate limited', { status: 429, headers: { 'Retry-After': '20' } }));
-    await expect(await runTranscription(models[0], params)).rejects.toMatchObject({ status: 429, retryAfterMs: 20_000 });
+    await expect(runTranscription(models[0], params)).rejects.toMatchObject({ status: 429, retryAfterMs: 20_000 });
     expect(await isOnCooldown('typhoon', models[0], key)).toBe(true);
   });
 

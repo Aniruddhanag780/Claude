@@ -530,7 +530,7 @@ async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<
           counts.skippedUnknownPlatform++;
           continue;
         }
-        if (await isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
+        if (await isCatalogModelTombstoned(tx, 'media', m.platform, m.modelId)) continue;
         inMediaCatalog.add(`${m.platform}:${m.modelId}`);
         const mrow = await tx.get('SELECT id, enabled FROM media_models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as { id: number; enabled: number } | undefined;
         // Generative-media meta carries only the adapter request flavor today;
@@ -569,7 +569,7 @@ async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<
         counts.skippedUnknownPlatform++;
         continue;
       }
-      if (await isCatalogModelTombstoned(db, 'chat', m.platform, m.modelId)) continue;
+      if (await isCatalogModelTombstoned(tx, 'chat', m.platform, m.modelId)) continue;
       // A model auto-retired from a 410/end-of-life response (#634) is disabled,
       // not deleted. A catalog that STILL lists it — and lists it enabled — is
       // newer evidence than that one provider response, so lift the retirement.
@@ -577,7 +577,7 @@ async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<
       // replays the snapshot the retirement already came after, so replaying it
       // back would clear every retirement on the next boot, however fresh the
       // provider's 410 was.
-      if (m.enabled && newEvidence) await reinstateUpstreamRetiredCatalogModel(db, m.platform, m.modelId);
+      if (m.enabled && newEvidence) await reinstateUpstreamRetiredCatalogModel(tx, m.platform, m.modelId);
       inCatalog.add(`${m.platform}:${m.modelId}`);
 
       const row = await tx.get('SELECT id, enabled, source FROM models WHERE platform = ? AND model_id = ?', [m.platform, m.modelId]) as
@@ -621,8 +621,8 @@ async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<
       enabled = @enabled
     WHERE id = @id
   `, [{ ...fields, id: row.id, enabled }]);
-        await refreshModelOverrideBaselines(db, m.platform, m.modelId);
-        await applyModelOverrides(db, m.platform, m.modelId);
+        await refreshModelOverrideBaselines(tx, m.platform, m.modelId);
+        await applyModelOverrides(tx, m.platform, m.modelId);
         counts.updated++;
       } else {
         await tx.run(`
@@ -633,8 +633,8 @@ async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<
             @rpm, @rpd, @tpm, @tpd, @monthlyTokenBudget, @contextWindow,
             @enabled, @supportsVision, @supportsTools, 'catalog')
   `, [{ ...fields, platform: m.platform, modelId: m.modelId, enabled: m.enabled ? 1 : 0 }]);
-        await refreshModelOverrideBaselines(db, m.platform, m.modelId);
-        await applyModelOverrides(db, m.platform, m.modelId);
+        await refreshModelOverrideBaselines(tx, m.platform, m.modelId);
+        await applyModelOverrides(tx, m.platform, m.modelId);
         counts.inserted++;
       }
     }
@@ -648,7 +648,7 @@ async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<
           counts.skippedUnknownPlatform++;
           continue;
         }
-        if (await isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
+        if (await isCatalogModelTombstoned(tx, 'media', m.platform, m.modelId)) continue;
         inVideoCatalog.add(`${m.platform}:${m.modelId}`);
         const meta = typeof m.providerModelId === 'string'
           ? JSON.stringify({ providerModelId: m.providerModelId })
@@ -690,7 +690,7 @@ async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<
           counts.skippedUnknownPlatform++;
           continue;
         }
-        if (await isCatalogModelTombstoned(db, 'media', e.platform, e.engineId)) continue;
+        if (await isCatalogModelTombstoned(tx, 'media', e.platform, e.engineId)) continue;
         inSearchCatalog.add(`${e.platform}:${e.engineId}`);
         const meta: Record<string, unknown> = {};
         if (e.creditsPerQuery !== undefined) meta.creditsPerQuery = e.creditsPerQuery;
@@ -737,7 +737,7 @@ async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<
           counts.skippedUnknownPlatform++;
           continue;
         }
-        if (await isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
+        if (await isCatalogModelTombstoned(tx, 'media', m.platform, m.modelId)) continue;
         inDecisionCatalog.add(`${m.platform}:${m.modelId}`);
         const meta: Record<string, unknown> = {};
         if (typeof m.contextWindow === 'number') meta.contextWindow = m.contextWindow;
@@ -826,7 +826,7 @@ async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<
           counts.skippedUnknownPlatform++;
           continue;
         }
-        if (await isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
+        if (await isCatalogModelTombstoned(tx, 'media', m.platform, m.modelId)) continue;
         inTranscriptionCatalog.add(`${m.platform}:${m.modelId}`);
         const meta: Record<string, unknown> = {};
         if (m.subtitleFormats?.length) meta.subtitleFormats = m.subtitleFormats;
@@ -858,16 +858,18 @@ async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<
       }
     }
 
-    counts.removed += await deleteTombstonedCatalogModels(db);
-    await applyAllModelOverrides(db);
+    counts.removed += await deleteTombstonedCatalogModels(tx);
+    await applyAllModelOverrides(tx);
 
     // Ensure every model has a fallback_config row (same invariant migrations keep).
     const missingFb = await tx.all(`SELECT m.id FROM models m LEFT JOIN fallback_config f ON m.id = f.model_db_id WHERE f.id IS NULL`) as { id: number }[];
     if (missingFb.length > 0) {
       const maxPriority = (await tx.get('SELECT COALESCE(MAX(priority), 0) AS mx FROM fallback_config') as { mx: number }).mx;
-      missingFb.forEach(async (r, i) => await tx.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)', [r.id, maxPriority + 1 + i]));
+      for (let i = 0; i < missingFb.length; i++) {
+        await tx.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)', [missingFb[i].id, maxPriority + 1 + i]);
+      }
     }
-    await ensureAllModelsInProfiles(db);
+    await ensureAllModelsInProfiles(tx);
 
     // Remove catalog-managed models that the catalog no longer lists.
     // Ownership is decided by the `source` provenance column: only rows the
@@ -1017,7 +1019,7 @@ async function applyCatalogInner(db: Db, catalog: Catalog): Promise<NonNullable<
     await tx.run('DELETE FROM quirks');
     const now = Date.now();
     for (const q of catalog.quirks) {
-      const info = await tx.run(`INSERT INTO quirks (slug, title, body, severity, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)`, [q.slug, q.title, q.body, q.severity, now, now]);
+      const info = await tx.run(`INSERT INTO quirks (slug, title, body, severity, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`, [q.slug, q.title, q.body, q.severity, now, now]);
       for (const t of q.targets) await tx.run(`INSERT INTO quirk_targets (quirk_id, platform, model_glob) VALUES (?, ?, ?) RETURNING id`, [info.lastInsertRowid, t.platform ?? null, t.modelGlob ?? null]);
       counts.quirks++;
     }

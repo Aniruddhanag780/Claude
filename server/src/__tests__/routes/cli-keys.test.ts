@@ -80,8 +80,7 @@ describe('CLI provider keys through the dashboard API', () => {
 
   it('rejects a unified proxy key as dashboard authentication', async () => {
     const unified = (await getDb().get("SELECT value FROM settings WHERE key = 'unified_api_key'")) as { value: string };
-    await expect(await main(['keys', 'list', '--url', url, '--token', unified.value]))
-      .rejects.toThrow('Dashboard authentication failed');
+    await expect(main(['keys', 'list', '--url', url, '--token', unified.value])).rejects.toThrow('Dashboard authentication failed');
     expect(output).toBe('');
   });
 });

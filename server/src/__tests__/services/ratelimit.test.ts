@@ -1,4 +1,3 @@
-import fs from 'fs';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { getDb } from '../../db/index.js';
 import {
@@ -6,6 +5,7 @@ import {
   canUseTokens,
   recordRequest,
   recordTokens,
+  setCooldown,
   getRateLimitStatus,
   getNextCooldownDuration,
   getCooldownDurationForLimit,
@@ -19,16 +19,6 @@ import {
 } from '../../services/ratelimit.js';
 import { parseRetryAfterMs } from '../../providers/base.js';
 import { initTestDb } from '../helpers/test-db.js';
-
-function removeDbFile(dbPath: string) {
-  for (const suffix of ['', '-shm', '-wal']) {
-    try {
-      fs.unlinkSync(`${dbPath}${suffix}`);
-    } catch {
-      // Best-effort cleanup for temp SQLite files.
-    }
-  }
-}
 
 describe('Rate Limiter', () => {
   // Use unique identifiers per test to avoid cross-contamination
@@ -233,37 +223,31 @@ describe('Rate Limiter', () => {
   describe('persistent state', () => {
     it('preserves per-key usage and cooldowns after the limiter module reloads', async () => {
       process.env.ENCRYPTION_KEY = '0'.repeat(64);
-      const dbPath = `/tmp/freeapi-ratelimit-${Date.now()}-${Math.random()}.db`;
       const keyId = 4242;
-      let db: { close: () => void } | undefined;
 
+      await initTestDb();
+
+      await recordRequest('groq', 'persistent-model', keyId);
+      await recordTokens('groq', 'persistent-model', keyId, 950);
+      setCooldown('groq', 'persistent-model', keyId, 60_000);
+
+      // Reload the limiter module. A fresh module holds no in-memory state, so
+      // anything it can still see came back out of the database. On PG there
+      // is no database FILE to reopen — the persistence IS the database.
+      vi.resetModules();
+      const dbModule = await import('../../db/index.js');
+      await dbModule.connectDb();
+      const limiterAfterReload = await import('../../services/ratelimit.js');
       try {
-        vi.resetModules();
-        const dbModule = await import('../../db/index.js');
-        db = dbModule.initDb(dbPath);
-        const limiter = await import('../../services/ratelimit.js');
-
-        limiter.recordRequest('groq', 'persistent-model', keyId);
-        limiter.recordTokens('groq', 'persistent-model', keyId, 950);
-        limiter.setCooldown('groq', 'persistent-model', keyId, 60_000);
-        db.close();
-        db = undefined;
-
-        vi.resetModules();
-        const dbModuleAfterReload = await import('../../db/index.js');
-        db = dbModuleAfterReload.initDb(dbPath);
-        const limiterAfterReload = await import('../../services/ratelimit.js');
-
-        expect(limiterAfterReload.canMakeRequest('groq', 'persistent-model', keyId, {
+        expect(await limiterAfterReload.canMakeRequest('groq', 'persistent-model', keyId, {
           rpm: null, rpd: 1, tpm: null, tpd: null,
         })).toBe(false);
-        expect(limiterAfterReload.canUseTokens('groq', 'persistent-model', keyId, 100, {
+        expect(await limiterAfterReload.canUseTokens('groq', 'persistent-model', keyId, 100, {
           tpm: null, tpd: 1000,
         })).toBe(false);
-        expect(limiterAfterReload.isOnCooldown('groq', 'persistent-model', keyId)).toBe(true);
+        expect(await limiterAfterReload.isOnCooldown('groq', 'persistent-model', keyId)).toBe(true);
       } finally {
-        db?.close();
-        removeDbFile(dbPath);
+        await dbModule.closeDb().catch(() => { /* already closed */ });
       }
     });
   });

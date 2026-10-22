@@ -35,7 +35,7 @@ export async function reserveProviderCredential(
   `, [bound ? row.key_id : row.platform]) as KeyRow[];
   let budgetBlocked = false;
   for (const keyRow of keys) {
-    if (skip(keyRow.id)) continue;
+    if (await skip(keyRow.id)) continue;
     let key: string;
     try {
       key = decrypt(keyRow.encrypted_key, keyRow.iv, keyRow.auth_tag);

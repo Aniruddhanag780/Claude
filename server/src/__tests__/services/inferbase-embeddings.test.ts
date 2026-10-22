@@ -65,7 +65,7 @@ describe('Inferbase catalog-managed embeddings', () => {
   ])('rejects mismatched identities and invalid vectors instead of corrupting the family', async body => {
     await seed('test', 2);
     vi.spyOn(global, 'fetch').mockResolvedValue(json(body));
-    await expect(await runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({ status: 502 });
+    await expect(runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({ status: 502 });
   });
 
   it('rejects duplicate vector indices', async () => {
@@ -73,13 +73,13 @@ describe('Inferbase catalog-managed embeddings', () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(json({ model: 'test', data: [
       { index: 0, embedding: [0.1, 0.2] }, { index: 0, embedding: [0.3, 0.4] },
     ] }));
-    await expect(await runEmbeddings('inferbase-test', ['first', 'second'])).rejects.toMatchObject({ status: 502 });
+    await expect(runEmbeddings('inferbase-test', ['first', 'second'])).rejects.toMatchObject({ status: 502 });
   });
 
   it('preserves upstream rate-limit retry hints', async () => {
     await seed('test', 2);
     vi.spyOn(global, 'fetch').mockResolvedValue(new Response('upstream error', { status: 429, headers: { 'Retry-After': '20' } }));
-    await expect(await runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({ status: 429, retryAfterMs: 20_000 });
+    await expect(runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({ status: 429, retryAfterMs: 20_000 });
   });
 
   it.each([401, 402, 503])('fails closed on upstream HTTP %s without returning vectors', async status => {
@@ -87,7 +87,7 @@ describe('Inferbase catalog-managed embeddings', () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(new Response('upstream error', { status }));
     // The existing family router normalizes exhausted non-rate-limit failures
     // to 502, retaining the upstream status in its diagnostic message.
-    await expect(await runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({
+    await expect(runEmbeddings('inferbase-test', ['hello'])).rejects.toMatchObject({
       status: 502, message: expect.stringContaining(`upstream ${status}`),
     });
   });

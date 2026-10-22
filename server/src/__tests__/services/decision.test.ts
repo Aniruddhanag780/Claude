@@ -107,7 +107,7 @@ describe('decision service', () => {
     // A Gemini-shaped RetryInfo in the body with no Retry-After header: the
     // chat path (buildUpstreamError) already reads it; the decision chain must too.
     mockFetch(() => json({ error: { message: 'busy', retry_delay: '45s' } }, 429));
-    const err = await (await runDecision(REQUEST, { model: '@cf/cloudflare/clef-flash', clientAgent: null })).catch(e => e);
+    const err = await runDecision(REQUEST, { model: '@cf/cloudflare/clef-flash', clientAgent: null }).catch(e => e);
     expect(err).toBeInstanceOf(DecisionError);
     expect(err.status).toBe(429);
     expect(err.retryAfterMs).toBe(45_000);
@@ -116,7 +116,7 @@ describe('decision service', () => {
   it('prefers a header Retry-After over a body hint', async () => {
     await addKey('cloudflare', 'acct:tok');
     mockFetch(() => json({ error: { message: 'busy', retry_delay: '45s' } }, 429, { 'retry-after': '12' }));
-    const err = await (await runDecision(REQUEST, { model: '@cf/cloudflare/clef-flash', clientAgent: null })).catch(e => e);
+    const err = await runDecision(REQUEST, { model: '@cf/cloudflare/clef-flash', clientAgent: null }).catch(e => e);
     expect(err.retryAfterMs).toBe(12_000);
   });
 
@@ -129,23 +129,22 @@ describe('decision service', () => {
   });
 
   it('says how to fix it when no platform key exists', async () => {
-    await expect(await runDecision(REQUEST, { clientAgent: null })).rejects.toMatchObject({ status: 503, code: 'no_decision_keys' });
+    await expect(runDecision(REQUEST, { clientAgent: null })).rejects.toMatchObject({ status: 503, code: 'no_decision_keys' });
     expect(await decisionsAvailable()).toBe(false);
   });
 
   it('rejects an unknown or turned-off model with a 400', async () => {
     await addKey('openrouter');
-    await expect(await runDecision(REQUEST, { model: 'nope', clientAgent: null })).rejects.toMatchObject({ status: 400 });
+    await expect(runDecision(REQUEST, { model: 'nope', clientAgent: null })).rejects.toMatchObject({ status: 400 });
     const id = (await listDecisionModels()).find(m => m.platform === 'openrouter')!.id;
     expect(await setDecisionModelEnabled(id, false)).toBe(true);
-    await expect(await runDecision(REQUEST, { model: 'inception/mercury-decide:free', clientAgent: null }))
-      .rejects.toThrow(/turned off/);
+    await expect(runDecision(REQUEST, { model: 'inception/mercury-decide:free', clientAgent: null })).rejects.toThrow(/turned off/);
   });
 
   it('does not pass an upstream 401 through as the caller\'s fault', async () => {
     await addKey('cloudflare', 'acct:bad');
     mockFetch(() => json({ errors: [{ message: 'bad token' }] }, 401));
-    const err = await (await runDecision(REQUEST, { model: '@cf/cloudflare/clef-flash', clientAgent: null })).catch(e => e);
+    const err = await runDecision(REQUEST, { model: '@cf/cloudflare/clef-flash', clientAgent: null }).catch(e => e);
     expect(err).toBeInstanceOf(DecisionError);
     expect(err.status).toBe(502);
   });
@@ -153,7 +152,7 @@ describe('decision service', () => {
   it('treats a Cloudflare success:false body as a failure', async () => {
     await addKey('cloudflare', 'acct:tok');
     mockFetch(() => json({ success: false, errors: [{ message: 'model error' }] }));
-    await expect(await runDecision(REQUEST, { model: '@cf/cloudflare/clef-flash', clientAgent: null })).rejects.toMatchObject({ status: 502 });
+    await expect(runDecision(REQUEST, { model: '@cf/cloudflare/clef-flash', clientAgent: null })).rejects.toMatchObject({ status: 502 });
   });
 
   it('lists models with key counts and monthly usage', async () => {

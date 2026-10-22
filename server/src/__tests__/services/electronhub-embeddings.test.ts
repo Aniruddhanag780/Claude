@@ -50,12 +50,12 @@ describe('ElectronHub catalog-managed embeddings', () => {
   ])('rejects model substitution, invalid dimensions and malformed vectors', async body => {
     await seed('test', 2);
     vi.spyOn(global, 'fetch').mockResolvedValue(json(body));
-    await expect(await runEmbeddings('eh-test', ['hello'])).rejects.toMatchObject({ status: 502 });
+    await expect(runEmbeddings('eh-test', ['hello'])).rejects.toMatchObject({ status: 502 });
   });
 
   it('preserves rate-limit retry hints', async () => {
     await seed('test', 2);
     vi.spyOn(global, 'fetch').mockResolvedValue(new Response('Rate limited', { status: 429, headers: { 'Retry-After': '20' } }));
-    await expect(await runEmbeddings('eh-test', ['hello'])).rejects.toMatchObject({ status: 429, retryAfterMs: 20_000 });
+    await expect(runEmbeddings('eh-test', ['hello'])).rejects.toMatchObject({ status: 429, retryAfterMs: 20_000 });
   });
 });

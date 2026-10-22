@@ -42,13 +42,13 @@ describe('BeatAPI decision dispatch', () => {
   ])('fails closed on substituted, incomplete or malformed decisions', async body => {
     await seed('beatapi', 'jev-1.14-free', 'decision');
     vi.spyOn(global, 'fetch').mockResolvedValue(json(body));
-    await expect(await runDecision(request, { model: 'jev-1.14-free' })).rejects.toMatchObject({ status: 502 });
+    await expect(runDecision(request, { model: 'jev-1.14-free' })).rejects.toMatchObject({ status: 502 });
   });
 
   it('preserves BeatAPI body-stated account throttling', async () => {
     await seed('beatapi', 'jev-1.14-free', 'decision');
     vi.spyOn(global, 'fetch').mockResolvedValue(json({ error: { retry_after_seconds: 60 } }, 429));
-    await expect(await runDecision(request, { model: 'jev-1.14-free' })).rejects.toMatchObject({ status: 429, retryAfterMs: 60_000 });
+    await expect(runDecision(request, { model: 'jev-1.14-free' })).rejects.toMatchObject({ status: 429, retryAfterMs: 60_000 });
   });
 });
 
@@ -81,17 +81,17 @@ describe('SerpSearch dispatch', () => {
 
   it.each([null, { error: 'failed' }, { organic_results: 'bad' }])('rejects malformed successful responses', async body => {
     vi.spyOn(global, 'fetch').mockResolvedValue(json(body));
-    await expect(await runSearch('AI', { engine: 'serpsearch-search' })).rejects.toMatchObject({ status: 502 });
+    await expect(runSearch('AI', { engine: 'serpsearch-search' })).rejects.toMatchObject({ status: 502 });
   });
 
   it('passes an empty SERP to the existing no-hits fallback policy', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(json({ search_info: { total_results: '0' } }));
-    await expect(await runSearch('no results', { engine: 'serpsearch-search' })).rejects.toThrow('upstream returned no valid search hits');
+    await expect(runSearch('no results', { engine: 'serpsearch-search' })).rejects.toThrow('upstream returned no valid search hits');
   });
 
   it('honors the one-second upstream retry hint', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(json({ error: { code: 'RATE_LIMIT_EXCEEDED' } }, 429, { 'Retry-After': '1' }));
-    await expect(await runSearch('AI', { engine: 'serpsearch-search' })).rejects.toMatchObject({ status: 429, retryAfterMs: 1000 });
+    await expect(runSearch('AI', { engine: 'serpsearch-search' })).rejects.toMatchObject({ status: 429, retryAfterMs: 1000 });
   });
 });
 

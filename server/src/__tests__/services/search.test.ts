@@ -81,7 +81,7 @@ describe('search service', () => {
   });
 
   it('answers 503 no_search_keys when no engine has a key', async () => {
-    await expect(await runSearch('q')).rejects.toMatchObject({ status: 503, code: 'no_search_keys' });
+    await expect(runSearch('q')).rejects.toMatchObject({ status: 503, code: 'no_search_keys' });
   });
 
   it('skips engines without keys and maps Exa hits (text → content, rank scores)', async () => {
@@ -195,7 +195,7 @@ describe('search service', () => {
       await seedParallel();
       await addKey('parallel', 'no-key');
       mockFetch(() => json({ jsonrpc: '2.0', id: 1, result: { isError: true, content: [{ type: 'text', text: 'Rate limit exceeded for free tier' }] } }));
-      await expect(await runSearch('q')).rejects.toMatchObject({ status: 429 });
+      await expect(runSearch('q')).rejects.toMatchObject({ status: 429 });
       expect(await logRows()).toEqual([expect.objectContaining({ platform: 'parallel', status: 'error' })]);
     });
 
@@ -221,7 +221,7 @@ describe('search service', () => {
     const out = await runSearch('q');
     expect(calls(fn).map(c => c[0])).toEqual(['https://relay.example/v1/search', 'https://api.tavily.com/search']);
     expect(out.provider).toBe('tavily');
-    expect(await logRows().map(r => `${r.platform}:${r.status}`)).toEqual(['custom:error', 'tavily:ok']);
+    expect((await logRows()).map(r => `${r.platform}:${r.status}`)).toEqual(['custom:error', 'tavily:ok']);
   });
 
   it('cools a rate-limited key down and fails over to the next engine', async () => {
@@ -255,7 +255,7 @@ describe('search service', () => {
     await addKey('tavily');
     await addKey('exa');
     mockFetch(url => json({}, 429, { 'retry-after': url.includes('exa') ? '30' : '90' }));
-    const err = await (await runSearch('q')).catch(e => e) as SearchError;
+    const err = await runSearch('q').catch(e => e) as SearchError;
     expect(err).toBeInstanceOf(SearchError);
     expect(err.status).toBe(429);
     expect(err.retryAfterMs).toBe(30_000);
@@ -266,7 +266,7 @@ describe('search service', () => {
     // Tavily states its cap in prose; Exa in a RetryInfo-shaped field. With no
     // Retry-After header, the chain used to fall back to the 60s heuristic.
     mockFetch(() => new Response('too many requests, try again in 15 seconds', { status: 429 }));
-    const err = await (await runSearch('q')).catch(e => e) as SearchError;
+    const err = await runSearch('q').catch(e => e) as SearchError;
     expect(err).toBeInstanceOf(SearchError);
     expect(err.status).toBe(429);
     expect(err.retryAfterMs).toBe(15_000);
@@ -275,9 +275,9 @@ describe('search service', () => {
   it('reports a provider 401 as a 502, never as the caller’s auth failure', async () => {
     await addKey('tavily');
     mockFetch(() => json({ detail: 'bad key' }, 401));
-    await expect(await runSearch('q')).rejects.toMatchObject({ status: 502 });
+    await expect(runSearch('q')).rejects.toMatchObject({ status: 502 });
     // The rejected key is benched, so the next search is a retryable 429.
-    await expect(await runSearch('q')).rejects.toMatchObject({ status: 429, code: 'search_keys_cooling_down' });
+    await expect(runSearch('q')).rejects.toMatchObject({ status: 429, code: 'search_keys_cooling_down' });
   });
 
   it('pins an engine by id and rejects unknown or disabled ones', async () => {
@@ -286,9 +286,9 @@ describe('search service', () => {
     const fn = mockFetch(() => json({ results: [{ title: 'E', url: 'https://e', text: 'x' }] }));
     expect((await runSearch('q', { engine: 'exa-search' })).engine).toBe('exa-search');
     expect(calls(fn)).toHaveLength(1);
-    await expect(await runSearch('q', { engine: 'nope' })).rejects.toMatchObject({ status: 400 });
+    await expect(runSearch('q', { engine: 'nope' })).rejects.toMatchObject({ status: 400 });
     await updateSearchEngine((await listSearchEngines()).find(e => e.engineId === 'exa-search')!.id, { enabled: false });
-    await expect(await runSearch('q', { engine: 'exa-search' })).rejects.toMatchObject({ status: 400 });
+    await expect(runSearch('q', { engine: 'exa-search' })).rejects.toMatchObject({ status: 400 });
   });
 
   it('reorders engines locally and lists key and usage counts', async () => {
@@ -302,7 +302,7 @@ describe('search service', () => {
 
     mockFetch(() => json({ results: [{ type: 'text', name: 'L', url: 'https://l', content: 'c' }] }));
     await runSearch('q');
-    expect(await await await listSearchEngines()[0].searchesThisMonth).toBe(1);
+    expect((await listSearchEngines())[0].searchesThisMonth).toBe(1);
     expect(await updateSearchEngine(999_999, { enabled: false })).toBe(false);
   });
 

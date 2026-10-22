@@ -100,6 +100,7 @@ describe('initEncryptionKey — key file (dev fallback)', () => {
     delete process.env.ENCRYPTION_KEY;
     process.env.NODE_ENV = 'test';
     (await db.run("INSERT INTO settings (key, value) VALUES ('encryption_key', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", [K]));
+    fs.rmSync(KEY_FILE, { force: true });
     expect(fs.existsSync(KEY_FILE)).toBe(false);
 
     await initEncryptionKey(db);

@@ -495,9 +495,9 @@ export async function getKeyQuotaHeadroom(platform: Platform): Promise<Map<numbe
   if (cached && cached.db === db && now - cached.at < HEADROOM_TTL_MS) return cached.map;
 
   const rows = await db.all(`
-    SELECT key_id AS keyId,
-           limit_value AS limitValue,
-           remaining_value AS remainingValue,
+    SELECT key_id AS "keyId",
+           limit_value AS "limitValue",
+           remaining_value AS "remainingValue",
            CASE WHEN reset_at IS NOT NULL AND reset_at::timestamp < (now() at time zone 'utc')
                 THEN 1 ELSE 0 END AS expired
       FROM provider_quota_state
@@ -548,28 +548,28 @@ export async function getQuotaStateForKeys(options: { normalizeExpired?: boolean
   const rows = await db.all(`
     SELECT
       pqs.platform,
-      pqs.key_id AS keyId,
+      pqs.key_id AS "keyId",
       -- The panel identifies a row by its key. A bare "key #7" says nothing, so
       -- carry the operator's own name for it (#705).
-      k.label AS keyLabel,
-      pqs.quota_pool_key AS quotaPoolKey,
+      k.label AS "keyLabel",
+      pqs.quota_pool_key AS "quotaPoolKey",
       pqs.metric,
       pqs.limit_value AS "limit",
       pqs.remaining_value AS remaining,
-      pqs.reset_at AS resetAt,
-      pqs.reset_strategy AS resetStrategy,
+      pqs.reset_at AS "resetAt",
+      pqs.reset_strategy AS "resetStrategy",
       pqs.source,
       pqs.confidence,
       pqs.notes,
-      pqs.observed_at AS observedAt,
-      pqs.updated_at AS updatedAt,
-      NULL AS providerAccountId,
-      latest.model_id AS modelId,
+      pqs.observed_at AS "observedAt",
+      pqs.updated_at AS "updatedAt",
+      NULL AS "providerAccountId",
+      latest.model_id AS "modelId",
       latest.endpoint AS endpoint,
-      latest.status_code AS statusCode,
-      latest.retry_after_ms AS retryAfterMs,
-      latest.raw_json AS rawJson,
-      latest.created_at AS createdAt
+      latest.status_code AS "statusCode",
+      latest.retry_after_ms AS "retryAfterMs",
+      latest.raw_json AS "rawJson",
+      latest.created_at AS "createdAt"
     FROM provider_quota_state pqs
     LEFT JOIN api_keys k ON k.id = pqs.key_id
     LEFT JOIN provider_quota_observations latest

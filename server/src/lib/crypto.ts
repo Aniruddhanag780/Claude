@@ -84,6 +84,12 @@ function writeKeyFileAtomic(keyFile: string, hex: string): void {
   }
 }
 
+function keyFilePathFor(db: Db): string | null {
+  if ((db as any).memory === true || (db as any).keyFilePath === null) return null;
+  if (typeof (db as any).keyFilePath === 'string') return (db as any).keyFilePath;
+  return KEY_FILE_PATH;
+}
+
 /**
  * Initialize encryption key from env or an explicit local-dev fallback.
  * Must be called after DB is initialized.
@@ -104,7 +110,22 @@ export async function initEncryptionKey(db: Db): Promise<void> {
     throw missingKeyError();
   }
 
-  const keyFile = KEY_FILE_PATH;
+  const keyFile = keyFilePathFor(db);
+
+  // In-memory / anonymous DBs have no directory to hold a key file, so keep the
+  // legacy settings-table behavior for them (ephemeral runs, most tests).
+  if (!keyFile) {
+    const row = await db.get<{ value: string }>("SELECT value FROM settings WHERE key = 'encryption_key'");
+    if (row) {
+      cachedKey = parseHexKey(row.value, 'db');
+      console.warn('[crypto] No ENCRYPTION_KEY set — using an auto-generated in-memory key (dev only).');
+      return;
+    }
+    cachedKey = crypto.randomBytes(KEY_BYTES);
+    await db.run("INSERT INTO settings (key, value) VALUES ('encryption_key', ?)", [cachedKey.toString('hex')]);
+    console.warn('[crypto] No ENCRYPTION_KEY set — generated an in-memory dev key. Set ENCRYPTION_KEY for production.');
+    return;
+  }
 
   // 2. An existing local dev key file.
   if (fs.existsSync(keyFile)) {

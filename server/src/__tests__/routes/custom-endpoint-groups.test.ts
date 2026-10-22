@@ -38,11 +38,11 @@ const post = (app: Express, path: string, body: unknown) => request(app, 'POST',
 const get = (app: Express, path: string) => request(app, 'GET', path);
 const patch = (app: Express, path: string, body: unknown) => request(app, 'PATCH', path, body);
 
-async function keysOf(baseUrl: string): { id: number; group_label: string | null; enabled: number }[] {
+async function keysOf(baseUrl: string): Promise<{ id: number; group_label: string | null; enabled: number }[]> {
   return (await getDb().all("SELECT id, group_label, enabled FROM api_keys WHERE platform = 'custom' AND base_url = ? ORDER BY id", [baseUrl])) as { id: number; group_label: string | null; enabled: number }[];
 }
 
-async function modelRowOn(baseUrl: string, modelId = SHARED_MODEL): number {
+async function modelRowOn(baseUrl: string, modelId = SHARED_MODEL): Promise<number> {
   const row = (await getDb().get("SELECT id FROM models WHERE platform = 'custom' AND model_id = ? AND endpoint_scope = ?", [modelId, baseUrl])) as { id: number } | undefined;
   if (!row) throw new Error(`no ${modelId} row on ${baseUrl}`);
   return row.id;
@@ -92,7 +92,7 @@ describe('custom endpoint groups (#1176)', () => {
         baseUrl: RELAY_A, model: SHARED_MODEL, apiKey: 'key-a', groupLabel: '  Work   relays ',
       });
       expect(added.status).toBe(201);
-      expect(await keysOf(RELAY_A).map(k => k.group_label)).toEqual(['Work relays']);
+      expect((await keysOf(RELAY_A)).map(k => k.group_label)).toEqual(['Work relays']);
 
       const list = await get(app, '/api/keys');
       const row = (list.body as any[]).find(k => k.baseUrl === RELAY_A);
@@ -101,7 +101,7 @@ describe('custom endpoint groups (#1176)', () => {
 
     it('leaves an endpoint in the default group when none is given', async () => {
       await post(app, '/api/keys/custom', { baseUrl: RELAY_A, model: SHARED_MODEL, apiKey: 'key-a' });
-      expect(await keysOf(RELAY_A).map(k => k.group_label)).toEqual([null]);
+      expect((await keysOf(RELAY_A)).map(k => k.group_label)).toEqual([null]);
       const list = await get(app, '/api/keys');
       expect((list.body as any[]).find(k => k.baseUrl === RELAY_A).groupLabel).toBeNull();
     });
@@ -114,11 +114,11 @@ describe('custom endpoint groups (#1176)', () => {
       const res = await patch(app, `/api/keys/${first!.id}`, { groupLabel: 'Work' });
       expect(res.status).toBe(200);
       expect(res.body.groupLabel).toBe('Work');
-      expect(await keysOf(RELAY_A).map(k => k.group_label)).toEqual(['Work', 'Work']);
+      expect((await keysOf(RELAY_A)).map(k => k.group_label)).toEqual(['Work', 'Work']);
 
       // '' moves the whole endpoint back to the default group.
       await patch(app, `/api/keys/${first!.id}`, { groupLabel: '' });
-      expect(await keysOf(RELAY_A).map(k => k.group_label)).toEqual([null, null]);
+      expect((await keysOf(RELAY_A)).map(k => k.group_label)).toEqual([null, null]);
     });
 
     it('gives a key added to a grouped endpoint the same group', async () => {
@@ -126,14 +126,14 @@ describe('custom endpoint groups (#1176)', () => {
       // Credential-only add (#702), no group in the submit.
       const res = await post(app, '/api/keys/custom', { baseUrl: RELAY_A, apiKey: 'key-a2' });
       expect(res.status).toBe(201);
-      expect(await keysOf(RELAY_A).map(k => k.group_label)).toEqual(['Work', 'Work']);
+      expect((await keysOf(RELAY_A)).map(k => k.group_label)).toEqual(['Work', 'Work']);
     });
 
     it('does not touch other endpoints', async () => {
       await post(app, '/api/keys/custom', { baseUrl: RELAY_A, model: SHARED_MODEL, apiKey: 'key-a' });
       await post(app, '/api/keys/custom', { baseUrl: RELAY_B, model: SHARED_MODEL, apiKey: 'key-b' });
-      await patch(app, `/api/keys/${await keysOf(RELAY_A)[0]!.id}`, { groupLabel: 'Work' });
-      expect(await keysOf(RELAY_B).map(k => k.group_label)).toEqual([null]);
+      await patch(app, `/api/keys/${(await keysOf(RELAY_A))[0]!.id}`, { groupLabel: 'Work' });
+      expect((await keysOf(RELAY_B)).map(k => k.group_label)).toEqual([null]);
     });
 
     it('rejects a group on a built-in provider key', async () => {
@@ -153,15 +153,15 @@ describe('custom endpoint groups (#1176)', () => {
       const off = await patch(app, '/api/keys/platform/custom', { enabled: false, group: 'Work' });
       expect(off.status).toBe(200);
       expect(off.body.updatedKeys).toBe(1);
-      expect(await keysOf(RELAY_A).map(k => k.enabled)).toEqual([0]);
-      expect(await keysOf(RELAY_B).map(k => k.enabled)).toEqual([1]);
+      expect((await keysOf(RELAY_A)).map(k => k.enabled)).toEqual([0]);
+      expect((await keysOf(RELAY_B)).map(k => k.enabled)).toEqual([1]);
 
       await patch(app, '/api/keys/platform/custom', { enabled: false, group: null });
-      expect(await keysOf(RELAY_B).map(k => k.enabled)).toEqual([0]);
+      expect((await keysOf(RELAY_B)).map(k => k.enabled)).toEqual([0]);
 
       // No group keeps the old whole-platform sweep.
       await patch(app, '/api/keys/platform/custom', { enabled: true });
-      expect([...await keysOf(RELAY_A), ...await keysOf(RELAY_B)].map(k => k.enabled)).toEqual([1, 1]);
+      expect([...(await keysOf(RELAY_A)), ...(await keysOf(RELAY_B))].map(k => k.enabled)).toEqual([1, 1]);
     });
 
     it('refuses a group on a built-in platform', async () => {
@@ -197,7 +197,7 @@ describe('custom endpoint groups (#1176)', () => {
     it('follows a regroup without a restart', async () => {
       await post(app, '/api/keys/custom', { baseUrl: RELAY_A, model: SHARED_MODEL, apiKey: 'key-a', groupLabel: 'Work' });
       expect(resolveRequestedIdToMembers(`custom:${SHARED_MODEL}#work`, await getModelGroups())).not.toBeNull();
-      await patch(app, `/api/keys/${await keysOf(RELAY_A)[0]!.id}`, { groupLabel: 'Home' });
+      await patch(app, `/api/keys/${(await keysOf(RELAY_A))[0]!.id}`, { groupLabel: 'Home' });
       expect(resolveRequestedIdToMembers(`custom:${SHARED_MODEL}#work`, await getModelGroups())).toBeNull();
       expect(resolveRequestedIdToMembers(`custom:${SHARED_MODEL}#home`, await getModelGroups())).toEqual([await modelRowOn(RELAY_A)]);
     });

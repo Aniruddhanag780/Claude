@@ -143,7 +143,7 @@ describe('declarative config import', () => {
           { platform: 'groq', key: 'gsk_config_key', label: 'config' },
         ],
       });
-      expect(async () => await applyDeclarativeConfigFromEnv()).not.toThrow();
+      await expect(applyDeclarativeConfigFromEnv()).resolves.toBeDefined();
       expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'groq'")) as { n: number }).n).toBe(1);
       expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'pollinations'")) as { n: number }).n).toBe(0);
     } finally {
@@ -184,13 +184,13 @@ describe('declarative config import', () => {
     expect(((await getDb().get("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'kilo'")) as { n: number }).n).toBe(1);
   });
 
-  it('genuinely malformed config still fails loudly', () => {
-    expect(async () => await applyDeclarativeConfig({ keys: [{ platform: 'groq' }], nonsense: true }))
-      .toThrow(/invalid declarative config/);
-    expect(async () => await applyDeclarativeConfig({ keys: [{ platform: 'unknown-platform', key: 'x' }] }))
-      .toThrow(/unknown provider platform/);
+  it('genuinely malformed config still fails loudly', async () => {
+    await expect(applyDeclarativeConfig({ keys: [{ platform: 'groq' }], nonsense: true }))
+      .rejects.toThrow(/invalid declarative config/);
+    await expect(applyDeclarativeConfig({ keys: [{ platform: 'unknown-platform', key: 'x' }] }))
+      .rejects.toThrow(/unknown provider platform/);
     process.env.FREEAPI_CONFIG_JSON = '{ not json';
-    expect(async () => await applyDeclarativeConfigFromEnv()).toThrow();
+    await expect(applyDeclarativeConfigFromEnv()).rejects.toThrow();
   });
 });
 
@@ -231,9 +231,9 @@ describe('declarative config with two relays serving one model id', () => {
   }
 
   it('refuses an ambiguous model edit instead of patching an arbitrary relay', async () => {
-    expect(async () => await applyDeclarativeConfig({
+    await expect(applyDeclarativeConfig({
       models: [{ platform: 'custom', modelId: 'shared-model', displayName: 'Renamed' }],
-    })).toThrow(/more than one endpoint/i);
+    })).rejects.toThrow(/more than one endpoint/i);
 
     // Nothing was written — the whole apply is one transaction.
     expect((await rowOn(RELAY_A)).display_name).toBe('shared-model');
@@ -249,10 +249,10 @@ describe('declarative config with two relays serving one model id', () => {
     expect((await rowOn(RELAY_B)).display_name).toBe('Only B');
   });
 
-  it('rejects an endpoint that serves no such model', () => {
-    expect(async () => await applyDeclarativeConfig({
+  it('rejects an endpoint that serves no such model', async () => {
+    await expect(applyDeclarativeConfig({
       models: [{ platform: 'custom', modelId: 'shared-model', endpoint: 'http://127.0.0.1:9999/v1', displayName: 'x' }],
-    })).toThrow(/no custom endpoint/i);
+    })).rejects.toThrow(/no custom endpoint/i);
   });
 
   it('applies a fallback entry to the named endpoint only', async () => {
@@ -314,12 +314,12 @@ describe('declarative config admin', () => {
   });
 
   it('rejects malformed admin entries at schema validation', async () => {
-    expect(async () => await applyDeclarativeConfig({
+    await expect(applyDeclarativeConfig({
       admin: { email: 'not-an-email', password: 'long-enough-password' },
-    })).toThrow(/invalid declarative config/);
-    expect(async () => await applyDeclarativeConfig({
+    })).rejects.toThrow(/invalid declarative config/);
+    await expect(applyDeclarativeConfig({
       admin: { email: 'a@b.co', password: 'short' },
-    })).toThrow(/invalid declarative config/);
+    })).rejects.toThrow(/invalid declarative config/);
     expect(await userCount()).toBe(0);
   });
 });

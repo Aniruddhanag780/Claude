@@ -747,12 +747,12 @@ async function sumPersistedProviderTokens(
          AND rlu.key_id = ?
          AND rlu.kind = 'tokens'
          AND rlu.created_at_ms > ?
-       GROUP BY rlu.model_id
-    `, [platform, keyId, now - windowMs]) as (ModelQuotaRow & { model_id: string; used: number })[];
+       GROUP BY rlu.model_id, m.tpd_limit, m.monthly_token_budget
+    `, [platform, keyId, now - windowMs]) as (ModelQuotaRow & { model_id: string; used: number | string })[];
 
     return rows.reduce((sum, row) => {
       const multiplier = platform === 'navy' ? multiplierFromQuotaRow(row, dailyCap) : 1;
-      return sum + Math.ceil(row.used * multiplier);
+      return sum + Math.ceil(Number(row.used) * multiplier);
     }, 0);
   });
 }
@@ -1188,8 +1188,8 @@ function persistCooldown(
   expiresAtMs: number,
   source: CooldownSource,
   setAtMs: number,
-) {
-  void withDb(async db => {
+): Promise<void> {
+  return withDb(async db => {
     await db.run(`
       INSERT INTO rate_limit_cooldowns (platform, model_id, key_id, expires_at_ms, source, set_at_ms)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -1198,18 +1198,18 @@ function persistCooldown(
                     source = excluded.source,
                     set_at_ms = excluded.set_at_ms
     `, [platform, modelId, keyId, expiresAtMs, source, setAtMs]);
-  });
+  }).then(() => {});
 }
 
-function clearPersistedCooldown(platform: string, modelId: string, keyId: number) {
-  void withDb(async db => {
+function clearPersistedCooldown(platform: string, modelId: string, keyId: number): Promise<void> {
+  return withDb(async db => {
     await db.run(`
       DELETE FROM rate_limit_cooldowns
        WHERE platform = ?
          AND model_id = ?
          AND key_id = ?
     `, [platform, modelId, keyId]);
-  });
+  }).then(() => {});
 }
 
 /**
@@ -1241,12 +1241,12 @@ export function setCooldown(
   keyId: number,
   durationMs = 60_000,
   source: CooldownSource = 'heuristic',
-) {
+): Promise<void> {
   const key = `${platform}:${modelId}:${keyId}:cooldown`;
   const now = Date.now();
   const expiresAtMs = now + durationMs;
   cooldowns.set(key, expiresAtMs);
-  persistCooldown(platform, modelId, keyId, expiresAtMs, source, now);
+  return persistCooldown(platform, modelId, keyId, expiresAtMs, source, now);
 }
 
 export async function isOnCooldown(platform: string, modelId: string, keyId: number): Promise<boolean> {

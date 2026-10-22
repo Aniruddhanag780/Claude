@@ -416,15 +416,16 @@ async function upsertModel(db: Db, input: z.infer<typeof modelSchema>): Promise<
   await ensureFallbackRow(db, existing.id, input.fallbackEnabled ?? input.enabled !== false, input.fallbackEnabled !== undefined);
 }
 
-function applyFallback(db: Db, entries: z.infer<typeof fallbackEntrySchema>[]): number {
+async function applyFallback(db: Db, entries: z.infer<typeof fallbackEntrySchema>[]): Promise<number> {
   let changed = 0;
-  entries.forEach(async (entry, i) => {
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
     const row = await resolveDeclaredModel(db, entry.platform, entry.modelId, entry.endpoint);
-    if (!row) return;
+    if (!row) continue;
     await ensureFallbackRow(db, row.id, entry.enabled !== false);
     await db.run('UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?', [entry.priority ?? i + 1, entry.enabled === false ? 0 : 1, row.id]);
     changed++;
-  });
+  }
   return changed;
 }
 
@@ -477,7 +478,7 @@ export async function applyDeclarativeConfig(input: unknown, source = 'inline'):
       result.models++;
     }
     if (parsed.data.fallback) {
-      result.fallback = applyFallback(db, parsed.data.fallback);
+      result.fallback = await applyFallback(db, parsed.data.fallback);
     }
     if (parsed.data.routing) {
       if (parsed.data.routing.weights) await setCustomWeights(parsed.data.routing.weights);

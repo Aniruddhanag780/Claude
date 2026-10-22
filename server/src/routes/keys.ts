@@ -422,7 +422,7 @@ keysRouter.get('/', async (_req: Request, res: Response) => {
     return discoverable.get(platform)!;
   };
 
-  const keys = rows.map(async row => {
+  const keys = await Promise.all(rows.map(async row => {
     let maskedKey = '****';
     let realKey = '';
     try {
@@ -494,7 +494,7 @@ keysRouter.get('/', async (_req: Request, res: Response) => {
         remainingMs: c.remainingMs,
       })),
     };
-  });
+  }));
 
   res.json(keys);
 });

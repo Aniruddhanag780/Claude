@@ -204,8 +204,8 @@ describe('decision routing (#1354)', () => {
 
   it('validates settings', async () => {
     expect(await getDecisionRoutingSettings()).toEqual({ model: 'auto', minProbability: 0.5 });
-    expect(async () => await setDecisionRoutingSettings({ minProbability: 1.5 })).toThrow();
-    expect(async () => await setDecisionRoutingSettings({ model: '  ' })).toThrow();
+    await expect(setDecisionRoutingSettings({ minProbability: 1.5 })).rejects.toThrow();
+    await expect(setDecisionRoutingSettings({ model: '  ' })).rejects.toThrow();
     await setDecisionRoutingSettings({ model: 'inception/mercury-decide:free', minProbability: 0.7 });
     expect(await getDecisionRoutingSettings()).toEqual({ model: 'inception/mercury-decide:free', minProbability: 0.7 });
   });
@@ -261,15 +261,15 @@ describe('decision routing status (setup guide)', () => {
 
   it('has no models to offer before the catalog delivers any', async () => {
     const { getDecisionRoutingStatus } = await import('../../services/routing-decision.js');
-    expect(getDecisionRoutingStatus()).toMatchObject({ ready: false, hasModels: false, keyPlatforms: [] });
+    expect(await getDecisionRoutingStatus()).toMatchObject({ ready: false, hasModels: false, keyPlatforms: [] });
   });
 
   it('names the providers whose key would make it ready, until one exists', async () => {
     const { getDecisionRoutingStatus } = await import('../../services/routing-decision.js');
     await seedDecisionModels();
-    expect(getDecisionRoutingStatus()).toMatchObject({ ready: false, hasModels: true, keyPlatforms: ['cloudflare', 'openrouter'] });
+    expect(await getDecisionRoutingStatus()).toMatchObject({ ready: false, hasModels: true, keyPlatforms: ['cloudflare', 'openrouter'] });
     await addKey('openrouter', 'sk-or');
-    expect(getDecisionRoutingStatus()).toMatchObject({ ready: true, keyPlatforms: ['cloudflare', 'openrouter'] });
+    expect(await getDecisionRoutingStatus()).toMatchObject({ ready: true, keyPlatforms: ['cloudflare', 'openrouter'] });
   });
 
   it("does not count a BeatAPI key as ready under 'auto', but does when BeatAPI is pinned", async () => {
@@ -277,8 +277,8 @@ describe('decision routing status (setup guide)', () => {
     (await getDb().run(`INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label)
                      VALUES ('beatapi', 'jev-1.14-free', 'JEV', 'decision', 0, 1, '') RETURNING id`));
     await addKey('beatapi', 'sk-beat');
-    expect(getDecisionRoutingStatus()).toMatchObject({ ready: false, hasModels: false, keyPlatforms: [] });
+    expect(await getDecisionRoutingStatus()).toMatchObject({ ready: false, hasModels: false, keyPlatforms: [] });
     await setDecisionRoutingSettings({ model: 'jev-1.14-free' });
-    expect(getDecisionRoutingStatus()).toMatchObject({ ready: true, hasModels: true, keyPlatforms: ['beatapi'] });
+    expect(await getDecisionRoutingStatus()).toMatchObject({ ready: true, hasModels: true, keyPlatforms: ['beatapi'] });
   });
 });

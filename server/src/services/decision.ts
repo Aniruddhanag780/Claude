@@ -297,7 +297,13 @@ async function hasUsableKey(platform: string): Promise<boolean> {
 
 /** True when at least one enabled decision model has a usable key. */
 export async function decisionsAvailable(): Promise<boolean> {
-  return await (await allDecisionRows()).some(async r => r.enabled === 1 && ADAPTERS[r.platform] && await hasUsableKey(r.platform));
+  const rows = await allDecisionRows();
+  for (const r of rows) {
+    if (r.enabled === 1 && ADAPTERS[r.platform] && (await hasUsableKey(r.platform))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function decisionChain(model: string | undefined, skipPlatforms?: ReadonlySet<string>): Promise<DecisionModelRow[]> {

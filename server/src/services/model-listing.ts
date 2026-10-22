@@ -49,9 +49,12 @@ export interface ModelListing {
 // a second reading of api_keys.status: a live 429 never writes that column, it
 // writes a cooldown row (see services/ratelimit.ts, lib/fallback-loop.ts), so
 // status alone reports a cooling-down model as ready.
-function executionStatusFor(modelDbIds: number[], available: number): 'ready' | 'needsKey' | 'exhausted' {
+async function executionStatusFor(modelDbIds: number[], available: number): Promise<'ready' | 'needsKey' | 'exhausted'> {
   if (available !== 1) return 'needsKey';
-  return modelDbIds.some(async id => await hasUsableKeyForModel(id)) ? 'ready' : 'exhausted';
+  for (const id of modelDbIds) {
+    if (await hasUsableKeyForModel(id)) return 'ready';
+  }
+  return 'exhausted';
 }
 
 export async function buildModelListing(): Promise<ModelListing> {
@@ -76,7 +79,7 @@ export async function buildModelListing(): Promise<ModelListing> {
       FROM models m
     `) as AvailRow[];
     const byId = new Map(rows.map(r => [r.id, r]));
-    allListed = await (await getModelGroups()).map(g => {
+    allListed = await Promise.all((await getModelGroups()).map(async g => {
       const infos = g.members.map(m => byId.get(m.model_db_id)).filter(Boolean) as AvailRow[];
       const ctxs = infos.map(i => i.context_window).filter((c): c is number => c != null);
       const available = infos.some(i => i.available === 1) ? 1 : 0;
@@ -92,9 +95,9 @@ export async function buildModelListing(): Promise<ModelListing> {
         supportsTools: infos.some(i => i.supports_tools === 1),
         // A group is ready when ANY member can serve it — that is exactly the
         // choice the router has when it dispatches the group.
-        executionStatus: executionStatusFor(g.members.map(m => m.model_db_id), available),
+        executionStatus: await executionStatusFor(g.members.map(m => m.model_db_id), available),
       };
-    });
+    }));
   } else {
     // Unify OFF: one entry per model_id (dedup picks the available, smartest
     // representative row).
@@ -105,21 +108,21 @@ export async function buildModelListing(): Promise<ModelListing> {
                m.enabled AS enabled,
                ${availableExpr} AS available,
                ROW_NUMBER() OVER (
-                 PARTITION BY m.model_id
-                 ORDER BY ${availableExpr} DESC, m.intelligence_rank ASC, m.id ASC
-               ) AS rn
+                  PARTITION BY m.model_id
+                  ORDER BY ${availableExpr} DESC, m.intelligence_rank ASC, m.id ASC
+                ) AS rn
         FROM models m
       )
       WHERE rn = 1
     `) as (ModelListRow & { intelligence_rank: number; id: number; supports_tools: number })[];
-    allListed = models.map(m => ({
+    allListed = await Promise.all(models.map(async m => ({
       id: m.model_id, name: m.display_name, ownedBy: m.platform,
       available: m.available, enabled: m.enabled, contextWindow: m.context_window,
       intel: m.intelligence_rank,
       platforms: [m.platform],
       supportsTools: m.supports_tools === 1,
-      executionStatus: executionStatusFor([m.id], m.available),
-    }));
+      executionStatus: await executionStatusFor([m.id], m.available),
+    })));
   }
 
   // Stable order: usable first, then enabled, then smartest, then name.

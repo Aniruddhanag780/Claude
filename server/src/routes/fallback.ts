@@ -249,7 +249,7 @@ fallbackRouter.get('/', async (req: Request, res: Response) => {
   // through to the global table there is what made two different empty chains
   // show (and save) the same configuration (#1021).
   const rows = activeProfileId != null
-    ? orderProfileRows(await db.all(PROFILE_CHAIN_SQL[activeProfileId]) as any[])
+    ? orderProfileRows(await db.all(PROFILE_CHAIN_SQL, [activeProfileId]) as any[])
     : await db.all(GLOBAL_CHAIN_SQL) as any[];
 
   // Count usable keys per platform — enabled AND healthy/unknown status. Unified
@@ -377,14 +377,14 @@ fallbackRouter.put('/', async (req: Request, res: Response) => {
         if (!known.has(entry.modelDbId)) continue;
         await tx.run(`
           INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
-          VALUES (?, ?, ?, 0)
-          ON CONFLICT(profile_id, model_db_id) DO UPDATE SET priority = excluded.priority
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(profile_id, model_db_id) DO UPDATE SET priority = excluded.priority, enabled = excluded.enabled
         `, [activeProfileId, entry.modelDbId, entry.priority, entry.enabled ? 1 : 0]);
       }
     });
   } else {
     await db.transaction(async (tx) => {
-      for (const entry of parsed.data) await tx.run('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?', [entry.priority, entry.enabled ? 1 : 0, entry.modelDbId]);
+      for (const entry of parsed.data) await tx.run('UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?', [entry.priority, entry.enabled ? 1 : 0, entry.modelDbId]);
     });
   }
 

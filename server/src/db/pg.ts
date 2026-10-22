@@ -330,7 +330,8 @@ export class PgDb implements Db {
       );
     }
     const res = await this.executor.query(text, bound as unknown[]);
-    return { rows: res.rows as T[], rowCount: res.rowCount ?? 0 };
+    const last = Array.isArray(res) ? res[res.length - 1] : res;
+    return { rows: (last?.rows ?? []) as T[], rowCount: last?.rowCount ?? 0 };
   }
 
   async query<T = any>(sql: string, params: readonly unknown[] = []): Promise<QueryResult<T>> {

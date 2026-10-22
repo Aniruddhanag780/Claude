@@ -50,9 +50,10 @@ export async function ensureAllModelsInProfiles(db: Db): Promise<void> {
   `, [profile.id]) as { id: number; enabled: number }[];
       if (rows.length === 0) continue;
       const max = await tx.get('SELECT COALESCE(MAX(priority), 0) AS max_priority FROM profile_models WHERE profile_id = ?', [profile.id]) as { max_priority: number };
-      rows.forEach(async (row, index) => {
+      for (let index = 0; index < rows.length; index++) {
+        const row = rows[index];
         await tx.run('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, ?)', [profile.id, row.id, max.max_priority + index + 1, row.enabled]);
-      });
+      }
     }
   });
 }

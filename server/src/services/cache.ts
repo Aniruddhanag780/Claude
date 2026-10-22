@@ -346,34 +346,40 @@ async function enforceCombinedCap(): Promise<void> {
 let lookupHits = 0;
 let lookupMisses = 0;
 
-// ── Deferred SQLite write-through ──
-// better-sqlite3 is synchronous, so a store/hit write would sit on the request
-// path (a large completion body is a multi-KB write with an fsync behind it).
-// Every persistence write is therefore queued and drained on the next tick: the
-// in-memory map is already correct by then, and a crash in the gap only costs
+// ── Deferred PostgreSQL write-through ──
+// Every persistence write is queued and drained asynchronously off the hot path:
+// the in-memory map is already correct by then, and a crash in the gap only costs
 // a cache entry. Individually wrapped so one bad write cannot take down the
 // drain, and skipped entirely when persistence is off.
-const pendingWrites: Array<() => void> = [];
-let drainScheduled = false;
+const pendingWrites: Array<() => Promise<void> | void> = [];
+let activeDrain: Promise<void> | null = null;
 
-async function schedulePersist(op: () => void): Promise<void> {
-  if (!await cachePersistenceEnabled()) return;
-  pendingWrites.push(op);
-  if (drainScheduled) return;
-  drainScheduled = true;
-  setImmediate(drainPendingWrites);
+function triggerDrain(): Promise<void> {
+  if (!activeDrain) {
+    activeDrain = (async () => {
+      try {
+        while (pendingWrites.length > 0) {
+          const op = pendingWrites.shift();
+          if (op) {
+            try {
+              await op();
+            } catch (err) {
+              console.error('[db persist error]', err);
+            }
+          }
+        }
+      } finally {
+        activeDrain = null;
+      }
+    })();
+  }
+  return activeDrain;
 }
 
-function drainPendingWrites(): void {
-  drainScheduled = false;
-  const ops = pendingWrites.splice(0, pendingWrites.length);
-  for (const op of ops) {
-    try {
-      op();
-    } catch {
-      // best-effort: a DB failure degrades to memory-only, never to a 500
-    }
-  }
+async function schedulePersist(op: () => Promise<void> | void): Promise<void> {
+  if (!await cachePersistenceEnabled()) return;
+  pendingWrites.push(op);
+  void triggerDrain();
 }
 
 async function scheduleRowDelete(cacheKey: string): Promise<void> {
@@ -410,22 +416,37 @@ function dropPendingHitCounts(): void {
 }
 
 /**
- * Test-only: run the queued write-through immediately instead of on the next
- * tick, so a synchronous test can assert on what actually reached SQLite.
+ * Test-only: run the queued write-through immediately, awaiting both pending
+ * queue entries and in-flight database writes.
  */
-export function __flushPersistenceForTests(): void {
-  drainPendingWrites();
+export async function __flushPersistenceForTests(): Promise<void> {
+  while (pendingWrites.length > 0 || activeDrain) {
+    await triggerDrain();
+  }
 }
 
 /**
- * Test-only: drop the in-memory LRU while leaving the SQLite table intact, the
+ * Test-only: drop the in-memory LRU while leaving the persistent table intact, the
  * way a process restart does. (clearCache() is the user-facing flush and wipes
  * both, so it cannot stand in for a restart.) Pending write-through is drained
  * first, since a real restart's writes had already landed. Streaming entries
  * are memory-only (never written through), so a restart drops them too.
  */
-export function __resetMemoryForTests(): void {
-  drainPendingWrites();
+export async function __resetMemoryForTests(): Promise<void> {
+  if (hitFlushTimer) {
+    clearTimeout(hitFlushTimer);
+    hitFlushTimer = undefined;
+  }
+  if (dirtyHitCounts.size > 0) {
+    const batch = new Map(dirtyHitCounts);
+    dirtyHitCounts.clear();
+    pendingWrites.push(async () => {
+      for (const [cacheKey, hit] of batch) {
+        await getDb().run('UPDATE response_cache SET hit_count = ?, last_hit_at_ms = ? WHERE cache_key = ?', [hit.hitCount, hit.lastHitAtMs, cacheKey]);
+      }
+    });
+  }
+  await __flushPersistenceForTests();
   store.clear();
   streamStore.clear();
   lookupHits = 0;

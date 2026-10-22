@@ -245,8 +245,8 @@ describe('named fallback chains', () => {
     expect(renamed.body.name).toBe('new-name');
 
     // The routing side resolves the new name and not the old one.
-    expect(async () => await resolveRoutingChain('auto:new-name')).not.toThrow();
-    expect(async () => await resolveRoutingChain('auto:old-name')).toThrow(/not found/i);
+    await expect(resolveRoutingChain('auto:new-name')).resolves.toBeDefined();
+    await expect(resolveRoutingChain('auto:old-name')).rejects.toThrow(/not found/i);
   });
 
   it('rejects a rename that collides with another chain, case-insensitively', async () => {

@@ -2044,27 +2044,38 @@ export async function getOrderedFusionChain(estimatedTokens: number, exactOutput
     if (await fitsContextWindow(e.platform, e.context_window, estimatedTokens, exactOutputReserve)) return true;
     return allowMarginViolators && await fitsContextWindowStrict(e.context_window, estimatedTokens);
   };
-  const servableFilter = (allowMarginViolators: boolean) => chain.filter(async e => {
-    if (!await passesContextGate(e, allowMarginViolators)) return false;
-    const keyIds = keysByPlatform.get(e.platform);
-    if (!keyIds) return false;
-    // Same endpoint-pool rule the router applies (#619).
-    const endpointKeyIds = e.platform === 'custom' && e.key_id != null
-      ? await customEndpointKeyIds(db, e.key_id)
-      : null;
-    const limits = { rpm: e.rpm_limit, rpd: e.rpd_limit, tpm: e.tpm_limit, tpd: e.tpd_limit };
-    return keyIds.some(async ({ id: kid, scope }) =>
-      scopeAllows(scope, e.model_id) &&
-      (endpointKeyIds == null || endpointKeyIds.has(kid)) &&
-      !await isOnCooldown(e.platform, e.model_id, kid) &&
-      await canUseProvider(e.platform, kid) &&
-      await canUseProviderMinute(e.platform, kid) &&
-      await canMakeRequest(e.platform, e.model_id, kid, limits) &&
-      await canUseProviderTokens(e.platform, kid, e.model_id, estimatedTokens),
-    );
-  });
-  let servable = servableFilter(false);
-  if (servable.length === 0) servable = servableFilter(true);
+  const servableFilter = async (allowMarginViolators: boolean) => {
+    const results: ChainRow[] = [];
+    for (const e of chain) {
+      if (!await passesContextGate(e, allowMarginViolators)) continue;
+      const keyIds = keysByPlatform.get(e.platform);
+      if (!keyIds) continue;
+      // Same endpoint-pool rule the router applies (#619).
+      const endpointKeyIds = e.platform === 'custom' && e.key_id != null
+        ? await customEndpointKeyIds(db, e.key_id)
+        : null;
+      const limits = { rpm: e.rpm_limit, rpd: e.rpd_limit, tpm: e.tpm_limit, tpd: e.tpd_limit };
+      let anyKeyValid = false;
+      for (const { id: kid, scope } of keyIds) {
+        if (
+          scopeAllows(scope, e.model_id) &&
+          (endpointKeyIds == null || endpointKeyIds.has(kid)) &&
+          !await isOnCooldown(e.platform, e.model_id, kid) &&
+          await canUseProvider(e.platform, kid) &&
+          await canUseProviderMinute(e.platform, kid) &&
+          await canMakeRequest(e.platform, e.model_id, kid, limits) &&
+          await canUseProviderTokens(e.platform, kid, e.model_id, estimatedTokens)
+        ) {
+          anyKeyValid = true;
+          break;
+        }
+      }
+      if (anyKeyValid) results.push(e);
+    }
+    return results;
+  };
+  let servable = await servableFilter(false);
+  if (servable.length === 0) servable = await servableFilter(true);
 
   // Deterministic (expected-score) ordering so the panel faithfully follows the
   // user's picked routing strategy instead of re-sampling a fresh draw each call.
@@ -2104,7 +2115,14 @@ export async function resolveFusionCandidate(modelId: string): Promise<FusionCan
     // ranking. Without this check a duplicate alias can pin fusion to a
     // keyless provider (for example a free relay) while a configured provider
     // for the same model is available.
-    const row = rows.find(async candidate => await (await routableKeyIdsForModel(candidate.model_db_id)).length > 0) ?? rows[0];
+    let row: typeof rows[0] | undefined;
+    for (const candidate of rows) {
+      if ((await routableKeyIdsForModel(candidate.model_db_id)).length > 0) {
+        row = candidate;
+        break;
+      }
+    }
+    if (!row) row = rows[0];
     return {
       modelDbId: row.model_db_id,
       platform: row.platform,
@@ -2127,7 +2145,14 @@ export async function resolveFusionCandidate(modelId: string): Promise<FusionCan
       // Bare unified aliases may resolve to a provider row that is enabled in
       // the catalog but has no usable key. Select the first routable member so
       // an explicit fusion panel does not waste a slot on that dead end.
-      const top = candidates.find(async candidate => await (await routableKeyIdsForModel(candidate.model_db_id)).length > 0) ?? candidates[0];
+      let top: typeof candidates[0] | undefined;
+      for (const candidate of candidates) {
+        if ((await routableKeyIdsForModel(candidate.model_db_id)).length > 0) {
+          top = candidate;
+          break;
+        }
+      }
+      if (!top) top = candidates[0];
       if (top) {
         return {
           modelDbId: top.model_db_id,
@@ -2175,24 +2200,25 @@ export async function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string
     // bandit draw, so it would stay under EXPLORE_MIN_SAMPLES forever and become
     // a perpetual probe target — the explicit ban outranks exploration.
     const overrides = getModelWeightOverrides();
-    const unmeasured = sortedChain.filter(async e => {
-      if (overrides.get(e.model_id) === 0) return false;
+    const unmeasured: ChainRow[] = [];
+    for (const e of sortedChain) {
+      if (overrides.get(e.model_id) === 0) continue;
       const stats = statsCache?.get(modelStatsKey(e.platform, e.model_id, e.endpoint_scope));
-      if ((stats?.successes ?? 0) + (stats?.failures ?? 0) >= EXPLORE_MIN_SAMPLES) return false;
+      if ((stats?.successes ?? 0) + (stats?.failures ?? 0) >= EXPLORE_MIN_SAMPLES) continue;
       // Mirror the main loop's gates below so exploration only samples
       // candidates that can actually serve this request.
-      if (skipModels?.has(e.model_db_id)) return false;
-      if (skipPlatforms?.has(e.platform)) return false;
-      if (requireVision && !e.supports_vision) return false;
-      if (requireTools && !e.supports_tools) return false;
+      if (skipModels?.has(e.model_db_id)) continue;
+      if (skipPlatforms?.has(e.platform)) continue;
+      if (requireVision && !e.supports_vision) continue;
+      if (requireTools && !e.supports_tools) continue;
       // Never spend the exploration slot on a model that keeps rejecting tool
       // requests (#1230); it stays reachable at the back of the main walk.
-      if (requireTools && isToolBenched(e.platform, e.model_id, e.endpoint_scope)) return false;
-      if (requireStructured && platformDropsResponseFormat(e.platform)) return false;
-      if (!await fitsContextWindow(e.platform, e.context_window, estimatedTokens, exactOutputReserve)) return false;
-      if (e.tpm_limit != null && estimatedTokens > e.tpm_limit) return false;
-      return true;
-    });
+      if (requireTools && isToolBenched(e.platform, e.model_id, e.endpoint_scope)) continue;
+      if (requireStructured && platformDropsResponseFormat(e.platform)) continue;
+      if (!await fitsContextWindow(e.platform, e.context_window, estimatedTokens, exactOutputReserve)) continue;
+      if (e.tpm_limit != null && estimatedTokens > e.tpm_limit) continue;
+      unmeasured.push(e);
+    }
     if (unmeasured.length > 0) {
       const probe = unmeasured[Math.floor(Math.random() * unmeasured.length)];
       const idx = sortedChain.findIndex(e => e.model_db_id === probe.model_db_id);

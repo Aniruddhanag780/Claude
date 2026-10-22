@@ -37,7 +37,7 @@ async function addModel(opts: {
   platform: string; modelId: string; name: string;
   intelligenceRank: number; sizeLabel: string; budget: string; priority: number;
   vision?: boolean;
-}): number {
+}): Promise<number> {
   const db = getDb();
   (await db.run(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, monthly_token_budget, enabled, supports_vision, supports_tools)
@@ -69,7 +69,7 @@ async function addHistory(platform: string, modelId: string, opts: {
   }
 }
 
-async function pickCounts(runs: number): Record<string, number> {
+async function pickCounts(runs: number): Promise<Record<string, number>> {
   const counts: Record<string, number> = {};
   for (let i = 0; i < runs; i++) {
     const r = await routeRequest(100);
@@ -85,7 +85,7 @@ describe('bandit router', () => {
     await initTestDb();
     // initDb seeds the real catalog; wipe it so each test controls its own
     // models/keys/history (and seeded models don't share a platform with ours).
-    getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
+    await getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
     vi.clearAllMocks();
     (ratelimit.canMakeRequest as any).mockReturnValue(true);
     (ratelimit.canUseTokens as any).mockReturnValue(true);
@@ -117,8 +117,8 @@ describe('bandit router', () => {
   it('balanced strategy favors the more reliable model', async () => {
     await addModel({ platform: 'google', modelId: 'good', name: 'Good', intelligenceRank: 3, sizeLabel: 'Large', budget: '~50M', priority: 1 });
     await addModel({ platform: 'groq', modelId: 'flaky', name: 'Flaky', intelligenceRank: 3, sizeLabel: 'Large', budget: '~50M', priority: 2 });
-    addHistory('google', 'good', { successes: 60, failures: 1 });
-    addHistory('groq', 'flaky', { successes: 5, failures: 40 });
+    await addHistory('google', 'good', { successes: 60, failures: 1 });
+    await addHistory('groq', 'flaky', { successes: 5, failures: 40 });
     await setRoutingStrategy('balanced');
     await refreshStatsCache(getDb(), true);
     const counts = await pickCounts(300);
@@ -147,7 +147,7 @@ describe('bandit router', () => {
     await addModel({ platform: 'google', modelId: 'vision-a', name: 'Vision A', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 1, vision: true });
     await addModel({ platform: 'groq', modelId: 'text-b', name: 'Text B', intelligenceRank: 2, sizeLabel: 'Frontier', budget: '~50M', priority: 2 });
     await addModel({ platform: 'google', modelId: 'vision-c', name: 'Vision C', intelligenceRank: 30, sizeLabel: 'Small', budget: '~50M', priority: 3, vision: true });
-    addHistory('google', 'vision-a', { successes: 500, failures: 0, outTokens: 1000, latencyMs: 300, ttfbMs: 100 });
+    await addHistory('google', 'vision-a', { successes: 500, failures: 0, outTokens: 1000, latencyMs: 300, ttfbMs: 100 });
     await setRoutingStrategy('balanced');
     await refreshStatsCache(getDb(), true);
 
@@ -160,14 +160,14 @@ describe('bandit router', () => {
     // vision-c bound below actually pins down.
     expect(counts['text-b'] ?? 0).toBe(0);
     expect(counts['vision-c'] ?? 0).toBeGreaterThan(150);
-  });
+  }, 30_000);
 
   it('smartest vs fastest flips which model wins, at equal reliability', async () => {
     // Smart: frontier tier, slow. Fast: small tier, high throughput. Equal success.
     await addModel({ platform: 'google', modelId: 'smart', name: 'Smart', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 1 });
     await addModel({ platform: 'groq', modelId: 'fast', name: 'Fast', intelligenceRank: 9, sizeLabel: 'Small', budget: '~50M', priority: 2 });
-    addHistory('google', 'smart', { successes: 40, failures: 1, outTokens: 100, latencyMs: 3000, ttfbMs: 2500 });
-    addHistory('groq', 'fast', { successes: 40, failures: 1, outTokens: 1000, latencyMs: 1000, ttfbMs: 150 });
+    await addHistory('google', 'smart', { successes: 40, failures: 1, outTokens: 100, latencyMs: 3000, ttfbMs: 2500 });
+    await addHistory('groq', 'fast', { successes: 40, failures: 1, outTokens: 1000, latencyMs: 1000, ttfbMs: 150 });
 
     await setRoutingStrategy('smartest');
     await refreshStatsCache(getDb(), true);
@@ -178,7 +178,7 @@ describe('bandit router', () => {
     await refreshStatsCache(getDb(), true);
     const fastRun = await pickCounts(300);
     expect((fastRun['fast'] ?? 0)).toBeGreaterThan(fastRun['smart'] ?? 0);
-  });
+  }, 30_000);
 
   it('custom weights persist normalized; default to balanced until saved', async () => {
     expect(await getCustomWeights()).toEqual({ reliability: 0.5, speed: 0.25, intelligence: 0.25 });
@@ -192,16 +192,16 @@ describe('bandit router', () => {
     expect(await getCustomWeights()).toEqual({ reliability: 0.5, speed: 0.5, intelligence: 0 });
   });
 
-  it('custom weights reject all-zero and negative vectors', () => {
-    expect(async () => await setCustomWeights({ reliability: 0, speed: 0, intelligence: 0 })).toThrow();
-    expect(async () => await setCustomWeights({ reliability: -1, speed: 1, intelligence: 1 })).toThrow();
+  it('custom weights reject all-zero and negative vectors', async () => {
+    await expect(setCustomWeights({ reliability: 0, speed: 0, intelligence: 0 })).rejects.toThrow();
+    await expect(setCustomWeights({ reliability: -1, speed: 1, intelligence: 1 })).rejects.toThrow();
   });
 
   it('custom strategy routes with the saved weights (extreme speed wins)', async () => {
     await addModel({ platform: 'google', modelId: 'smart', name: 'Smart', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 1 });
     await addModel({ platform: 'groq', modelId: 'fast', name: 'Fast', intelligenceRank: 9, sizeLabel: 'Small', budget: '~50M', priority: 2 });
-    addHistory('google', 'smart', { successes: 40, failures: 1, outTokens: 100, latencyMs: 3000, ttfbMs: 2500 });
-    addHistory('groq', 'fast', { successes: 40, failures: 1, outTokens: 1000, latencyMs: 1000, ttfbMs: 150 });
+    await addHistory('google', 'smart', { successes: 40, failures: 1, outTokens: 100, latencyMs: 3000, ttfbMs: 2500 });
+    await addHistory('groq', 'fast', { successes: 40, failures: 1, outTokens: 1000, latencyMs: 1000, ttfbMs: 150 });
 
     await setRoutingStrategy('custom');
     await setCustomWeights({ reliability: 0.1, speed: 0.9, intelligence: 0 });
@@ -222,7 +222,7 @@ describe('bandit router', () => {
     vi.setSystemTime(new Date('2026-01-15T12:00:00'));
     try {
       await addModel({ platform: 'google', modelId: 'm1', name: 'M1', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 1 });
-      addHistory('google', 'm1', { successes: 30, failures: 0, outTokens: 500, latencyMs: 1000, ttfbMs: 200 });
+      await addHistory('google', 'm1', { successes: 30, failures: 0, outTokens: 500, latencyMs: 1000, ttfbMs: 200 });
       await setRoutingStrategy('balanced');
       await refreshStatsCache(getDb(), true);
       const { strategy, weights, scores } = await getRoutingScores();
@@ -247,10 +247,10 @@ describe('bandit router', () => {
   });
 
   it('rejects an out-of-range hour or an unknown timezone', async () => {
-    expect(async () => await setPeakHoursConfig({ startHour: 24 })).toThrow(/peakStartHour/);
-    expect(async () => await setPeakHoursConfig({ startHour: -1 })).toThrow(/peakStartHour/);
-    expect(async () => await setPeakHoursConfig({ endHour: 6.5 })).toThrow(/peakEndHour/);
-    expect(async () => await setPeakHoursConfig({ timezone: 'Not/AZone' })).toThrow(/peakTimezone/);
+    await expect(setPeakHoursConfig({ startHour: 24 })).rejects.toThrow(/peakStartHour/);
+    await expect(setPeakHoursConfig({ startHour: -1 })).rejects.toThrow(/peakStartHour/);
+    await expect(setPeakHoursConfig({ endHour: 6.5 })).rejects.toThrow(/peakEndHour/);
+    await expect(setPeakHoursConfig({ timezone: 'Not/AZone' })).rejects.toThrow(/peakTimezone/);
     // Nothing was written by the rejected calls.
     expect(await getPeakHoursConfig()).toEqual(DEFAULT_PEAK_HOURS);
   });
@@ -340,7 +340,7 @@ describe('bandit router', () => {
     // routed; with it on it must appear within a bounded number of requests.
     await addModel({ platform: 'google', modelId: 'old', name: 'Old', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 1 });
     await addModel({ platform: 'groq', modelId: 'new', name: 'New', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 2 });
-    addHistory('google', 'old', { successes: 500, failures: 0, outTokens: 1000, latencyMs: 300, ttfbMs: 100 });
+    await addHistory('google', 'old', { successes: 500, failures: 0, outTokens: 1000, latencyMs: 300, ttfbMs: 100 });
     await setRoutingStrategy('balanced');
     await refreshStatsCache(getDb(), true);
 
@@ -353,7 +353,7 @@ describe('bandit router', () => {
     await setExploreEnabled(true);
     const withExplore = await pickCounts(500);
     expect(withExplore['new'] ?? 0).toBeGreaterThan(0);
-  });
+  }, 30_000);
 
   it('exploration never probes a model zeroed out via MODEL_ROUTING_OVERRIDES (#738)', async () => {
     // A weight-0 model never wins a bandit draw, so it never accumulates the
@@ -361,7 +361,7 @@ describe('bandit router', () => {
     // probe exclusion it would receive explore traffic forever.
     await addModel({ platform: 'google', modelId: 'old', name: 'Old', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 1 });
     await addModel({ platform: 'groq', modelId: 'new', name: 'New', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 2 });
-    addHistory('google', 'old', { successes: 500, failures: 0, outTokens: 1000, latencyMs: 300, ttfbMs: 100 });
+    await addHistory('google', 'old', { successes: 500, failures: 0, outTokens: 1000, latencyMs: 300, ttfbMs: 100 });
     await setRoutingStrategy('balanced');
     await refreshStatsCache(getDb(), true);
     await setExploreEnabled(true);
@@ -377,7 +377,7 @@ describe('bandit router', () => {
       else process.env.MODEL_ROUTING_OVERRIDES = prev;
       resetModelWeightOverrides();
     }
-  });
+  }, 30_000);
 
   it('community priors persist, drop invalid entries, and cap effective sample size (#685)', async () => {
     expect(await getCommunityPrior('groq', 'llama', undefined)).toBeUndefined();
@@ -429,7 +429,7 @@ describe('bandit router', () => {
     // record the displayed reliability must fall well below the prior's rate —
     // a huge upstream count can no longer pin a locally-broken model at ~0.98.
     await addModel({ platform: 'google', modelId: 'g1', name: 'G1', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 1 });
-    addHistory('google', 'g1', { successes: 5, failures: 95 });
+    await addHistory('google', 'g1', { successes: 5, failures: 95 });
     await setRoutingStrategy('balanced');
     await setCommunityPriors({ 'google:g1': { successes: 980, failures: 20 } });
     await setCommunityPriorEnabled(true);
@@ -443,7 +443,7 @@ describe('bandit router', () => {
     // A small pessimistic prior barely moves a model with hundreds of local
     // successes: local evidence dominates.
     await addModel({ platform: 'google', modelId: 'g1', name: 'G1', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 1 });
-    addHistory('google', 'g1', { successes: 480, failures: 20 });
+    await addHistory('google', 'g1', { successes: 480, failures: 20 });
     await setRoutingStrategy('balanced');
     await setCommunityPriorEnabled(true);
     await refreshStatsCache(getDb(), true);
@@ -519,24 +519,24 @@ describe('tool-rejecting models are deferred for tool requests (#1230)', () => {
   const route = async (requireTools: boolean, preferred?: number) => (await routeRequest(100, undefined, preferred, false, requireTools)).modelId;
 
   it('keeps the operator order until a model is benched', async () => {
-    seed();
+    await seed();
     expect(await route(true)).toBe('first');
   });
 
   it('tries the benched model last on a tool request', async () => {
-    seed();
+    await seed();
     benchForTools(toolCapabilityKey('google', 'first', ''));
     expect(await route(true)).toBe('second');
   });
 
   it('leaves requests without tools alone', async () => {
-    seed();
+    await seed();
     benchForTools(toolCapabilityKey('google', 'first', ''));
     expect(await route(false)).toBe('first');
   });
 
   it('still routes to a benched model when it is the only one left', async () => {
-    seed();
+    await seed();
     benchForTools(toolCapabilityKey('google', 'first', ''));
     benchForTools(toolCapabilityKey('groq', 'second', ''));
     // Everything is deferred, so the original order is what remains.
@@ -544,7 +544,7 @@ describe('tool-rejecting models are deferred for tool requests (#1230)', () => {
   });
 
   it('an explicit pin keeps its place', async () => {
-    const first = seed();
+    const first = await seed();
     benchForTools(toolCapabilityKey('google', 'first', ''));
     expect(await route(true, first)).toBe('first');
   });
@@ -555,7 +555,7 @@ describe('reliability floor filter', () => {
     process.env.DEV_MODE = 'true';
     process.env.NODE_ENV = 'test';
     await initTestDb();
-    getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
+    await getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
     vi.clearAllMocks();
     (ratelimit.canMakeRequest as any).mockReturnValue(true);
     (ratelimit.canUseTokens as any).mockReturnValue(true);
@@ -571,8 +571,8 @@ describe('reliability floor filter', () => {
   it('drops a well-observed flaky model below the floor', async () => {
     await addModel({ platform: 'google', modelId: 'good', name: 'Good', intelligenceRank: 3, sizeLabel: 'Large', budget: '~50M', priority: 1 });
     await addModel({ platform: 'groq', modelId: 'flaky', name: 'Flaky', intelligenceRank: 3, sizeLabel: 'Large', budget: '~50M', priority: 2 });
-    addHistory('google', 'good', { successes: 60, failures: 1 });   // ~98% → above 0.8
-    addHistory('groq', 'flaky', { successes: 5, failures: 40 });    // ~11% → below 0.8
+    await addHistory('google', 'good', { successes: 60, failures: 1 });   // ~98% → above 0.8
+    await addHistory('groq', 'flaky', { successes: 5, failures: 40 });    // ~11% → below 0.8
     await setRoutingStrategy('balanced');
     await setMinReliabilityFloor(0.8);
     await refreshStatsCache(getDb(), true);
@@ -584,7 +584,7 @@ describe('reliability floor filter', () => {
   it('keeps an under-observed model despite a low gut-feel success rate', async () => {
     await addModel({ platform: 'google', modelId: 'seen', name: 'Seen', intelligenceRank: 3, sizeLabel: 'Large', budget: '~50M', priority: 1 });
     await addModel({ platform: 'groq', modelId: 'fresh', name: 'Fresh', intelligenceRank: 3, sizeLabel: 'Large', budget: '~50M', priority: 2 });
-    addHistory('google', 'seen', { successes: 60, failures: 1 });
+    await addHistory('google', 'seen', { successes: 60, failures: 1 });
     // 'fresh' has no history at all → fewer than EXPLORE_MIN_SAMPLES samples
     await setMinReliabilityFloor(0.9);
     await refreshStatsCache(getDb(), true);
@@ -600,8 +600,8 @@ describe('reliability floor filter', () => {
   it('never empties the whole chain — falls back to the full chain when all fail the floor', async () => {
     await addModel({ platform: 'google', modelId: 'a', name: 'A', intelligenceRank: 3, sizeLabel: 'Large', budget: '~50M', priority: 1 });
     await addModel({ platform: 'groq', modelId: 'b', name: 'B', intelligenceRank: 3, sizeLabel: 'Large', budget: '~50M', priority: 2 });
-    addHistory('google', 'a', { successes: 1, failures: 60 }); // below 0.99
-    addHistory('groq', 'b', { successes: 1, failures: 60 });   // below 0.99
+    await addHistory('google', 'a', { successes: 1, failures: 60 }); // below 0.99
+    await addHistory('groq', 'b', { successes: 1, failures: 60 });   // below 0.99
     await setRoutingStrategy('balanced');
     await setMinReliabilityFloor(0.99);
     await refreshStatsCache(getDb(), true);

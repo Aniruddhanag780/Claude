@@ -225,7 +225,7 @@ describe('response cache', () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'hi')] });
       await store(key, 'first');
       await store(key, 'second');
-      expect((await getCachedResponse(key)!.body as any).choices[0].message.content).toBe('second');
+      expect(((await getCachedResponse(key))!.body as any).choices[0].message.content).toBe('second');
       expect(getCacheStats().entries).toBe(1);
     });
 
@@ -397,7 +397,7 @@ describe('response cache', () => {
         platform: 'groq', modelId: 'm', keyId: 1, promptTokens: 1, completionTokens: 1,
       });
       // The JSON store still serves its entry; the stream store its own.
-      expect((await getCachedResponse(key)!.body as any).choices[0].message.content).toBe('json answer');
+      expect(((await getCachedResponse(key))!.body as any).choices[0].message.content).toBe('json answer');
       expect(getCachedStreamResponse(key)!.sse).toBe(frames('stream answer').join(''));
     });
 
@@ -568,7 +568,7 @@ describe('response cache', () => {
       process.env.RESPONSE_CACHE = 'true';
     });
 
-    const rowCount = async (): number =>
+    const rowCount = async (): Promise<number> =>
       ((await getDb().get('SELECT COUNT(*) AS n FROM response_cache')) as { n: number }).n;
 
     it('survives a restart: store -> reload from DB -> hit', async () => {
@@ -576,7 +576,7 @@ describe('response cache', () => {
       await store(key, 'persisted answer');
       expect(getCacheStats().entries).toBe(1);
 
-      __resetMemoryForTests();
+      await __resetMemoryForTests();
       expect(getCacheStats().entries).toBe(0);
       await loadCacheFromDb();
 
@@ -591,7 +591,7 @@ describe('response cache', () => {
       process.env.RESPONSE_CACHE = 'false';
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'unpersisted')] });
       await store(key, 'answer');
-      __flushPersistenceForTests();
+      await __flushPersistenceForTests();
       expect(await rowCount()).toBe(0);
     });
 
@@ -599,7 +599,7 @@ describe('response cache', () => {
       process.env.RESPONSE_CACHE_PERSIST = 'false';
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'memory-only')] });
       await store(key, 'answer');
-      __flushPersistenceForTests();
+      await __flushPersistenceForTests();
       expect(await rowCount()).toBe(0);
       // Still cached in memory: only the disk half is disabled.
       expect(await getCachedResponse(key)).not.toBeNull();
@@ -612,7 +612,7 @@ describe('response cache', () => {
       await getCachedResponse(key);
       expect(getCacheStats().totalHits).toBe(2);
 
-      __resetMemoryForTests();
+      await __resetMemoryForTests();
       await loadCacheFromDb();
       // The hits reached the row, so the savings numbers do not reset to zero.
       expect(getCacheStats().totalHits).toBe(2);
@@ -626,7 +626,7 @@ describe('response cache', () => {
       const t0 = 1_000_000;
       await store(key, 'stale', t0);
 
-      __resetMemoryForTests();
+      await __resetMemoryForTests();
       // 10 minutes later (past the 60s TTL): startup purge drops the row.
       await loadCacheFromDb(t0 + 600_000);
       expect(await getCachedResponse(key, t0 + 600_000)).toBeNull();
@@ -643,10 +643,10 @@ describe('response cache', () => {
       // under the cap — the load path has its own bound, separate from the LRU.
       process.env.RESPONSE_CACHE_MAX_ENTRIES = '10';
       for (const [i, k] of keys.entries()) await store(k, `v${i}`, base + i);
-      __flushPersistenceForTests();
+      await __flushPersistenceForTests();
       process.env.RESPONSE_CACHE_MAX_ENTRIES = '2';
 
-      __resetMemoryForTests();
+      await __resetMemoryForTests();
       await loadCacheFromDb(base + 10);
       // Newest two win; the oldest row is dropped past the cap.
       expect(getCacheStats().entries).toBe(2);
@@ -660,10 +660,10 @@ describe('response cache', () => {
       const second = computeCacheKey({ model: 'auto', messages: [msg('user', 'survivor')] });
       await store(first, 'gone');
       await store(second, 'kept');
-      __flushPersistenceForTests();
+      await __flushPersistenceForTests();
 
       expect(await rowCount()).toBe(1);
-      __resetMemoryForTests();
+      await __resetMemoryForTests();
       await loadCacheFromDb();
       // The evicted entry must not come back from disk.
       expect(await getCachedResponse(first)).toBeNull();
@@ -675,16 +675,16 @@ describe('response cache', () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'ttl-row')] });
       const t0 = 2_000_000;
       await store(key, 'stale', t0);
-      __flushPersistenceForTests();
+      await __flushPersistenceForTests();
       expect(await rowCount()).toBe(1);
 
       expect(await getCachedResponse(key, t0 + 120_000)).toBeNull();
-      __flushPersistenceForTests();
+      await __flushPersistenceForTests();
       expect(await rowCount()).toBe(0);
     });
 
     describe('batched hit-count flush', () => {
-      const hitRow = async (key: string) => (await getDb().get('SELECT hit_count, last_hit_at_ms FROM response_cache WHERE cache_key = ?', [key])) as { hit_count: number; last_hit_at_ms: number | null } | undefined;
+      const hitRow = async (key: string): Promise<{ hit_count: number; last_hit_at_ms: number | null } | undefined> => (await getDb().get('SELECT hit_count, last_hit_at_ms FROM response_cache WHERE cache_key = ?', [key])) as { hit_count: number; last_hit_at_ms: number | null } | undefined;
 
       beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }); });
       afterEach(() => { vi.useRealTimers(); });
@@ -693,62 +693,62 @@ describe('response cache', () => {
         const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'batched')] });
         const t0 = 5_000_000;
         await store(key, 'answer', t0);
-        __flushPersistenceForTests();
+        await __flushPersistenceForTests();
         await getCachedResponse(key, t0 + 1);
         await getCachedResponse(key, t0 + 2);
         await getCachedResponse(key, t0 + 3);
-        __flushPersistenceForTests();
+        await __flushPersistenceForTests();
         // Nothing written per hit: the row still holds the stored value.
-        expect(await hitRow(key)!.hit_count).toBe(0);
+        expect((await hitRow(key))!.hit_count).toBe(0);
 
         vi.advanceTimersByTime(2_000);
-        __flushPersistenceForTests();
+        await __flushPersistenceForTests();
         expect(await hitRow(key)).toEqual({ hit_count: 3, last_hit_at_ms: t0 + 3 });
       });
 
       it('clearCache() drops pending counts so they never land on a re-stored entry', async () => {
         const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'cleared-pending')] });
         await store(key, 'old answer');
-        __flushPersistenceForTests();
+        await __flushPersistenceForTests();
         await getCachedResponse(key);
         await getCachedResponse(key);
 
         await clearCache();
         await store(key, 'fresh answer');
-        __flushPersistenceForTests();
+        await __flushPersistenceForTests();
         vi.advanceTimersByTime(2_000);
-        __flushPersistenceForTests();
+        await __flushPersistenceForTests();
 
-        expect(await hitRow(key)!.hit_count).toBe(0);
+        expect((await hitRow(key))!.hit_count).toBe(0);
         expect(getCacheStats().totalHits).toBe(0);
       });
 
       it('a re-store drops the old entry\'s pending count', async () => {
         const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'restored-pending')] });
         await store(key, 'old answer');
-        __flushPersistenceForTests();
+        await __flushPersistenceForTests();
         await getCachedResponse(key);
         await getCachedResponse(key);
 
         // Overwrite before the flush timer fires: the fresh row starts at 0.
         await store(key, 'new answer');
-        __flushPersistenceForTests();
+        await __flushPersistenceForTests();
         vi.advanceTimersByTime(2_000);
-        __flushPersistenceForTests();
-        expect(await hitRow(key)!.hit_count).toBe(0);
+        await __flushPersistenceForTests();
+        expect((await hitRow(key))!.hit_count).toBe(0);
 
         // Hits on the new entry still flush normally.
         await getCachedResponse(key);
         vi.advanceTimersByTime(2_000);
-        __flushPersistenceForTests();
-        expect(await hitRow(key)!.hit_count).toBe(1);
+        await __flushPersistenceForTests();
+        expect((await hitRow(key))!.hit_count).toBe(1);
       });
     });
 
     it('clearCache() purges SQLite too, so a restart does not resurrect entries', async () => {
       const key = computeCacheKey({ model: 'auto', messages: [msg('user', 'flushed')] });
       await store(key, 'answer');
-      __flushPersistenceForTests();
+      await __flushPersistenceForTests();
       expect(await rowCount()).toBe(1);
 
       expect(await clearCache()).toBe(1);

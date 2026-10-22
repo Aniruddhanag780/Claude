@@ -273,7 +273,7 @@ describe('X-Fallback-Detail value safety', () => {
     // #619: a non-ASCII or control-laden id used to make Node throw
     // ERR_INVALID_CHAR after a successful upstream call, and the throw was then
     // booked as a provider failure.
-    const value = await headersFor([record({ modelId: 'bad\r\nX-Injected: yes' })])['X-Fallback-Detail'];
+    const value = (await headersFor([record({ modelId: 'bad\r\nX-Injected: yes' })]))['X-Fallback-Detail'];
 
     expect(value).toMatch(/^[\x20-\x7e]*$/);
     expect(value).not.toContain('\r');
@@ -282,7 +282,7 @@ describe('X-Fallback-Detail value safety', () => {
   });
 
   it('encodes a non-ASCII model id rather than rejecting the response', async () => {
-    const value = await headersFor([record({ modelId: '我的模型' })])['X-Fallback-Detail'];
+    const value = (await headersFor([record({ modelId: '我的模型' })]))['X-Fallback-Detail'];
 
     expect(value).toMatch(/^[\x20-\x7e]*$/);
     expect(decodeURIComponent(value.slice('groq/'.length).split(' ')[0])).toBe('我的模型');
@@ -295,6 +295,6 @@ describe('X-Fallback-Detail value safety', () => {
       errorSummary: 'e'.repeat(200),
     }));
 
-    expect(await headersFor(many)['X-Fallback-Detail'].length).toBeLessThanOrEqual(2048);
+    expect((await headersFor(many))['X-Fallback-Detail'].length).toBeLessThanOrEqual(2048);
   });
 });

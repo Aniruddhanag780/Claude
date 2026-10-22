@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { runImageGeneration, runVideoGeneration, runSpeech } from '../../services/media.js';
@@ -39,9 +39,15 @@ function jsonResponse(body: unknown) {
 }
 
 describe('media service', () => {
-  beforeEach(async () => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     await initTestDb();
+  });
+
+  beforeEach(async () => {
+    const db = getDb();
+    await db.run('DELETE FROM media_models');
+    await db.run('DELETE FROM api_keys');
   });
 
   afterEach(() => {
@@ -50,7 +56,7 @@ describe('media service', () => {
   });
 
   it('migration creates the media_models table', async () => {
-    const cols = ((await getDb().all('PRAGMA table_info(media_models)')) as { name: string }[]).map(c => c.name);
+    const cols = ((await getDb().all("SELECT column_name AS name FROM information_schema.columns WHERE table_name = 'media_models' AND table_schema = current_schema()")) as { name: string }[]).map(c => c.name);
     expect(cols).toContain('modality');
     expect(cols).toContain('quota_label');
     expect(cols).toContain('key_id');
@@ -68,11 +74,11 @@ describe('media service', () => {
     let finish!: (response: Response) => void;
     const fetchMock = vi.fn(() => new Promise<Response>(resolve => { finish = resolve; }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const first = await runImageGeneration('auto', { prompt: 'a cat' });
+    const first = runImageGeneration('auto', { prompt: 'a cat' });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const request = (fetchMock.mock.calls as unknown as [string, RequestInit][])[0][1];
     expect(new Headers(request.headers).get('Authorization')).toBe('Bearer available-key');
-    await expect(await runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 429, code: 'quota_exceeded' });
+    await expect(runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 429, code: 'quota_exceeded' });
     finish(jsonResponse({ artifacts: [{ base64: 'AAAA' }] }));
     await expect(first).resolves.toMatchObject({ platform: 'nvidia' });
     expect((await db.get('SELECT requests FROM key_monthly_usage WHERE key_id = ?', [keys[1].id]))).toEqual({ requests: 1 });
@@ -80,9 +86,9 @@ describe('media service', () => {
     // A failed attempt does not consume another request, and cannot leak its reservation.
     (await db.run('UPDATE api_keys SET monthly_request_cap = 2 WHERE id = ?', [keys[1].id]));
     fetchMock.mockResolvedValue(new Response('unavailable', { status: 503 }));
-    await expect(await runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 502 });
+    await expect(runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 502 });
     fetchMock.mockResolvedValue(jsonResponse({ artifacts: [{ base64: 'BBBB' }] }));
-    await expect(await runImageGeneration('auto', { prompt: 'a cat' })).resolves.toMatchObject({ platform: 'nvidia' });
+    await expect(runImageGeneration('auto', { prompt: 'a cat' })).resolves.toMatchObject({ platform: 'nvidia' });
   });
 
   describe('image generation', () => {
@@ -97,31 +103,31 @@ describe('media service', () => {
       vi.fn(async (url: string) => (String(url).includes('siliconflow') ? siliconflow() : nvidia())) as any;
 
     it('relays the SOONEST Retry-After when every provider is rate-limited', async () => {
-      twoImageProviders();
+      await twoImageProviders();
       globalThis.fetch = byHost(() => limited('5'), () => limited('60'));
-      await expect(await runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 429, retryAfterMs: 5_000 });
+      await expect(runImageGeneration('auto', { prompt: 'a cat' })).rejects.toMatchObject({ status: 429, retryAfterMs: 5_000 });
     });
 
     it('drops the hint when a rate-limited provider stated no delay', async () => {
-      twoImageProviders();
+      await twoImageProviders();
       globalThis.fetch = byHost(() => limited('17'), () => limited());
-      const err = await (await runImageGeneration('auto', { prompt: 'a cat' })).catch(e => e);
+      const err = await runImageGeneration('auto', { prompt: 'a cat' }).catch(e => e);
       expect(err.status).toBe(429);
       expect(err.retryAfterMs).toBeUndefined();
     });
 
     it('drops the hint when the chain ends in a non-rate-limit failure', async () => {
-      twoImageProviders();
+      await twoImageProviders();
       globalThis.fetch = byHost(() => limited('17'), () => new Response('boom', { status: 500 }));
-      const err = await (await runImageGeneration('auto', { prompt: 'a cat' })).catch(e => e);
+      const err = await runImageGeneration('auto', { prompt: 'a cat' }).catch(e => e);
       expect(err.status).toBe(502);
       expect(err.retryAfterMs).toBeUndefined();
     });
 
     it('fails over past a rate-limited provider', async () => {
-      twoImageProviders();
+      await twoImageProviders();
       globalThis.fetch = byHost(() => limited('17'), () => jsonResponse({ images: [{ url: 'https://x/y.png' }] }));
-      await expect(await runImageGeneration('auto', { prompt: 'a cat' })).resolves.toMatchObject({ platform: 'siliconflow' });
+      await expect(runImageGeneration('auto', { prompt: 'a cat' })).resolves.toMatchObject({ platform: 'siliconflow' });
     });
 
     it('NVIDIA: maps artifacts[].base64 → b64_json', async () => {
@@ -235,11 +241,11 @@ describe('media service', () => {
     it('unknown model id → 400', async () => {
       await addMedia('nvidia', 'real-model', 'image');
       await addKey('nvidia');
-      await expect(await runImageGeneration('does-not-exist', { prompt: 'x' })).rejects.toMatchObject({ status: 400 });
+      await expect(runImageGeneration('does-not-exist', { prompt: 'x' })).rejects.toMatchObject({ status: 400 });
     });
 
     it('no providers configured → 503', async () => {
-      await expect(await runImageGeneration('auto', { prompt: 'x' })).rejects.toMatchObject({ status: 503 });
+      await expect(runImageGeneration('auto', { prompt: 'x' })).rejects.toMatchObject({ status: 503 });
     });
 
     it('fails over to the next provider on error (auto)', async () => {
@@ -337,7 +343,7 @@ describe('media service', () => {
       const fetchMock = vi.fn();
       globalThis.fetch = fetchMock as any;
 
-      await expect(await runVideoGeneration('nova-reel', {
+      await expect(runVideoGeneration('nova-reel', {
         prompt: 'x',
         duration: 7,
       })).rejects.toMatchObject({ status: 400 });
@@ -415,8 +421,7 @@ describe('media service', () => {
       });
       globalThis.fetch = fetchMock as any;
 
-      await expect(await runVideoGeneration('auto', { prompt: 'x' }, controller.signal))
-        .rejects.toMatchObject({ status: 499 });
+      await expect(runVideoGeneration('auto', { prompt: 'x' }, controller.signal)).rejects.toMatchObject({ status: 499 });
       // The second catalogued provider is never attempted.
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
@@ -428,12 +433,10 @@ describe('media service', () => {
       await addMedia('pollinations', 'nova-reel', 'video');
       await addKey('pollinations', 'sk_pollinations_test');
       globalThis.fetch = vi.fn(async () => new Response('nope', { status: 401 })) as any;
-      await expect(await runVideoGeneration('nova-reel', { prompt: 'x' }))
-        .rejects.toMatchObject({ status: 502 });
+      await expect(runVideoGeneration('nova-reel', { prompt: 'x' })).rejects.toMatchObject({ status: 502 });
 
       globalThis.fetch = vi.fn(async () => new Response('bad prompt', { status: 400 })) as any;
-      await expect(await runVideoGeneration('nova-reel', { prompt: 'x' }))
-        .rejects.toMatchObject({ status: 400 });
+      await expect(runVideoGeneration('nova-reel', { prompt: 'x' })).rejects.toMatchObject({ status: 400 });
     });
 
     it('Hugging Face: refuses a result URL that points at a blocked address class', async () => {
@@ -462,8 +465,7 @@ describe('media service', () => {
       });
       globalThis.fetch = fetchMock as any;
 
-      await expect(await runVideoGeneration('Lightricks/LTX-Video-0.9.5', { prompt: 'x' }))
-        .rejects.toThrow(/unusable video URL/);
+      await expect(runVideoGeneration('Lightricks/LTX-Video-0.9.5', { prompt: 'x' })).rejects.toThrow(/unusable video URL/);
       // Submit + result read only; the metadata address was never contacted.
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
@@ -503,21 +505,21 @@ describe('media service', () => {
     it.each(['mp3', 'pcm', 'flac', 'opus'])('Free.ai rejects unsupported %s before generating', async format => {
       await addMedia('freeai', 'kokoro', 'audio'); await addKey('freeai');
       const fetchMock = vi.spyOn(globalThis, 'fetch');
-      await expect(await runSpeech('kokoro', { input: 'Hello', format })).rejects.toThrow('supports wav');
+      await expect(runSpeech('kokoro', { input: 'Hello', format })).rejects.toThrow('supports wav');
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('Free.ai never sends untested or premium model IDs', async () => {
       await addMedia('freeai', 'premium/voice', 'audio'); await addKey('freeai');
       const fetchMock = vi.spyOn(globalThis, 'fetch');
-      await expect(await runSpeech('premium/voice', { input: 'Hello' })).rejects.toThrow('only the tested Kokoro');
+      await expect(runSpeech('premium/voice', { input: 'Hello' })).rejects.toThrow('only the tested Kokoro');
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it.each([{}, { audio_url: 'http://169.254.169.254/latest/meta-data/' }, { audio_url: 'https://example.com/test.wav' }])('Free.ai never downloads unsafe output', async body => {
       await addMedia('freeai', 'kokoro', 'audio'); await addKey('freeai');
       const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(body));
-      await expect(await runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('unsafe audio URL');
+      await expect(runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('unsafe audio URL');
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
@@ -527,21 +529,21 @@ describe('media service', () => {
         .mockResolvedValueOnce(jsonResponse({ error: 'not audio' }))
         .mockResolvedValueOnce(jsonResponse({ audio_url: freeAiUrl }))
         .mockResolvedValueOnce(new Response(freeAiWav(), { headers: { 'Content-Length': String(21 * 1024 * 1024) } }));
-      await expect(await runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('recognized WAV');
-      await expect(await runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('too large');
+      await expect(runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('recognized WAV');
+      await expect(runSpeech('kokoro', { input: 'Hello' })).rejects.toThrow('too large');
     });
 
     it('Free.ai preserves quota backoff without retrying a paid model', async () => {
       await addMedia('freeai', 'kokoro', 'audio'); await addKey('freeai');
       const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('quota', { status: 429, headers: { 'Retry-After': '30' } }));
-      await expect(await runSpeech('kokoro', { input: 'Hello' })).rejects.toMatchObject({ status: 429, retryAfterMs: 30000 });
+      await expect(runSpeech('kokoro', { input: 'Hello' })).rejects.toMatchObject({ status: 429, retryAfterMs: 30000 });
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it('Free.ai reports queued work without following a poll URL or resubmitting generation', async () => {
       await addMedia('freeai', 'kokoro', 'audio'); await addKey('freeai');
       const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ queued: true, job_id: 'test', poll_url: 'https://example.com/private' }));
-      await expect(await runSpeech('kokoro', { input: 'Hello' })).rejects.toMatchObject({ status: 502, code: 'upstream_queued' });
+      await expect(runSpeech('kokoro', { input: 'Hello' })).rejects.toMatchObject({ status: 502, code: 'upstream_queued' });
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
@@ -571,14 +573,14 @@ describe('media service', () => {
     it.each(['pcm', 'flac', 'opus'])('Speechify rejects unsupported %s without sending a request', async format => {
       await addMedia('speechify', 'test-simba', 'audio'); await addKey('speechify');
       const fetchMock = vi.spyOn(globalThis, 'fetch');
-      await expect(await runSpeech('test-simba', { input: 'Hello', format })).rejects.toThrow('Speechify supports');
+      await expect(runSpeech('test-simba', { input: 'Hello', format })).rejects.toThrow('Speechify supports');
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it.each([{}, { audio_data: 'not base64', audio_format: 'mp3' }, { audio_data: '', audio_format: 'mp3' }, { audio_data: 'SUQz', audio_format: 'wav' }])('Speechify rejects malformed audio instead of returning JSON as sound', async body => {
       await addMedia('speechify', 'test-simba', 'audio'); await addKey('speechify');
       vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(body));
-      await expect(await runSpeech('test-simba', { input: 'Hello' })).rejects.toThrow('Speechify returned');
+      await expect(runSpeech('test-simba', { input: 'Hello' })).rejects.toThrow('Speechify returned');
     });
 
     it('Cloudflare MeloTTS: base64 audio → audio/mpeg bytes', async () => {
@@ -664,7 +666,7 @@ describe('media service', () => {
       await addMedia('google', 'gemini-3.8-flash-tts', 'audio');
       await addKey('google');
       globalThis.fetch = vi.fn(async () => jsonResponse({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'audio/wav', data: Buffer.from('not audio').toString('base64') } }] } }] }));
-      await expect(await runSpeech('gemini-3.8-flash-tts', { input: 'hello' })).rejects.toThrow('malformed WAV');
+      await expect(runSpeech('gemini-3.8-flash-tts', { input: 'hello' })).rejects.toThrow('malformed WAV');
     });
 
     it('Gemini TTS: canonicalizes native voices and defaults unknown names', async () => {

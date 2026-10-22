@@ -91,9 +91,9 @@ describe('cooldown ceiling (#952)', () => {
     await setCooldownCeilingMs(null);
     expect(await getSetting(COOLDOWN_CEILING_KEY)).toBeUndefined();
     expect(await getCooldownCeilingMs()).toBeNull();
-    expect(async () => await setCooldownCeilingMs(30_000)).toThrow(/between/);
-    expect(async () => await setCooldownCeilingMs(DAY + 1)).toThrow(/between/);
-    expect(async () => await setCooldownCeilingMs(90.5)).toThrow(/between/);
+    await expect(setCooldownCeilingMs(30_000)).rejects.toThrow(/between/);
+    await expect(setCooldownCeilingMs(DAY + 1)).rejects.toThrow(/between/);
+    await expect(setCooldownCeilingMs(90.5)).rejects.toThrow(/between/);
     expect(await capCooldownMs(DAY)).toBe(DAY);
   });
 

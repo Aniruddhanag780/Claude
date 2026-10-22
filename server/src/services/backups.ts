@@ -244,19 +244,52 @@ async function createTable(_db: Db, _table: string): Promise<string | null> {
   return null;
 }
 
-async function sqliteDumpTable(db: Db, table: string): Promise<string> {
+const TABLE_DEPENDENCIES: Record<string, string[]> = {
+  fallback_config: ['models'],
+  profile_models: ['models', 'profiles'],
+  quirk_targets: ['quirks'],
+  request_attempts: ['requests'],
+};
+
+function sortTablesParentFirst(tables: string[]): string[] {
+  const result: string[] = [];
+  const visited = new Set<string>();
+
+  function visit(t: string, visiting: Set<string>) {
+    if (visited.has(t)) return;
+    if (visiting.has(t)) return;
+    visiting.add(t);
+    const deps = TABLE_DEPENDENCIES[t] ?? [];
+    for (const dep of deps) {
+      if (tables.includes(dep)) {
+        visit(dep, visiting);
+      }
+    }
+    visiting.delete(t);
+    visited.add(t);
+    result.push(t);
+  }
+
+  for (const t of tables) {
+    visit(t, new Set());
+  }
+  return result;
+}
+
+function sortTablesChildFirst(tables: string[]): string[] {
+  return [...sortTablesParentFirst(tables)].reverse();
+}
+
+async function sqliteDumpTableRows(db: Db, table: string): Promise<string | null> {
   const columns = (await db.all<{ column_name: string }>(
     'SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position',
     ['public', table],
   )).map((c) => c.column_name);
   const rows = await db.all(`SELECT * FROM "${table}"`) as Record<string, unknown>[];
-  const lines: string[] = [`DELETE FROM "${table}";`];
-  if (rows.length > 0) {
-    const columnList = columns.map((c) => `"${c}"`).join(', ');
-    const valueRows = rows.map((row) => `(${columns.map((c) => sqliteEscape(row[c])).join(', ')})`);
-    lines.push(`INSERT INTO "${table}" (${columnList}) VALUES\n  ${valueRows.join(',\n  ')};`);
-  }
-  return lines.join('\n');
+  if (rows.length === 0) return null;
+  const columnList = columns.map((c) => `"${c}"`).join(', ');
+  const valueRows = rows.map((row) => `(${columns.map((c) => sqliteEscape(row[c])).join(', ')})`);
+  return `INSERT INTO "${table}" (${columnList}) VALUES\n  ${valueRows.join(',\n  ')};`;
 }
 
 // No BEGIN/COMMIT in the body: restore runs the whole file inside one
@@ -264,10 +297,14 @@ async function sqliteDumpTable(db: Db, table: string): Promise<string> {
 // where it started, and a nested BEGIN would abort that.
 async function sqliteDump(db: Db, tables: string[], createdAt: string): Promise<string> {
   const lines = [await renderHeader(db, tables, createdAt)];
-  for (const table of tables) {
-    const create = await createTable(db, table);
-    if (create) lines.push(create);
-    lines.push(await sqliteDumpTable(db, table));
+  const deleteOrder = sortTablesChildFirst(tables);
+  for (const table of deleteOrder) {
+    lines.push(`DELETE FROM "${table}";`);
+  }
+  const insertOrder = sortTablesParentFirst(tables);
+  for (const table of insertOrder) {
+    const insertSql = await sqliteDumpTableRows(db, table);
+    if (insertSql) lines.push(insertSql);
   }
   return `${lines.join('\n')}\n`;
 }

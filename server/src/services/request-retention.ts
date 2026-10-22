@@ -156,12 +156,12 @@ export async function pruneQuotaObservations(
   if (retentionDays > 0) {
     const cutoff = toSqliteTimestamp(new Date(nowMs - retentionDays * DAY_MS));
     for (;;) {
-      const changes = await (await db.run(`
+      const changes = (await db.run(`
       DELETE FROM provider_quota_observations
-      WHERE rowid IN (
-        SELECT rowid FROM provider_quota_observations
-        WHERE created_at < ?
-        ORDER BY created_at ASC
+      WHERE id IN (
+        SELECT id FROM provider_quota_observations
+        WHERE observed_at < ?
+        ORDER BY observed_at ASC
         LIMIT ?
       )
     `, [cutoff, QUOTA_OBSERVATIONS_PRUNE_CHUNK])).changes;
@@ -173,12 +173,12 @@ export async function pruneQuotaObservations(
 
   if (maxRows > 0) {
     for (;;) {
-      const changes = await (await db.run(`
+      const changes = (await db.run(`
       DELETE FROM provider_quota_observations
-      WHERE rowid IN (
-        SELECT rowid
+      WHERE id IN (
+        SELECT id
         FROM provider_quota_observations
-        ORDER BY created_at DESC, rowid DESC
+        ORDER BY observed_at DESC, id DESC
         LIMIT ? OFFSET ?
       )
     `, [QUOTA_OBSERVATIONS_PRUNE_CHUNK, maxRows])).changes;
@@ -221,7 +221,7 @@ export async function pruneServerLogs(db: RetentionDb, nowMs: number): Promise<n
         SELECT id
         FROM server_logs
         ORDER BY created_at_ms DESC, id DESC
-        LIMIT -1 OFFSET ?
+        OFFSET ?
       )
     `, [maxRows])).changes;
   }
@@ -292,7 +292,7 @@ export async function pruneSearchLogs(db: RetentionDb, nowMs: number): Promise<n
         SELECT id
         FROM search_requests
         ORDER BY created_at DESC, id DESC
-        LIMIT -1 OFFSET ?
+        OFFSET ?
       )
     `, [maxRows])).changes;
   }
@@ -328,7 +328,7 @@ export async function pruneDecisionLogs(db: RetentionDb, nowMs: number): Promise
         SELECT id
         FROM decision_requests
         ORDER BY created_at DESC, id DESC
-        LIMIT -1 OFFSET ?
+        OFFSET ?
       )
     `, [maxRows])).changes;
   }
@@ -365,7 +365,7 @@ export async function pruneRequestAnalytics(options: {
         SELECT id
         FROM requests
         ORDER BY created_at DESC, id DESC
-        LIMIT -1 OFFSET ?
+        OFFSET ?
       )
     `, [maxRows])).changes;
   }

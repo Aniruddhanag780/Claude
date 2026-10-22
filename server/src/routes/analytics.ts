@@ -270,7 +270,7 @@ analyticsRouter.get('/by-model', async (req: Request, res: Response) => {
       ON m.platform = r.platform AND m.model_id = r.model_id
      AND m.endpoint_scope = ${ENDPOINT_ID_SQL}
     WHERE r.created_at >= ?
-    GROUP BY r.platform, ${ENDPOINT_ID_SQL}, r.model_id
+    GROUP BY r.platform, ${ENDPOINT_ID_SQL}, r.model_id, m.display_name
     ORDER BY requests DESC
   `, [FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M, since]) as any[];
 
@@ -338,7 +338,7 @@ analyticsRouter.get('/by-platform', async (req: Request, res: Response) => {
   // endpoint's base_url — or a custom endpoint's p95 would bleed in latency
   // from every other custom endpoint.
 
-  res.json(rows.map(async r => {
+  res.json(await Promise.all(rows.map(async r => {
     // Offset math and the ordered selection both range over the non-null
     // latency rows (latency_count), so a NULL can neither be counted into the
     // denominator nor selected as the p95 value.
@@ -375,7 +375,7 @@ analyticsRouter.get('/by-platform', async (req: Request, res: Response) => {
       totalInputTokens: r.total_input_tokens ?? 0,
       totalOutputTokens: r.total_output_tokens ?? 0,
     };
-  }));
+  })));
 });
 
 analyticsRouter.get('/by-client', async (req: Request, res: Response) => {
@@ -428,7 +428,7 @@ analyticsRouter.get('/by-key', async (req: Request, res: Response) => {
     FROM requests r
     LEFT JOIN api_keys k ON k.id = r.key_id
     WHERE r.key_id IS NOT NULL AND r.created_at >= ?
-    GROUP BY r.key_id
+    GROUP BY r.key_id, k.label, k.platform
     ORDER BY requests DESC
     LIMIT 50
   `, [since]) as any[];
@@ -523,7 +523,7 @@ analyticsRouter.get('/error-distribution', async (req: Request, res: Response) =
       COUNT(*) as count
     FROM requests
     WHERE status = 'error' AND created_at >= ?
-    GROUP BY platform, error_category
+    GROUP BY platform, model_id, error_category
     ORDER BY count DESC
   `, [since]) as any[];
 

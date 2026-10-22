@@ -47,30 +47,30 @@ describe('LLMTR catalog-managed embeddings', () => {
     { error: { code: 'insufficient_credits' } },
   ])('rejects malformed vectors or substituted model identity', async body => {
     await seed(); vi.spyOn(global, 'fetch').mockResolvedValue(json(body));
-    await expect(await runEmbeddings(models[0].id, ['hello'])).rejects.toMatchObject({ status: 502 });
+    await expect(runEmbeddings(models[0].id, ['hello'])).rejects.toMatchObject({ status: 502 });
   });
 
   it('rejects duplicate indexes even when the batch size matches', async () => {
     await seed(); vi.spyOn(global, 'fetch').mockResolvedValue(json({ model: models[0].id,
       data: [{ index: 0, embedding: Array(768).fill(0.1) }, { index: 0, embedding: Array(768).fill(0.2) }] }));
-    await expect(await runEmbeddings(models[0].id, ['first', 'second'])).rejects.toMatchObject({ status: 502 });
+    await expect(runEmbeddings(models[0].id, ['first', 'second'])).rejects.toMatchObject({ status: 502 });
   });
 
   it('rejects a dimension override before sending a request', async () => {
     await seed(); const fetch = vi.spyOn(global, 'fetch');
-    await expect(await runEmbeddings(models[0].id, ['hello'], 1024)).rejects.toThrow('dimension override');
+    await expect(runEmbeddings(models[0].id, ['hello'], 1024)).rejects.toThrow('dimension override');
     expect(fetch).not.toHaveBeenCalled();
   });
 
   it('preserves upstream rate-limit retry hints', async () => {
     await seed(); vi.spyOn(global, 'fetch').mockResolvedValue(new Response('upstream error', { status: 429, headers: { 'Retry-After': '45' } }));
-    await expect(await runEmbeddings(models[0].id, ['hello'])).rejects.toMatchObject({ status: 429, retryAfterMs: 45_000 });
+    await expect(runEmbeddings(models[0].id, ['hello'])).rejects.toMatchObject({ status: 429, retryAfterMs: 45_000 });
   });
 
   it.each([401, 402, 503])('fails closed on upstream HTTP %i without returning vectors', async status => {
     await seed(); vi.spyOn(global, 'fetch').mockResolvedValue(new Response('upstream error', { status }));
     // Preserve the existing family router's normalization of exhausted chains.
-    await expect(await runEmbeddings(models[0].id, ['hello'])).rejects.toMatchObject({
+    await expect(runEmbeddings(models[0].id, ['hello'])).rejects.toMatchObject({
       status: 502, message: expect.stringContaining(`upstream ${status}`),
     });
   });

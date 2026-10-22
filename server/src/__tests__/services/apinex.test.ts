@@ -44,13 +44,13 @@ describe('APINex decisions', () => {
     { model, answers, error: { message: 'Upstream failed' } },
   ])('fails closed on malformed, missing, or substituted answers', async body => {
     await seed(); vi.spyOn(global, 'fetch').mockResolvedValue(json(body));
-    await expect(await runDecision(request, { model })).rejects.toMatchObject({ status: 502 });
+    await expect(runDecision(request, { model })).rejects.toMatchObject({ status: 502 });
   });
 
   it.each([401, 402, 429, 503])('uses existing failure policy for HTTP %s, with no paid-alias retry', async status => {
     await seed();
     const fetch = vi.spyOn(global, 'fetch').mockResolvedValue(json({ error: { retry_after_seconds: 45 } }, status));
-    const error = await (await runDecision(request, { model })).catch(error => error);
+    const error = await runDecision(request, { model }).catch(error => error);
     expect(error).toMatchObject({ status: status === 429 ? 429 : 502, retryAfterMs: status === 429 ? 45_000 : undefined });
     expect(error.message).toContain(`apinex ${status}`);
     expect(fetch).toHaveBeenCalledTimes(1);

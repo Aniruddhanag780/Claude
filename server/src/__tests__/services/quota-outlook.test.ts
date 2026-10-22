@@ -29,7 +29,7 @@ describe('dashboard quota outlook', () => {
     await signal(); traffic(7);
     const pool = (await getQuotaOutlook()).pools[0];
     expect(pool).toMatchObject({remaining:35,remainingPct:14,ratePerMin:0.7,status:'forecast',warning:'low_balance',estimatedExhaustionAt:'2026-09-14T20:50:00.000Z'});
-    expect(await await await getQuotaForecast(await getQuotaStateForKeys({ normalizeExpired: false }), NOW)[0].low_balance).toBe(false);
+    expect(await await (await getQuotaForecast(await getQuotaStateForKeys({ normalizeExpired: false }), NOW))[0].low_balance).toBe(false);
   });
 
   it('warns at two hours even above 20%, but not when reset wins', async () => {

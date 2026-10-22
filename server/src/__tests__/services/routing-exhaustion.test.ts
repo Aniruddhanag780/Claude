@@ -105,9 +105,9 @@ describe('Routing Key Exhaustion', () => {
     expect(ratelimit.canMakeRequest).toHaveBeenCalled();
   });
 
-  it('should throw 429 when every key on every model is exhausted', () => {
+  it('should throw 429 when every key on every model is exhausted', async () => {
     (ratelimit.canMakeRequest as any).mockReturnValue(false);
-    expect(async () => await routeRequest(100)).toThrow(/All models exhausted/);
+    await expect(routeRequest(100)).rejects.toThrow(/All models exhausted/);
   });
 
   it('should fall back to Flash when Pro is exhausted but Flash has quota', async () => {
@@ -145,7 +145,7 @@ describe('Routing Key Exhaustion', () => {
       (ratelimit.canMakeRequest as any).mockReturnValue(true);
       (ratelimit.canUseTokens as any).mockReturnValue(true);
 
-      expect(async () => await routeRequest(100, undefined, undefined, false, false, new Set(ids))).toThrow();
+      await expect(routeRequest(100, undefined, undefined, false, false, new Set(ids))).rejects.toThrow();
     });
 
     it('overrides a sticky/preferred model that has been skipped', async () => {

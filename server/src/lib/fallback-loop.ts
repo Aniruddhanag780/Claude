@@ -648,7 +648,7 @@ async function triggerKeyRevalidation(platform: string, keyId: number): Promise<
  */
 export async function recordAuthFailure(route: RouteResult, state: FallbackState): Promise<void> {
   state.skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
-  setCooldown(route.platform, route.modelId, route.keyId, AUTH_FAILURE_COOLDOWN_MS);
+  await setCooldown(route.platform, route.modelId, route.keyId, AUTH_FAILURE_COOLDOWN_MS);
   await triggerKeyRevalidation(route.platform, route.keyId);
 }
 
@@ -1516,6 +1516,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
       // attempt costs nothing extra — no query, no decrypt.
       outcome = await withKeyProxy(route.proxyUrl, async () => await hooks.dispatch(route, attempt, { disarmHedge }));
     } catch (err: any) {
+      disarmHedge();
       // Client-caused abort: the composed fetch signal fired because OUR
       // client hung up mid-attempt (see newClientAbortError). Not a
       // provider-health signal — no cooldown, no penalty, no failure stats,

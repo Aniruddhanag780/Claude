@@ -76,7 +76,7 @@ describe('transcription service', () => {
     await addKey('groq');
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as any;
-    await expect(await runTranscription('auto', params()))
+    await expect(runTranscription('auto', params()))
       .rejects.toMatchObject({ status: 503, code: 'no_transcription_models' });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -85,7 +85,7 @@ describe('transcription service', () => {
     (await getDb().run("UPDATE media_models SET enabled = 0 WHERE model_id = 'whisper-large-v3'"));
     await addKey('groq');
     globalThis.fetch = vi.fn(async () => jsonResponse({ text: 'ok' })) as any;
-    await expect(await runTranscription('whisper-large-v3', params()))
+    await expect(runTranscription('whisper-large-v3', params()))
       .rejects.toMatchObject({ status: 400 });
     // auto still routes via the remaining rows.
     const r = await runTranscription('auto', params());
@@ -210,7 +210,7 @@ describe('transcription service', () => {
 
   it('unknown model → 400 MediaError', async () => {
     await addKey('groq');
-    await expect(await runTranscription('not-a-model', params()))
+    await expect(runTranscription('not-a-model', params()))
       .rejects.toMatchObject({ status: 400 });
   });
 
@@ -230,7 +230,7 @@ describe('transcription service', () => {
 
   it('vtt pinned to a groq model → 400 (not produced natively)', async () => {
     await addKey('groq');
-    await expect(await runTranscription('whisper-large-v3', params({ responseFormat: 'vtt' })))
+    await expect(runTranscription('whisper-large-v3', params({ responseFormat: 'vtt' })))
       .rejects.toMatchObject({ status: 400 });
   });
 
@@ -240,7 +240,7 @@ describe('transcription service', () => {
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as any;
     const big = Buffer.alloc(MAX_TRANSCRIPTION_BYTES + 1);
-    await expect(await runTranscription('auto', params({ file: big })))
+    await expect(runTranscription('auto', params({ file: big })))
       .rejects.toMatchObject({ status: 413 });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -248,7 +248,7 @@ describe('transcription service', () => {
   it('no usable keys → 503-family MediaError, no fetch', async () => {
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as any;
-    await expect(await runTranscription('auto', params())).rejects.toBeInstanceOf(MediaError);
+    await expect(runTranscription('auto', params())).rejects.toBeInstanceOf(MediaError);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -326,13 +326,13 @@ describe('transcription service', () => {
     const keyId = await addCustomStt();
     (await getDb().run('UPDATE api_keys SET base_url = NULL WHERE id = ?', [keyId]));
     globalThis.fetch = vi.fn() as any;
-    await expect(await runTranscription('local-whisper', params()))
+    await expect(runTranscription('local-whisper', params()))
       .rejects.toMatchObject({ status: 502 }); // chainError wraps the 500 adapter error
   });
 
   it("custom: vtt is refused — no custom row declares native subtitles", async () => {
     await addCustomStt();
-    await expect(await runTranscription('local-whisper', params({ responseFormat: 'vtt' })))
+    await expect(runTranscription('local-whisper', params({ responseFormat: 'vtt' })))
       .rejects.toMatchObject({ status: 400 });
   });
 

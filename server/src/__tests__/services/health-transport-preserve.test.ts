@@ -83,7 +83,7 @@ describe('transport errors do not demote a key', () => {
 
     // Previously all three would have gone to 'error' and the router would have
     // had zero usable keys until a later pass succeeded.
-    expect(ids.map(statusOf)).toEqual(['healthy', 'healthy', 'unknown']);
+    expect(await Promise.all(ids.map(statusOf))).toEqual(['healthy', 'healthy', 'unknown']);
   });
 });
 
@@ -132,7 +132,7 @@ describe('markKeyHealthyFromRequest', () => {
     expect((await row(id)).status).toBe('healthy');
   });
 
-  it('is silent for an unknown key id', () => {
-    expect(async () => await markKeyHealthyFromRequest(999_999)).not.toThrow();
+  it('is silent for an unknown key id', async () => {
+    await expect(markKeyHealthyFromRequest(999_999)).resolves.not.toThrow();
   });
 });

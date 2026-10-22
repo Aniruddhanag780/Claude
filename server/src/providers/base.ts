@@ -410,7 +410,7 @@ export abstract class BaseProvider {
     if (inactivityTimeoutMs <= 0) return await read();
     let timer: ReturnType<typeof setTimeout> | undefined;
     return await Promise.race([
-      await read(),
+      read(),
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new Error(timeoutMessage ?? `${this.name} stream stalled: no data for ${inactivityTimeoutMs}ms (timeout)`)),

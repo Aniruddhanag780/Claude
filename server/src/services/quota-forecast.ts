@@ -84,7 +84,7 @@ export async function getRecentQuotaActivity(now: number): Promise<RecentQuotaAc
   const sqliteUtc = (ms: number) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
   const since = sqliteUtc(now - RATE_OBSERVATION_WINDOW_MINUTES * 60_000);
   const rows = await getDb().all(`
-    SELECT platform, key_id AS keyId, model_id AS modelId, COUNT(*) AS count
+    SELECT platform, key_id AS "keyId", model_id AS "modelId", COUNT(*) AS count
       FROM requests
      WHERE created_at >= ? AND created_at::timestamp >= ? AND created_at::timestamp <= ?
        AND status = 'success'

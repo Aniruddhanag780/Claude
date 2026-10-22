@@ -181,7 +181,8 @@ export async function pruneUnavailableSavedFusionConfig(): Promise<SavedFusionCo
   if (!raw) return await getSavedFusionConfig();
 
   const saved = await getSavedFusionConfig();
-  const models = saved.models.filter(async savedModelId => await resolveFusionCandidate(savedModelId) != null);
+  const resolvedCandidates = await Promise.all(saved.models.map(async m => ({ id: m, cand: await resolveFusionCandidate(m) })));
+  const models = resolvedCandidates.filter(r => r.cand != null).map(r => r.id);
   const judge = saved.judge && await resolveFusionCandidate(saved.judge) != null ? saved.judge : null;
 
   if (models.length === saved.models.length && judge === saved.judge) return saved;

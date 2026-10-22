@@ -15,7 +15,7 @@ import { initTestDb } from '../helpers/test-db.js';
 // coincidental slug sibling with better recent numbers silently answers a
 // request that named a different model literally.
 
-async function addKey(platform: string): number {
+async function addKey(platform: string): Promise<number> {
   const { encrypted, iv, authTag } = encrypt(`${platform}-secret`);
   const r = (await getDb().run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
@@ -23,7 +23,7 @@ async function addKey(platform: string): number {
   return Number(r.lastInsertRowid);
 }
 
-async function addModel(platform: string, modelId: string): number {
+async function addModel(platform: string, modelId: string): Promise<number> {
   const r = (await getDb().run(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled, source)
     VALUES (?, ?, ?, 50, 50, 1, 'catalog') RETURNING id`, [platform, modelId, modelId]));
@@ -61,8 +61,8 @@ describe('slug-match demotion survives the router', () => {
 
     // The fallback candidate is measurably BETTER than the literal one, so
     // score alone would put it first.
-    logFailures('groq', 'tier-test-model', groqKey, 30);
-    logSuccesses('cerebras', 'tier-test-other', cerebrasKey, 40);
+    await logFailures('groq', 'tier-test-model', groqKey, 30);
+    await logSuccesses('cerebras', 'tier-test-other', cerebrasKey, 40);
     await refreshStatsCache(getDb(), true);
   });
 

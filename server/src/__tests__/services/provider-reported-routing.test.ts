@@ -17,8 +17,8 @@ it('does not dispatch to a window smaller than provider input plus output reserv
   await recordRetryableFailure({platform: 'cloudflare', modelId: 'failed-model', modelDbId: -1, keyId: -1} as any, error, state);
   expect(state.observedInputTokens).toBe(23745);
   expect(fallbackRoutingTokens(state, 4000, 256)).toBe(24001);
-  expect(async () => await routeRequest(fallbackRoutingTokens(state, 4000, 256), undefined, undefined, false, false, undefined, undefined, false, undefined, 256)).toThrow();
-  expect(async () => await routeRequest(fallbackRoutingTokens(state, 4000, 255), undefined, undefined, false, false, undefined, undefined, false, undefined, 255)).not.toThrow();
+  await expect(routeRequest(fallbackRoutingTokens(state, 4000, 256), undefined, undefined, false, false, undefined, undefined, false, undefined, 256)).rejects.toThrow();
+  await expect(routeRequest(fallbackRoutingTokens(state, 4000, 255), undefined, undefined, false, false, undefined, undefined, false, undefined, 255)).resolves.toBeDefined();
 });
 it('adds the output reserve only to input observations', () => {
   const state = newFallbackState();

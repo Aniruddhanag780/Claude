@@ -36,7 +36,7 @@ describe('Free.ai', () => {
     const { encrypted, iv, authTag } = encrypt('test-key');
     const id = Number((await getDb().run("INSERT INTO api_keys (platform,label,encrypted_key,iv,auth_tag,status,enabled) VALUES ('freeai','test',?,?,?,'unknown',1) RETURNING id", [encrypted, iv, authTag])).lastInsertRowid);
     const fetch = vi.spyOn(globalThis, 'fetch');
-    await expect(await checkKeyHealth(id)).resolves.toBe('unknown');
+    await expect(checkKeyHealth(id)).resolves.toBe('unknown');
     expect((await getDb().get('SELECT status, enabled, last_health_error FROM api_keys WHERE id=?', [id]))).toMatchObject({
       status: 'unknown', enabled: 1, last_health_error: expect.stringContaining('key validity is unknown'),
     });

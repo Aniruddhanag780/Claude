@@ -184,8 +184,8 @@ async function createTables(db: Db): Promise<void> {
       key_id BIGINT NOT NULL,
       quota_pool_key TEXT NOT NULL,
       metric TEXT NOT NULL,
-      limit_value BIGINT,
-      remaining_value BIGINT,
+      limit_value DOUBLE PRECISION,
+      remaining_value DOUBLE PRECISION,
       reset_at TEXT,
       reset_strategy TEXT NOT NULL DEFAULT 'unknown',
       source TEXT NOT NULL DEFAULT 'probe',
@@ -207,8 +207,8 @@ async function createTables(db: Db): Promise<void> {
       quota_pool_key TEXT NOT NULL,
       metric TEXT NOT NULL,
       status_code BIGINT,
-      limit_value BIGINT,
-      remaining_value BIGINT,
+      limit_value DOUBLE PRECISION,
+      remaining_value DOUBLE PRECISION,
       reset_at TEXT,
       retry_after_ms BIGINT,
       reset_strategy TEXT NOT NULL DEFAULT 'unknown',
@@ -229,6 +229,18 @@ async function createTables(db: Db): Promise<void> {
   await ensureModelsKeyIdColumn(db);
   await ensureRequestTtfbColumn(db);
   await ensureRequestRequestedModelColumn(db);
+  await ensureQuotaNumericTypes(db);
+}
+
+async function ensureQuotaNumericTypes(db: Db): Promise<void> {
+  await db.exec(`
+    ALTER TABLE provider_quota_state
+      ALTER COLUMN limit_value TYPE DOUBLE PRECISION,
+      ALTER COLUMN remaining_value TYPE DOUBLE PRECISION;
+    ALTER TABLE provider_quota_observations
+      ALTER COLUMN limit_value TYPE DOUBLE PRECISION,
+      ALTER COLUMN remaining_value TYPE DOUBLE PRECISION;
+  `);
 }
 
 // `requested_model` is the model id the CLIENT pinned in the request body.

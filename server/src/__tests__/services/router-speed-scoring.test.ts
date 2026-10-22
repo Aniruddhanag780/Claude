@@ -1,7 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
-  refreshStatsCache, getRoutingScores, setRoutingStrategy,
-  writeObservedSpeedRanks, resetSpeedRankWriteback,
+  routeRequest,
+  refreshStatsCache,
+  getRoutingScores,
+  setRoutingStrategy,
+  writeObservedSpeedRanks,
+  resetSpeedRankWriteback,
 } from '../../services/router.js';
 import { observedSpeedRank, TIMEOUT_LATENCY_CAP_MS } from '../../services/scoring.js';
 import { upsertModelOverrides } from '../../services/model-state.js';
@@ -9,27 +13,22 @@ import { getDb } from '../../db/index.js';
 import { addToActiveChain } from '../helpers/chain.js';
 import { initTestDb } from '../helpers/test-db.js';
 
-vi.mock('../../lib/crypto.js', async () => {
-  const actual = await vi.importActual('../../lib/crypto.js');
-  return { ...actual, decrypt: vi.fn(() => 'mocked-api-key') };
-});
-
 const ORIGINAL_DEV_MODE = process.env.DEV_MODE;
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 
 async function addModel(opts: {
   platform: string; modelId: string; name: string; speedRank?: number; priority?: number;
-}): number {
+}): Promise<number> {
   const db = getDb();
-  (await db.run(`
+  await db.run(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, monthly_token_budget, enabled)
-    VALUES (?, ?, ?, 3, ?, 'Large', '~50M', 1) RETURNING id`, [opts.platform, opts.modelId, opts.name, opts.speedRank ?? 5]));
+    VALUES (?, ?, ?, 3, ?, 'Large', '~50M', 1) RETURNING id`, [opts.platform, opts.modelId, opts.name, opts.speedRank ?? 5]);
   const id = ((await db.get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [opts.platform, opts.modelId])) as { id: number }).id;
-  (await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1) RETURNING id', [id, opts.priority ?? 1]));
+  await db.run('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1) RETURNING id', [id, opts.priority ?? 1]);
   await addToActiveChain(id, opts.priority ?? 1);
-  (await db.run(`
+  await db.run(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, 'k', 'enc', 'iv', 'tag', 'healthy', 1) RETURNING id`, [opts.platform]));
+    VALUES (?, 'k', 'enc', 'iv', 'tag', 'healthy', 1) RETURNING id`, [opts.platform]);
   return id;
 }
 
@@ -37,22 +36,22 @@ async function addModel(opts: {
 async function addRequests(platform: string, modelId: string, opts: {
   count: number; status: string; outTokens?: number; latencyMs?: number;
   ttfbMs?: number | null; error?: string | null;
-}) {
+}): Promise<void> {
   for (let i = 0; i < opts.count; i++) {
-    (await getDb().run(`
+    await getDb().run(`
     INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
-    VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?) RETURNING id`, [platform, modelId, opts.status, opts.outTokens ?? 0, opts.latencyMs ?? 0, opts.error ?? null, opts.ttfbMs ?? null]));
+    VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?) RETURNING id`, [platform, modelId, opts.status, opts.outTokens ?? 0, opts.latencyMs ?? 0, opts.error ?? null, opts.ttfbMs ?? null]);
   }
 }
 
-async function speedOf(modelId: string): number {
+async function speedOf(modelId: string): Promise<number> {
   const { scores } = await getRoutingScores();
   const row = scores.find(s => s.modelId === modelId);
   if (!row) throw new Error(`no score row for ${modelId}`);
   return row.speed;
 }
 
-async function speedRankOf(platform: string, modelId: string): number {
+async function speedRankOf(platform: string, modelId: string): Promise<number> {
   return ((await getDb().get('SELECT speed_rank FROM models WHERE platform = ? AND model_id = ?', [platform, modelId])) as { speed_rank: number }).speed_rank;
 }
 
@@ -61,7 +60,7 @@ describe('speed scoring: timeouts count against speed (#619)', () => {
     process.env.DEV_MODE = 'true';
     process.env.NODE_ENV = 'test';
     await initTestDb();
-    getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests; DELETE FROM model_overrides;');
+    await getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests; DELETE FROM model_overrides;');
     await setRoutingStrategy('balanced');
     resetSpeedRankWriteback();
   });
@@ -77,11 +76,11 @@ describe('speed scoring: timeouts count against speed (#619)', () => {
 
     // Identical successful traffic on both.
     for (const [platform, modelId] of [['google', 'clean'], ['groq', 'timeouty']] as const) {
-      addRequests(platform, modelId, { count: 40, status: 'success', outTokens: 100, latencyMs: 1000, ttfbMs: 200 });
+      await addRequests(platform, modelId, { count: 40, status: 'success', outTokens: 100, latencyMs: 1000, ttfbMs: 200 });
     }
     // …but one of them also times out constantly. A timeout is logged as an
     // 'error' row whose text carries the abort/timeout marker.
-    addRequests('groq', 'timeouty', {
+    await addRequests('groq', 'timeouty', {
       count: 10, status: 'error', outTokens: 0, latencyMs: 120_000, ttfbMs: null,
       error: 'The operation was aborted (groq, chat, 120s)',
     });
@@ -94,7 +93,7 @@ describe('speed scoring: timeouts count against speed (#619)', () => {
 
   it('a model that only ever times out lands at the bottom of the speed axis', async () => {
     await addModel({ platform: 'google', modelId: 'dead', name: 'Dead', priority: 1 });
-    addRequests('google', 'dead', {
+    await addRequests('google', 'dead', {
       count: 25, status: 'error', outTokens: 0, latencyMs: 90_000, ttfbMs: null,
       error: 'google stream stalled: no data for 90000ms (timeout)',
     });
@@ -108,8 +107,8 @@ describe('speed scoring: timeouts count against speed (#619)', () => {
     await addModel({ platform: 'google', modelId: 'capped', name: 'Capped', priority: 1 });
     await addModel({ platform: 'groq', modelId: 'uncapped', name: 'Uncapped', priority: 2 });
     for (const [platform, modelId] of [['google', 'capped'], ['groq', 'uncapped']] as const) {
-      addRequests(platform, modelId, { count: 40, status: 'success', outTokens: 100, latencyMs: 1000, ttfbMs: 200 });
-      addRequests(platform, modelId, {
+      await addRequests(platform, modelId, { count: 40, status: 'success', outTokens: 100, latencyMs: 1000, ttfbMs: 200 });
+      await addRequests(platform, modelId, {
         count: 1, status: 'error', outTokens: 0,
         latencyMs: modelId === 'capped' ? TIMEOUT_LATENCY_CAP_MS : TIMEOUT_LATENCY_CAP_MS * 50,
         error: 'The operation was aborted (x, chat, 120s)',
@@ -123,9 +122,9 @@ describe('speed scoring: timeouts count against speed (#619)', () => {
     await addModel({ platform: 'google', modelId: 'fast', name: 'Fast', priority: 1 });
     await addModel({ platform: 'groq', modelId: 'refusing', name: 'Refusing', priority: 2 });
     for (const [platform, modelId] of [['google', 'fast'], ['groq', 'refusing']] as const) {
-      addRequests(platform, modelId, { count: 40, status: 'success', outTokens: 100, latencyMs: 1000, ttfbMs: 200 });
+      await addRequests(platform, modelId, { count: 40, status: 'success', outTokens: 100, latencyMs: 1000, ttfbMs: 200 });
     }
-    addRequests('groq', 'refusing', {
+    await addRequests('groq', 'refusing', {
       count: 20, status: 'error', outTokens: 0, latencyMs: 200,
       error: 'API error 401: invalid api key',
     });
@@ -142,10 +141,10 @@ describe('speed scoring: timeouts count against speed (#619)', () => {
     await addModel({ platform: 'google', modelId: 'steady', name: 'Steady', priority: 1 });
     await addModel({ platform: 'groq', modelId: 'hungup', name: 'HungUp', priority: 2 });
     for (const [platform, modelId] of [['google', 'steady'], ['groq', 'hungup']] as const) {
-      addRequests(platform, modelId, { count: 40, status: 'success', outTokens: 100, latencyMs: 1000, ttfbMs: 200 });
+      await addRequests(platform, modelId, { count: 40, status: 'success', outTokens: 100, latencyMs: 1000, ttfbMs: 200 });
     }
     // Long-latency canceled rows would read as timeouts/failures if counted.
-    addRequests('groq', 'hungup', {
+    await addRequests('groq', 'hungup', {
       count: 20, status: 'canceled', outTokens: 0, latencyMs: 120_000,
       error: 'client disconnected after 120.0s; upstream request canceled',
     });
@@ -164,7 +163,7 @@ describe('observed speed_rank writeback (#619)', () => {
     process.env.DEV_MODE = 'true';
     process.env.NODE_ENV = 'test';
     await initTestDb();
-    getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests; DELETE FROM model_overrides;');
+    await getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests; DELETE FROM model_overrides;');
     await setRoutingStrategy('balanced');
     // Drain the periodic writeback against the now-empty DB so its interval gate
     // is closed: each test below drives writeObservedSpeedRanks itself and wants
@@ -189,7 +188,7 @@ describe('observed speed_rank writeback (#619)', () => {
 
   it('writes an observed rank for a well-sampled model', async () => {
     await addModel({ platform: 'google', modelId: 'quick', name: 'Quick', speedRank: 9 });
-    addRequests('google', 'quick', { count: 40, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
+    await addRequests('google', 'quick', { count: 40, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
 
     await refreshStatsCache(getDb(), true);
     expect(await writeObservedSpeedRanks(getDb())).toBe(1);
@@ -199,8 +198,8 @@ describe('observed speed_rank writeback (#619)', () => {
 
   it('demotes a model whose observed speed is dragged down by timeouts', async () => {
     await addModel({ platform: 'google', modelId: 'slowish', name: 'Slowish', speedRank: 1 });
-    addRequests('google', 'slowish', { count: 30, status: 'success', outTokens: 100, latencyMs: 1000, ttfbMs: 200 });
-    addRequests('google', 'slowish', {
+    await addRequests('google', 'slowish', { count: 30, status: 'success', outTokens: 100, latencyMs: 1000, ttfbMs: 200 });
+    await addRequests('google', 'slowish', {
       count: 30, status: 'error', outTokens: 0, latencyMs: 120_000,
       error: 'The operation was aborted (google, chat, 120s)',
     });
@@ -212,7 +211,7 @@ describe('observed speed_rank writeback (#619)', () => {
 
   it('leaves a low-sample model on its catalog rank', async () => {
     await addModel({ platform: 'google', modelId: 'shy', name: 'Shy', speedRank: 7 });
-    addRequests('google', 'shy', { count: 3, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
+    await addRequests('google', 'shy', { count: 3, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
 
     await refreshStatsCache(getDb(), true);
     expect(await writeObservedSpeedRanks(getDb())).toBe(0);
@@ -222,7 +221,7 @@ describe('observed speed_rank writeback (#619)', () => {
   it('never clobbers a user-set speed_rank override', async () => {
     await addModel({ platform: 'google', modelId: 'pinned', name: 'Pinned', speedRank: 2 });
     await upsertModelOverrides(getDb(), 'google', 'pinned', { speedRank: 2 });
-    addRequests('google', 'pinned', { count: 40, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
+    await addRequests('google', 'pinned', { count: 40, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
 
     await refreshStatsCache(getDb(), true);
     expect(await writeObservedSpeedRanks(getDb())).toBe(0);
@@ -232,7 +231,7 @@ describe('observed speed_rank writeback (#619)', () => {
   it('an override on a DIFFERENT field does not block the observed rank', async () => {
     await addModel({ platform: 'google', modelId: 'renamed', name: 'Renamed', speedRank: 9 });
     await upsertModelOverrides(getDb(), 'google', 'renamed', { displayName: 'My Name' });
-    addRequests('google', 'renamed', { count: 40, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
+    await addRequests('google', 'renamed', { count: 40, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
 
     await refreshStatsCache(getDb(), true);
     expect(await writeObservedSpeedRanks(getDb())).toBe(1);
@@ -241,7 +240,7 @@ describe('observed speed_rank writeback (#619)', () => {
 
   it('is idempotent — a second pass writes nothing', async () => {
     await addModel({ platform: 'google', modelId: 'steady', name: 'Steady', speedRank: 9 });
-    addRequests('google', 'steady', { count: 40, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
+    await addRequests('google', 'steady', { count: 40, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
 
     await refreshStatsCache(getDb(), true);
     expect(await writeObservedSpeedRanks(getDb())).toBe(1);
@@ -250,7 +249,7 @@ describe('observed speed_rank writeback (#619)', () => {
 
   it('refreshStatsCache drives the writeback on its own', async () => {
     await addModel({ platform: 'google', modelId: 'auto', name: 'Auto', speedRank: 9 });
-    addRequests('google', 'auto', { count: 40, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
+    await addRequests('google', 'auto', { count: 40, status: 'success', outTokens: 4000, latencyMs: 1000, ttfbMs: 100 });
 
     resetSpeedRankWriteback();
     await refreshStatsCache(getDb(), true);

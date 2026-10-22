@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { getDb, setSetting, getSetting } from '../../db/index.js';
 import { applyCatalog, reapplyCachedCatalog, MIN_CATALOG_VERSION } from '../../services/catalog-sync.js';
-import { runMigrationsSync } from '../../db/migrate/runner.js';
+import { runMigrations } from '../../db/migrate/runner.js';
 import { initTestDb } from '../helpers/test-db.js';
 import {
   getCatalogModelTombstone,
@@ -46,7 +46,7 @@ function catalogOf(models: AnyCatalog['models'], quirks: AnyCatalog['quirks'] = 
 }
 
 /** Snapshot every catalog-managed model as catalog entries so applyCatalog keeps them. */
-async function existingAsCatalogModels(): AnyCatalog['models'] {
+async function existingAsCatalogModels(): Promise<AnyCatalog['models']> {
   const rows = (await getDb().all(`SELECT platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
               rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
               enabled, supports_vision, supports_tools
@@ -76,7 +76,7 @@ async function existingAsCatalogModels(): AnyCatalog['models'] {
 
 type CatalogEmbedding = NonNullable<AnyCatalog['embeddings']>[number];
 
-async function existingAsCatalogEmbeddings(): CatalogEmbedding[] {
+async function existingAsCatalogEmbeddings(): Promise<CatalogEmbedding[]> {
   const rows = (await getDb().all(`
     SELECT family, platform, model_id, display_name, dimensions,
            max_input_tokens, priority, enabled, quota_label
@@ -374,7 +374,7 @@ describe('reapplyCachedCatalog', () => {
     // would re-classify the baseline's re-inserted rows against the applied
     // catalog instead of leaving them catalog-owned.
     (await getDb().run("DELETE FROM migrations WHERE filename NOT LIKE '20260726_000003%'"));
-    runMigrationsSync(getDb(), 'up');
+    await runMigrations(getDb(), 'up');
     expect(
       (await getDb().get('SELECT id FROM models WHERE platform = ? AND model_id = ?', [victim.platform, victim.modelId])),
     ).toBeDefined();
@@ -467,7 +467,7 @@ describe('applyCatalog: transcriptionModels', () => {
   }
 
   /** Catalog with an image media model plus (optionally) a STT snapshot. */
-  async function sttCatalog(entries?: CatalogTranscription[]): AnyCatalog {
+  async function sttCatalog(entries?: CatalogTranscription[]): Promise<AnyCatalog> {
     const models = await existingAsCatalogModels();
     models.push(baseModel({
       platform: 'cloudflare',
@@ -480,7 +480,7 @@ describe('applyCatalog: transcriptionModels', () => {
     return catalog;
   }
 
-  async function sttRows(): Array<{ platform: string; model_id: string; enabled: number; priority: number; meta_json: string | null }> {
+  async function sttRows(): Promise<Array<{ platform: string; model_id: string; enabled: number; priority: number; meta_json: string | null }>> {
     return (await getDb().all(`
       SELECT platform, model_id, enabled, priority, meta_json
         FROM media_models
@@ -490,7 +490,7 @@ describe('applyCatalog: transcriptionModels', () => {
   }
 
   it('routes entries into media_models with modality, meta_json, and priority order', async () => {
-    const counts = await applyCatalog(getDb(), sttCatalog(sttRoster()));
+    const counts = await applyCatalog(getDb(), await sttCatalog(sttRoster()));
     expect(counts.inserted).toBeGreaterThanOrEqual(5); // 4 STT + the image row
 
     const rows = await sttRows();
@@ -511,28 +511,28 @@ describe('applyCatalog: transcriptionModels', () => {
 
   it('enabled merge: local disable survives a catalog enable; catalog disable forces off', async () => {
     (await getDb().run("UPDATE media_models SET enabled = 0 WHERE modality = 'transcription' AND model_id = 'whisper-large-v3'"));
-    await applyCatalog(getDb(), sttCatalog(sttRoster())); // catalog still says enabled
+    await applyCatalog(getDb(), await sttCatalog(sttRoster())); // catalog still says enabled
     expect((await sttRows()).find(r => r.model_id === 'whisper-large-v3')!.enabled).toBe(0);
 
     (await getDb().run("UPDATE media_models SET enabled = 1 WHERE modality = 'transcription' AND model_id = 'whisper-large-v3'"));
     const roster = sttRoster();
     roster.find(m => m.modelId === 'whisper-large-v3')!.enabled = false;
-    await applyCatalog(getDb(), sttCatalog(roster));
+    await applyCatalog(getDb(), await sttCatalog(roster));
     expect((await sttRows()).find(r => r.model_id === 'whisper-large-v3')!.enabled).toBe(0);
 
     // Restore for the following tests.
-    await applyCatalog(getDb(), sttCatalog(sttRoster()));
+    await applyCatalog(getDb(), await sttCatalog(sttRoster()));
     (await getDb().run("UPDATE media_models SET enabled = 1 WHERE modality = 'transcription'"));
   });
 
   it('a catalog without the key leaves existing transcription rows untouched', async () => {
-    await applyCatalog(getDb(), sttCatalog(undefined)); // old payload shape
+    await applyCatalog(getDb(), await sttCatalog(undefined)); // old payload shape
     expect(await sttRows()).toHaveLength(4);
   });
 
   it('prunes dropped transcription rows, scoped to the modality', async () => {
     const roster = sttRoster().filter(m => m.modelId !== '@cf/openai/whisper');
-    const counts = await applyCatalog(getDb(), sttCatalog(roster));
+    const counts = await applyCatalog(getDb(), await sttCatalog(roster));
     expect(counts.removed).toBe(1);
     expect((await sttRows()).map(r => r.model_id)).not.toContain('@cf/openai/whisper');
     // Image row untouched by the transcription prune.
@@ -542,19 +542,19 @@ describe('applyCatalog: transcriptionModels', () => {
   it('skips entries for platforms without a transcription adapter', async () => {
     const roster = sttRoster();
     roster.push({ platform: 'nvidia', modelId: 'parakeet-stt', displayName: 'Parakeet', priority: 9, enabled: true });
-    const counts = await applyCatalog(getDb(), sttCatalog(roster));
+    const counts = await applyCatalog(getDb(), await sttCatalog(roster));
     expect(counts.skippedUnknownPlatform).toBeGreaterThanOrEqual(1);
     expect((await sttRows()).map(r => r.model_id)).not.toContain('parakeet-stt');
   });
 
   it('tombstoned (user-deleted) transcription models stay deleted', async () => {
     await recordCatalogModelTombstone(getDb(), 'media', 'groq', 'whisper-large-v3');
-    await applyCatalog(getDb(), sttCatalog(sttRoster()));
+    await applyCatalog(getDb(), await sttCatalog(sttRoster()));
     expect((await sttRows()).map(r => r.model_id)).not.toContain('whisper-large-v3');
   });
 
   it('a malformed transcriptionModels key rejects the whole payload', async () => {
-    const catalog = sttCatalog(sttRoster());
+    const catalog = await sttCatalog(sttRoster());
     (catalog as any).transcriptionModels = [{ platform: 'groq' }]; // missing required fields
     await setSetting('catalog_applied_json', JSON.stringify(catalog));
     // isCatalog gates both the network and the cached re-apply paths.
@@ -595,13 +595,13 @@ describe('applyCatalog: videoModels', () => {
     ];
   }
 
-  async function videoCatalog(entries?: CatalogVideo[]): AnyCatalog {
+  async function videoCatalog(entries?: CatalogVideo[]): Promise<AnyCatalog> {
     const catalog = catalogOf(await existingAsCatalogModels());
     if (entries) catalog.videoModels = entries;
     return catalog;
   }
 
-  async function videoRows(): Array<{ platform: string; model_id: string; enabled: number; priority: number; meta_json: string | null }> {
+  async function videoRows(): Promise<Array<{ platform: string; model_id: string; enabled: number; priority: number; meta_json: string | null }>> {
     return (await getDb().all(`
       SELECT platform, model_id, enabled, priority, meta_json
         FROM media_models
@@ -611,25 +611,25 @@ describe('applyCatalog: videoModels', () => {
   }
 
   it('lands the video roster and provider-native metadata in media_models', async () => {
-    const counts = await applyCatalog(getDb(), videoCatalog(videoRoster()));
+    const counts = await applyCatalog(getDb(), await videoCatalog(videoRoster()));
     expect(counts.inserted).toBeGreaterThanOrEqual(2);
     expect((await videoRows()).map(r => `${r.platform}:${r.model_id}`)).toEqual([
       'pollinations:nova-reel',
       'huggingface:Lightricks/LTX-Video-0.9.5',
     ]);
-    expect(await videoRows()[0].meta_json).toBeNull();
-    expect(JSON.parse(await videoRows()[1].meta_json!)).toEqual({ providerModelId: 'fal-ai/ltx-video-v095' });
+    expect((await videoRows())[0].meta_json).toBeNull();
+    expect(JSON.parse((await videoRows())[1].meta_json!)).toEqual({ providerModelId: 'fal-ai/ltx-video-v095' });
   });
 
   it('retains video rows when an older catalog omits the optional registry', async () => {
-    await applyCatalog(getDb(), videoCatalog(undefined));
+    await applyCatalog(getDb(), await videoCatalog(undefined));
     expect(await videoRows()).toHaveLength(2);
   });
 
   it('prunes only video rows when the registry drops a model', async () => {
     const counts = await applyCatalog(
       getDb(),
-      videoCatalog(videoRoster().filter(m => m.platform !== 'pollinations')),
+      await videoCatalog(videoRoster().filter(m => m.platform !== 'pollinations')),
     );
     expect(counts.removed).toBe(1);
     expect((await videoRows()).map(r => r.model_id)).toEqual(['Lightricks/LTX-Video-0.9.5']);
@@ -644,19 +644,19 @@ describe('applyCatalog: videoModels', () => {
       priority: 9,
       enabled: true,
     });
-    const counts = await applyCatalog(getDb(), videoCatalog(roster));
+    const counts = await applyCatalog(getDb(), await videoCatalog(roster));
     expect(counts.skippedUnknownPlatform).toBeGreaterThanOrEqual(1);
     expect((await videoRows()).map(r => r.model_id)).not.toContain('future-video');
   });
 
   it('keeps a user-deleted video model tombstoned', async () => {
     await recordCatalogModelTombstone(getDb(), 'media', 'pollinations', 'nova-reel');
-    await applyCatalog(getDb(), videoCatalog(videoRoster()));
+    await applyCatalog(getDb(), await videoCatalog(videoRoster()));
     expect((await videoRows()).map(r => r.model_id)).not.toContain('nova-reel');
   });
 
   it('rejects malformed video metadata before applying the cached catalog', async () => {
-    const catalog = videoCatalog(videoRoster());
+    const catalog = await videoCatalog(videoRoster());
     (catalog.videoModels![0] as any).providerModelId = 42;
     await setSetting('catalog_applied_json', JSON.stringify(catalog));
     expect((await reapplyCachedCatalog()).reapplied).toBe(false);
@@ -673,7 +673,7 @@ describe('applyCatalog: generative media meta', () => {
     await initTestDb();
   });
 
-  async function imageCatalog(requestStyle?: string): AnyCatalog {
+  async function imageCatalog(requestStyle?: string): Promise<AnyCatalog> {
     const models = await existingAsCatalogModels();
     models.push(baseModel({
       platform: 'cloudflare',
@@ -691,24 +691,24 @@ describe('applyCatalog: generative media meta', () => {
     return catalogOf(models);
   }
 
-  async function metaOf(modelId: string): string | null {
+  async function metaOf(modelId: string): Promise<string | null> {
     return ((await getDb().get('SELECT meta_json FROM media_models WHERE model_id = ?', [modelId])) as { meta_json: string | null }).meta_json;
   }
 
   it('carries requestStyle onto an image row, and leaves rows without one NULL', async () => {
-    await applyCatalog(getDb(), imageCatalog('multipart'));
-    expect(JSON.parse(await metaOf('@cf/black-forest-labs/flux-2-klein-4b')!)).toEqual({ requestStyle: 'multipart' });
+    await applyCatalog(getDb(), await imageCatalog('multipart'));
+    expect(JSON.parse((await metaOf('@cf/black-forest-labs/flux-2-klein-4b'))!)).toEqual({ requestStyle: 'multipart' });
     expect(await metaOf('@cf/black-forest-labs/flux-1-schnell')).toBeNull();
   });
 
   it('clears meta when the catalog drops requestStyle (full-snapshot semantics)', async () => {
-    await applyCatalog(getDb(), imageCatalog('multipart'));
-    await applyCatalog(getDb(), imageCatalog());
+    await applyCatalog(getDb(), await imageCatalog('multipart'));
+    await applyCatalog(getDb(), await imageCatalog());
     expect(await metaOf('@cf/black-forest-labs/flux-2-klein-4b')).toBeNull();
   });
 
   it('a non-string requestStyle rejects the whole payload', async () => {
-    const catalog = imageCatalog('multipart');
+    const catalog = await imageCatalog('multipart');
     (catalog.models[catalog.models.length - 2] as any).requestStyle = 42;
     await setSetting('catalog_applied_json', JSON.stringify(catalog));
     expect((await reapplyCachedCatalog()).reapplied).toBe(false);
@@ -741,13 +741,13 @@ describe('applyCatalog: searchEngines', () => {
     ];
   }
 
-  async function searchCatalog(entries?: CatalogSearch[]): AnyCatalog {
+  async function searchCatalog(entries?: CatalogSearch[]): Promise<AnyCatalog> {
     const catalog = catalogOf(await existingAsCatalogModels());
     if (entries) catalog.searchEngines = entries;
     return catalog;
   }
 
-  async function searchRows(): Array<{ platform: string; model_id: string; enabled: number; priority: number; quota_label: string; meta_json: string | null }> {
+  async function searchRows(): Promise<Array<{ platform: string; model_id: string; enabled: number; priority: number; quota_label: string; meta_json: string | null }>> {
     return (await getDb().all(`
       SELECT platform, model_id, enabled, priority, quota_label, meta_json
         FROM media_models WHERE modality = 'search' ORDER BY priority, id
@@ -759,10 +759,10 @@ describe('applyCatalog: searchEngines', () => {
   });
 
   it('applies the registry as a full snapshot with metadata in meta_json', async () => {
-    await applyCatalog(getDb(), searchCatalog(searchRoster()));
+    await applyCatalog(getDb(), await searchCatalog(searchRoster()));
     expect((await searchRows()).map(r => `${r.platform}:${r.model_id}`)).toEqual(['exa:exa-search', 'tavily:tavily-search']);
-    expect(await searchRows()[0].quota_label).toBe('$10/month in credits');
-    expect(JSON.parse(await searchRows()[1].meta_json!)).toEqual({
+    expect((await searchRows())[0].quota_label).toBe('$10/month in credits');
+    expect(JSON.parse((await searchRows())[1].meta_json!)).toEqual({
       creditsPerQuery: 1,
       features: { news: true, answer: true },
       premiumSince: '2026-10-13T00:00:00.000Z',
@@ -770,21 +770,21 @@ describe('applyCatalog: searchEngines', () => {
   });
 
   it('keeps existing engines when a catalog omits the optional registry', async () => {
-    await applyCatalog(getDb(), searchCatalog(undefined));
+    await applyCatalog(getDb(), await searchCatalog(undefined));
     expect(await searchRows()).toHaveLength(2);
   });
 
   it('removes every engine when the registry is empty (a free catalog before an engine ages in)', async () => {
-    const counts = await applyCatalog(getDb(), searchCatalog([]));
+    const counts = await applyCatalog(getDb(), await searchCatalog([]));
     expect(counts.removed).toBeGreaterThanOrEqual(2);
     expect(await searchRows()).toEqual([]);
-    await applyCatalog(getDb(), searchCatalog(searchRoster()));
+    await applyCatalog(getDb(), await searchCatalog(searchRoster()));
     expect(await searchRows()).toHaveLength(2);
   });
 
   it('keeps a local disable across catalog applies', async () => {
     (await getDb().run("UPDATE media_models SET enabled = 0 WHERE model_id = 'exa-search'"));
-    await applyCatalog(getDb(), searchCatalog(searchRoster()));
+    await applyCatalog(getDb(), await searchCatalog(searchRoster()));
     expect((await searchRows()).find(r => r.model_id === 'exa-search')!.enabled).toBe(0);
   });
 
@@ -792,20 +792,20 @@ describe('applyCatalog: searchEngines', () => {
     (await getDb().run(`
       INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label)
       VALUES ('custom', 'my-searxng', 'My SearXNG', 'search', 9, 1, 'custom endpoint') RETURNING id`));
-    await applyCatalog(getDb(), searchCatalog(searchRoster()));
+    await applyCatalog(getDb(), await searchCatalog(searchRoster()));
     expect((await searchRows()).map(r => r.model_id)).toContain('my-searxng');
   });
 
   it('skips an engine whose platform has no search adapter in this binary', async () => {
     const roster = searchRoster();
     roster.push({ platform: 'brave', engineId: 'brave-search', displayName: 'Brave', priority: 5, enabled: true });
-    const counts = await applyCatalog(getDb(), searchCatalog(roster));
+    const counts = await applyCatalog(getDb(), await searchCatalog(roster));
     expect(counts.skippedUnknownPlatform).toBeGreaterThanOrEqual(1);
     expect((await searchRows()).map(r => r.model_id)).not.toContain('brave-search');
   });
 
   it('rejects a malformed searchEngines entry before applying the cached catalog', async () => {
-    const catalog = searchCatalog(searchRoster());
+    const catalog = await searchCatalog(searchRoster());
     (catalog.searchEngines![0] as any).priority = 'first';
     await setSetting('catalog_applied_json', JSON.stringify(catalog));
     expect((await reapplyCachedCatalog()).reapplied).toBe(false);
@@ -834,13 +834,13 @@ describe('applyCatalog: decisionModels', () => {
     ];
   }
 
-  async function decisionCatalog(entries?: CatalogDecision[]): AnyCatalog {
+  async function decisionCatalog(entries?: CatalogDecision[]): Promise<AnyCatalog> {
     const catalog = catalogOf(await existingAsCatalogModels());
     if (entries) catalog.decisionModels = entries;
     return catalog;
   }
 
-  async function decisionRows(): Array<{ platform: string; model_id: string; enabled: number; quota_label: string; meta_json: string | null }> {
+  async function decisionRows(): Promise<Array<{ platform: string; model_id: string; enabled: number; quota_label: string; meta_json: string | null }>> {
     return (await getDb().all(`
       SELECT platform, model_id, enabled, quota_label, meta_json
         FROM media_models WHERE modality = 'decision' ORDER BY priority, id
@@ -852,10 +852,10 @@ describe('applyCatalog: decisionModels', () => {
   });
 
   it('applies the registry as a full snapshot with metadata in meta_json', async () => {
-    await applyCatalog(getDb(), decisionCatalog(decisionRoster()));
+    await applyCatalog(getDb(), await decisionCatalog(decisionRoster()));
     expect((await decisionRows()).map(r => `${r.platform}:${r.model_id}`))
       .toEqual(['cloudflare:@cf/cloudflare/clef-flash', 'openrouter:inception/mercury-decide:free']);
-    expect(JSON.parse(await decisionRows()[0].meta_json!)).toEqual({ contextWindow: 24576, premiumSince: '2026-09-15T00:00:00.000Z' });
+    expect(JSON.parse((await decisionRows())[0].meta_json!)).toEqual({ contextWindow: 24576, premiumSince: '2026-09-15T00:00:00.000Z' });
   });
 
   it('never adds decision models to the chat models table', async () => {
@@ -864,30 +864,30 @@ describe('applyCatalog: decisionModels', () => {
   });
 
   it('keeps existing rows when a catalog omits the registry, prunes on an empty one', async () => {
-    await applyCatalog(getDb(), decisionCatalog(undefined));
+    await applyCatalog(getDb(), await decisionCatalog(undefined));
     expect(await decisionRows()).toHaveLength(2);
-    await applyCatalog(getDb(), decisionCatalog([]));
+    await applyCatalog(getDb(), await decisionCatalog([]));
     expect(await decisionRows()).toEqual([]);
-    await applyCatalog(getDb(), decisionCatalog(decisionRoster()));
+    await applyCatalog(getDb(), await decisionCatalog(decisionRoster()));
     expect(await decisionRows()).toHaveLength(2);
   });
 
   it('keeps a local disable across catalog applies', async () => {
     (await getDb().run("UPDATE media_models SET enabled = 0 WHERE model_id = 'inception/mercury-decide:free'"));
-    await applyCatalog(getDb(), decisionCatalog(decisionRoster()));
+    await applyCatalog(getDb(), await decisionCatalog(decisionRoster()));
     expect((await decisionRows()).find(r => r.platform === 'openrouter')!.enabled).toBe(0);
   });
 
   it('skips a model whose platform has no decision adapter in this binary', async () => {
     const roster = decisionRoster();
     roster.push({ platform: 'groq', modelId: 'some-decider', displayName: 'Nope', priority: 5, enabled: true });
-    const counts = await applyCatalog(getDb(), decisionCatalog(roster));
+    const counts = await applyCatalog(getDb(), await decisionCatalog(roster));
     expect(counts.skippedUnknownPlatform).toBeGreaterThanOrEqual(1);
     expect((await decisionRows()).map(r => r.model_id)).not.toContain('some-decider');
   });
 
   it('rejects a malformed decisionModels entry before applying the cached catalog', async () => {
-    const catalog = decisionCatalog(decisionRoster());
+    const catalog = await decisionCatalog(decisionRoster());
     (catalog.decisionModels![0] as any).enabled = 'yes';
     await setSetting('catalog_applied_json', JSON.stringify(catalog));
     expect((await reapplyCachedCatalog()).reapplied).toBe(false);

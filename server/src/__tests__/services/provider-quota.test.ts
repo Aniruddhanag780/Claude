@@ -398,11 +398,11 @@ describe('provider quota snapshot reliability', () => {
   it('empty and limit-only probes cannot refresh a balance timestamp or borrow its confidence', async () => {
     const base={platform:'groq' as const,keyId:4};
     await recordQuotaObservation({...base,limit:100,remaining:50,resetAt:'2026-09-15T13:00:00Z',source:'header',observedAt:'2026-09-15T11:00:00Z'});
-    const before=await await await getQuotaStateForKeys({normalizeExpired:false})[0];
+    const before=await await (await getQuotaStateForKeys({normalizeExpired:false}))[0];
     const probe=await recordQuotaObservation({...base,source:'probe',confidence:0.1,observedAt:'2026-09-15T12:00:00Z'});
     await recordQuotaObservation({...base,source:'header',limit:200,observedAt:'2026-09-15T12:01:00Z'});
     expect(probe?.confidence).toBe(0.1);
-    expect(await await await getQuotaStateForKeys({normalizeExpired:false})[0]).toMatchObject({limit:100,remaining:50,resetAt:before.resetAt,observedAt:before.observedAt,source:'header',confidence:1});
+    expect(await await (await getQuotaStateForKeys({normalizeExpired:false}))[0]).toMatchObject({limit:100,remaining:50,resetAt:before.resetAt,observedAt:before.observedAt,source:'header',confidence:1});
     expect((await getDb().get("SELECT confidence FROM provider_quota_observations WHERE source='probe'"))).toEqual({confidence:0.1});
   });
 
@@ -410,8 +410,8 @@ describe('provider quota snapshot reliability', () => {
     const base={platform:'groq' as const,keyId:4};
     await recordQuotaObservation({...base,limit:100,remaining:50,resetAt:'2026-09-15T13:00:00Z',source:'header',observedAt:'2026-09-15T11:00:00Z'});
     await recordQuotaObservation({...base,remaining:0,source:'error_body',confidence:0.55,observedAt:'2026-09-15T12:00:00Z'});
-    expect(await await await getQuotaStateForKeys({normalizeExpired:false})[0]).toMatchObject({remaining:0,limit:null,resetAt:null,confidence:0.55,source:'error_body'});
+    expect(await await (await getQuotaStateForKeys({normalizeExpired:false}))[0]).toMatchObject({remaining:0,limit:null,resetAt:null,confidence:0.55,source:'error_body'});
     await recordQuotaObservation({...base,remaining:100,limit:100,source:'header',observedAt:'2026-09-15T10:00:00Z'});
-    expect(await await await getQuotaStateForKeys({normalizeExpired:false})[0].remaining).toBe(0);
+    expect(await await (await getQuotaStateForKeys({normalizeExpired:false}))[0].remaining).toBe(0);
   });
 });

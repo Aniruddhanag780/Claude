@@ -35,8 +35,8 @@ describe('Router', () => {
     vi.useRealTimers();
   });
 
-  it('should throw when no keys are configured', () => {
-    expect(async () => await routeRequest()).toThrow(/exhausted/i);
+  it('should throw when no keys are configured', async () => {
+    await expect(routeRequest()).rejects.toThrow(/exhausted/i);
   });
 
   it('should route to highest priority model with available key', async () => {
@@ -187,7 +187,7 @@ describe('Router', () => {
     (await db.run("UPDATE models SET tpm_limit = NULL, tpd_limit = NULL WHERE platform = 'groq'"));
     // A null context_window means "unknown" — never filtered out, even for a huge request.
     (await db.run("UPDATE models SET context_window = NULL WHERE platform = 'groq'"));
-    expect(async () => await routeRequest(500000)).not.toThrow();
+    await expect(routeRequest(500000)).resolves.toBeDefined();
   });
 
   it('should skip keys that cannot be decrypted and use a valid fallback key', async () => {
