@@ -34,7 +34,7 @@ describe('Inference body limits (vision payloads)', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
   it('accepts an >10mb vision payload on /v1/chat/completions (no parser 413)', async () => {
@@ -76,7 +76,7 @@ describe('Over-limit bodies (configurable ceiling)', () => {
     await initTestDb();
     // Tiny ceiling so the rejection path is testable without a 50MB body.
     app = createApp({ ...loadConfig(), requestBodyLimitBytes: 1024 });
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
   it('returns a normalized OpenAI-style 413 and logs it for the dashboard', async () => {

@@ -98,9 +98,9 @@ describe('streaming tool-call rescue respects whether the request wanted tools',
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
 
-    setRoutingStrategy('priority');
+    await setRoutingStrategy('priority');
     const { encrypted, iv, authTag } = encrypt('test-key');
     (await getDb().run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)

@@ -110,29 +110,29 @@ describe('markKeyHealthyFromRequest', () => {
 
   it("promotes an 'error' key back to healthy and clears the stale reason", async () => {
     const id = await seedKey('error');
-    markKeyHealthyFromRequest(id);
+    await markKeyHealthyFromRequest(id);
     expect(await row(id)).toEqual({ status: 'healthy', last_health_error: null });
   });
 
   it("promotes a never-probed 'unknown' key to healthy (#1459)", async () => {
     const id = await seedKey('unknown');
-    markKeyHealthyFromRequest(id);
+    await markKeyHealthyFromRequest(id);
     expect(await row(id)).toEqual({ status: 'healthy', last_health_error: null });
   });
 
   it("never resurrects an 'invalid' key — only a real probe clears that", async () => {
     const id = await seedKey('invalid');
-    markKeyHealthyFromRequest(id);
+    await markKeyHealthyFromRequest(id);
     expect((await row(id)).status).toBe('invalid');
   });
 
   it('leaves an already-healthy key untouched', async () => {
     const id = await seedKey('healthy');
-    markKeyHealthyFromRequest(id);
+    await markKeyHealthyFromRequest(id);
     expect((await row(id)).status).toBe('healthy');
   });
 
   it('is silent for an unknown key id', () => {
-    expect(() => markKeyHealthyFromRequest(999_999)).not.toThrow();
+    expect(async () => await markKeyHealthyFromRequest(999_999)).not.toThrow();
   });
 });

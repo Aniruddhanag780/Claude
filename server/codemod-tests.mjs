@@ -80,20 +80,42 @@ function asyncExportsOf(srcPath) {
  */
 function asyncImportedNames(sf, file) {
   const out = new Set();
-  for (const st of sf.statements) {
-    if (!ts.isImportDeclaration(st)) continue;
-    const spec = st.moduleSpecifier.getText(sf).replace(/^['"]|['"]$/g, '');
-    if (!spec.startsWith('.')) continue;           // only relative product imports
-    if (/__tests__|\/helpers\//.test(spec)) continue; // skip test helpers
+  const addFrom = (spec, bindings) => {
+    if (!spec.startsWith('.')) return;               // only relative product imports
+    if (/__tests__|\/helpers\//.test(spec)) return;  // skip test helpers
     const src = resolveSource(file, spec);
-    if (!src) continue;
+    if (!src) return;
     const asyncNames = asyncExportsOf(src);
-    if (!asyncNames.size) continue;
-    const clause = st.importClause;
-    if (!clause?.namedBindings || !ts.isNamedImports(clause.namedBindings)) continue;
-    for (const el of clause.namedBindings.elements) {
+    if (!asyncNames.size) return;
+    for (const el of bindings) {
       const imported = (el.propertyName ?? el.name).text;
       if (asyncNames.has(imported)) out.add(el.name.text); // local alias
+    }
+  };
+
+  for (const st of sf.statements) {
+    // static import: import { getUnifiedApiKey } from '../../db/index.js';
+    if (ts.isImportDeclaration(st)) {
+      const spec = st.moduleSpecifier.getText(sf).replace(/^['"]|['"]$/g, '');
+      const clause = st.importClause;
+      if (!clause?.namedBindings || !ts.isNamedImports(clause.namedBindings)) continue;
+      addFrom(spec, clause.namedBindings.elements);
+      continue;
+    }
+    // dynamic import: const { getUnifiedApiKey } = await import('../../db/index.js');
+    if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) {
+        const init = d.initializer;
+        if (!init || !ts.isAwaitExpression(init)) continue;
+        const call = init.expression;
+        if (!ts.isCallExpression(call)) continue;
+        if (call.expression.kind !== ts.SyntaxKind.ImportKeyword) continue;
+        const arg = call.arguments[0];
+        if (!arg || !ts.isStringLiteralLike(arg)) continue;
+        const name = d.name;
+        if (!ts.isObjectBindingPattern(name)) continue;
+        addFrom(arg.text, name.elements);
+      }
     }
   }
   return out;

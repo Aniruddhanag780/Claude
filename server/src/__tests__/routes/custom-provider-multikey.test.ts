@@ -192,7 +192,7 @@ describe('multiple keys per custom endpoint (#619)', () => {
 
     expect(secrets()).toEqual(['shared-secret']);
     expect(secrets(other)).toEqual(['shared-secret']);
-    expect(await routePinnedModel(await chatModel('other-model')!.id)!.provider).toMatchObject({ baseUrl: other });
+    expect(await await await routePinnedModel(await chatModel('other-model')!.id)!.provider).toMatchObject({ baseUrl: other });
   });
 
   // #702: every route into POST /custom demanded a model alongside the key, so

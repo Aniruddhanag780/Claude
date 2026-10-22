@@ -61,10 +61,10 @@ describe('max_tokens no longer starves routing (#470)', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
 
     const db = getDb();
-    setRoutingStrategy('priority');
+    await setRoutingStrategy('priority');
     (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
 
     const { encrypted, iv, authTag } = encrypt('groq-key');

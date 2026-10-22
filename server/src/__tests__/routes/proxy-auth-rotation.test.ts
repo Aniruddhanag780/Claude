@@ -69,7 +69,7 @@ interface Setup { modelDbId: number; modelId: string; keyA: number; keyB: number
 // round-robin, penalties — keyed by model) can't leak between tests.
 async function setup(rank: number): Setup {
   const db = getDb();
-  setRoutingStrategy('priority');
+  await setRoutingStrategy('priority');
   (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
   (await db.run('DELETE FROM api_keys'));
   (await db.run('DELETE FROM rate_limit_cooldowns'));
@@ -99,7 +99,7 @@ describe('upstream 401 rotates to the sibling key instead of 502 (item 1)', () =
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
   beforeEach(() => {
@@ -213,7 +213,7 @@ describe('exhaustion error quality: attempt trail + reset hint + header (item 2)
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
   beforeEach(() => {

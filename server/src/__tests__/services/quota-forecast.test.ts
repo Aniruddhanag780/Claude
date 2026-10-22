@@ -60,7 +60,7 @@ describe('quota-forecast: daily balance aggregation (#1104)', () => {
   it('flags low_balance below the 10% threshold', async () => {
     await insertState({ platform: 'openai', keyId: 1, pool: 'openai::account', metric: 'requests', limit: 100, remaining: 8, resetAt: future() });
 
-    const e = await getQuotaForecast()[0];
+    const e = await await await getQuotaForecast()[0];
     expect(e.remaining_pct).toBe(8);
     expect(e.low_balance).toBe(true);
   });
@@ -68,7 +68,7 @@ describe('quota-forecast: daily balance aggregation (#1104)', () => {
   it('flags low_balance on the absolute floor even when pct looks fine', async () => {
     await insertState({ platform: 'openrouter', keyId: 1, pool: 'openrouter::free', metric: 'requests', limit: 10000, remaining: 15, resetAt: future() });
 
-    const e = await getQuotaForecast()[0];
+    const e = await await await getQuotaForecast()[0];
     expect(e.remaining_pct).toBe(0); // 15/10000 rounds to 0
     expect(e.low_balance).toBe(true);
   });
@@ -90,7 +90,7 @@ describe('quota-forecast: daily balance aggregation (#1104)', () => {
     // floor of 20 would call that low, which is the bug this guards.
     await insertState({ platform: 'cerebras', keyId: 1, pool: 'cerebras::account', metric: 'requests', limit: 30, remaining: 25, resetAt: future() });
 
-    const e = await getQuotaForecast()[0];
+    const e = await await await getQuotaForecast()[0];
     expect(e.remaining_pct).toBe(83);
     expect(e.low_balance).toBe(false);
   });
@@ -98,13 +98,13 @@ describe('quota-forecast: daily balance aggregation (#1104)', () => {
   it('still warns on a small window once the percentage rule bites', async () => {
     await insertState({ platform: 'cerebras', keyId: 1, pool: 'cerebras::account', metric: 'requests', limit: 30, remaining: 2, resetAt: future() });
 
-    expect(await getQuotaForecast()[0].low_balance).toBe(true);
+    expect(await await await getQuotaForecast()[0].low_balance).toBe(true);
   });
 
   it('leaves used null when the provider reported no remaining', async () => {
     await insertState({ platform: 'groq', keyId: 1, pool: 'groq::account', metric: 'requests', limit: 100, remaining: null, resetAt: future() });
 
-    const e = await getQuotaForecast()[0];
+    const e = await await await getQuotaForecast()[0];
     expect(e.used).toBeNull();
     expect(e.remaining).toBeNull();
     expect(e.remaining_pct).toBeNull();
@@ -133,7 +133,7 @@ describe('quota-forecast: daily balance aggregation (#1104)', () => {
   it('returns null rate_exhaustion when the observation window is empty', async () => {
     await insertState({ platform: 'groq', keyId: 1, pool: 'groq::account', metric: 'requests', limit: 100, remaining: 80, resetAt: future() });
     // No recent requests inserted — rate is too sparse to estimate.
-    const e = await getQuotaForecast()[0];
+    const e = await await await getQuotaForecast()[0];
     expect(e.rate_per_min).toBeNull();
     expect(e.estimated_exhaustion_at).toBeNull();
   });
@@ -145,7 +145,7 @@ describe('quota-forecast: daily balance aggregation (#1104)', () => {
     const now = Date.now();
     for (let i = 1; i <= 8; i++) await insertRequest('groq', new Date(now - i * 60_000).toISOString());
 
-    const e = await getQuotaForecast()[0];
+    const e = await await await getQuotaForecast()[0];
     expect(e.rate_per_min).toBeGreaterThan(0);
     expect(e.estimated_exhaustion_at).toBeTruthy();
     // The projection must land in the future (not past now).
@@ -155,7 +155,7 @@ describe('quota-forecast: daily balance aggregation (#1104)', () => {
   it('returns no exhaustion when the window resets before the quota runs out', async () => {
     await insertState({ platform: 'groq', keyId: 1, pool: 'groq::account', metric: 'requests', limit: 10000, remaining: 9000, resetAt: isoPlus(1) });
     for (let i = 1; i <= 30; i++) await insertRequest('groq', new Date(Date.now() - i * 1000).toISOString());
-    const e = await getQuotaForecast()[0];
+    const e = await await await getQuotaForecast()[0];
     expect(e.rate_per_min).toBe(3);
     expect(e.estimated_exhaustion_at).toBeNull();
   });
@@ -168,9 +168,9 @@ describe('quota-forecast: daily balance aggregation (#1104)', () => {
       await insertRequest('groq', new Date(Date.now() - 20 * 60_000).toISOString(), 1);
       await insertRequest('groq', new Date(Date.now() + 60_000).toISOString(), 1);
     }
-    expect(await getQuotaForecast()[0].rate_per_min).toBe(0.8);
+    expect(await await await getQuotaForecast()[0].rate_per_min).toBe(0.8);
     await insertState({ platform: 'groq', keyId: 2, pool: 'groq::account', metric: 'requests', limit: 100, remaining: 30, resetAt: future() });
-    expect(await getQuotaForecast()[0].rate_per_min).toBe(1.6);
+    expect(await await await getQuotaForecast()[0].rate_per_min).toBe(1.6);
   });
 
   it('keeps free and paid model traffic in their own OpenRouter pools', async () => {
@@ -187,13 +187,13 @@ describe('quota-forecast: daily balance aggregation (#1104)', () => {
   it('ignores an invalid reset timestamp without throwing', async () => {
     await insertState({ platform: 'groq', keyId: 1, pool: 'groq::account', metric: 'requests', limit: 100, remaining: 30, resetAt: 'invalid' });
     for (let i = 0; i < 5; i++) await insertRequest('groq', new Date(Date.now() - 60_000).toISOString());
-    expect(await getQuotaForecast()[0].estimated_exhaustion_at).toBeNull();
+    expect(await await await getQuotaForecast()[0].estimated_exhaustion_at).toBeNull();
   });
 
   it('leaves rate null when remaining is unknown', async () => {
     await insertState({ platform: 'groq', keyId: 1, pool: 'groq::account', metric: 'requests', limit: 100, remaining: null, resetAt: future() });
     // The gate here is `remaining !== null`, not request volume.
-    const e = await getQuotaForecast()[0];
+    const e = await await await getQuotaForecast()[0];
     expect(e.rate_per_min).toBeNull();
     expect(e.estimated_exhaustion_at).toBeNull();
   });
@@ -203,7 +203,7 @@ describe('quota-forecast: daily balance aggregation (#1104)', () => {
     // Even with many requests, remaining=0 → no projection.
     const now = Date.now();
     for (let i = 1; i <= 30; i++) await insertRequest('groq', new Date(now - i * 1000).toISOString());
-    const e = await getQuotaForecast()[0];
+    const e = await await await getQuotaForecast()[0];
     expect(e.remaining).toBe(0);
     expect(e.estimated_exhaustion_at).toBeNull();
   });

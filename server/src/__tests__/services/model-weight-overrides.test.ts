@@ -103,14 +103,14 @@ describe('model weight overrides', () => {
 
     it('reports unparsable JSON instead of ignoring it silently', async () => {
       process.env.MODEL_ROUTING_OVERRIDES = '{"gpt-4o": 0.2,}';
-      const drift = await warnOnRoutingOverrideDrift(logger)!;
+      const drift = await await await warnOnRoutingOverrideDrift(logger)!;
       expect(drift.malformed).toBe(true);
       expect(warnings.join()).toContain('not valid JSON');
     });
 
     it('reports a non-object value', async () => {
       process.env.MODEL_ROUTING_OVERRIDES = '["gpt-4o"]';
-      const drift = await warnOnRoutingOverrideDrift(logger)!;
+      const drift = await await await warnOnRoutingOverrideDrift(logger)!;
       expect(drift.malformed).toBe(true);
       expect(warnings.join()).toContain('must be a JSON object');
     });
@@ -118,7 +118,7 @@ describe('model weight overrides', () => {
     it('names entries dropped for an out-of-range or non-numeric multiplier', async () => {
       const real = ((await getDb().get('SELECT model_id FROM models LIMIT 1')) as { model_id: string }).model_id;
       process.env.MODEL_ROUTING_OVERRIDES = JSON.stringify({ [real]: 5, ['x-' + real]: 'fast' });
-      const drift = await warnOnRoutingOverrideDrift(logger)!;
+      const drift = await await await warnOnRoutingOverrideDrift(logger)!;
       expect(drift.rejectedValues).toContain(real);
       expect(drift.rejectedValues).toContain('x-' + real);
       expect(warnings.join()).toContain('not a finite multiplier');
@@ -127,7 +127,7 @@ describe('model weight overrides', () => {
     it('names an override that matches no model in the catalog', async () => {
       await setSetting('catalog_last_sync_ms', String(Date.now()));
       process.env.MODEL_ROUTING_OVERRIDES = '{"gpt-4o-typo-not-real": 0.2}';
-      const drift = await warnOnRoutingOverrideDrift(logger)!;
+      const drift = await await await warnOnRoutingOverrideDrift(logger)!;
       expect(drift.unknownModels).toEqual(['gpt-4o-typo-not-real']);
       expect(warnings.join()).toContain("not a model id in this install's catalog");
     });
@@ -140,7 +140,7 @@ describe('model weight overrides', () => {
     it('stays silent about unknown models until the catalog has synced once', async () => {
       // No catalog_last_sync_ms: a fresh install that has never synced.
       process.env.MODEL_ROUTING_OVERRIDES = '{"a-real-model-not-yet-synced": 0.2}';
-      const drift = await warnOnRoutingOverrideDrift(logger)!;
+      const drift = await await await warnOnRoutingOverrideDrift(logger)!;
       expect(drift.unknownModels).toEqual([]);
       expect(warnings).toEqual([]);
     });
@@ -148,17 +148,17 @@ describe('model weight overrides', () => {
     it('still reports malformed JSON before the catalog has synced', async () => {
       // The value halves need no catalog, so the gate must not silence them.
       process.env.MODEL_ROUTING_OVERRIDES = '{"gpt-4o": 0.2,}';
-      expect(await warnOnRoutingOverrideDrift(logger)!.malformed).toBe(true);
+      expect(await await await warnOnRoutingOverrideDrift(logger)!.malformed).toBe(true);
       warnings.length = 0;
       process.env.MODEL_ROUTING_OVERRIDES = '{"gpt-4o": 5}';
-      expect(await warnOnRoutingOverrideDrift(logger)!.rejectedValues).toEqual(['gpt-4o']);
+      expect(await await await warnOnRoutingOverrideDrift(logger)!.rejectedValues).toEqual(['gpt-4o']);
       expect(warnings.join()).toContain('not a finite multiplier');
     });
 
     it('stays quiet for a well-formed override naming a real model', async () => {
       const real = ((await getDb().get('SELECT model_id FROM models LIMIT 1')) as { model_id: string }).model_id;
       process.env.MODEL_ROUTING_OVERRIDES = JSON.stringify({ [real]: 0.2 });
-      const drift = await warnOnRoutingOverrideDrift(logger)!;
+      const drift = await await await warnOnRoutingOverrideDrift(logger)!;
       expect(drift).toEqual({ malformed: false, rejectedValues: [], unknownModels: [] });
       expect(warnings).toEqual([]);
     });

@@ -88,7 +88,7 @@ describe('last_healthy_at (#1493)', () => {
     const id = await seedKey('healthy');
     expect((await row(id)).last_healthy_at).toBeNull();
 
-    markKeyHealthyFromRequest(id);
+    await markKeyHealthyFromRequest(id);
 
     expect((await row(id)).last_healthy_at).not.toBeNull();
     expect((await row(id)).status).toBe('healthy');
@@ -99,22 +99,22 @@ describe('last_healthy_at (#1493)', () => {
 
     // First call stamps; a second immediate call must skip the write. Prove it
     // by nulling the column in between: only a real second write would refill it.
-    markKeyHealthyFromRequest(id);
+    await markKeyHealthyFromRequest(id);
     expect((await row(id)).last_healthy_at).not.toBeNull();
     (await getDb().run('UPDATE api_keys SET last_healthy_at = NULL WHERE id = ?', [id]));
 
-    markKeyHealthyFromRequest(id);
+    await markKeyHealthyFromRequest(id);
     expect((await row(id)).last_healthy_at).toBeNull();
 
     // After clearing the throttle state, the next call stamps again.
     clearLastHealthyStampState();
-    markKeyHealthyFromRequest(id);
+    await markKeyHealthyFromRequest(id);
     expect((await row(id)).last_healthy_at).not.toBeNull();
   });
 
   it('markKeyHealthyFromRequest still promotes error/unknown keys', async () => {
     const id = await seedKey('error');
-    markKeyHealthyFromRequest(id);
+    await markKeyHealthyFromRequest(id);
     expect((await row(id)).status).toBe('healthy');
   });
 });

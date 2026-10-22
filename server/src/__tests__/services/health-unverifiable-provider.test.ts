@@ -72,7 +72,7 @@ describe('a provider that forbids key validation (#1459)', () => {
   it('the first served request promotes the key to healthy', async () => {
     const id = await seedKey('unknown');
 
-    markKeyHealthyFromRequest(id);
+    await markKeyHealthyFromRequest(id);
 
     expect(await row(id)).toEqual({ status: 'healthy', last_health_error: null });
   });

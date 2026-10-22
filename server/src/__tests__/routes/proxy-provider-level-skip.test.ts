@@ -73,7 +73,7 @@ const platformsUsed = (): string[] => keysUsed().map(k => k.split('-')[0]);
 // pre-#788 chain would spend FOUR hops inside groq before reaching cerebras.
 async function setup(): Promise<void> {
   const db = getDb();
-  setRoutingStrategy('priority');
+  await setRoutingStrategy('priority');
   (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
   (await db.run('DELETE FROM api_keys'));
   (await db.run('DELETE FROM rate_limit_cooldowns'));
@@ -106,7 +106,7 @@ describe('provider-level failures skip the whole platform (#788)', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
   beforeEach(async () => {

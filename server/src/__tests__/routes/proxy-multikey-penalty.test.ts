@@ -51,7 +51,7 @@ interface Setup { modelDbId: number; modelId: string; keyA: number; keyB: number
 // tests, mirroring how ratelimit.test.ts uses unique identifiers per case.
 async function setup(rank: number, onlyModel = false): Setup {
   const db = getDb();
-  setRoutingStrategy('priority');
+  await setRoutingStrategy('priority');
   (await db.run("DELETE FROM settings WHERE key = 'active_profile_id'"));
   (await db.run('DELETE FROM api_keys'));
   (await db.run('DELETE FROM rate_limit_cooldowns'));
@@ -81,26 +81,26 @@ describe('hasOtherUsableKey (#454)', () => {
 
   it('returns true when a sibling key is free', async () => {
     const s = await setup(0);
-    expect(hasOtherUsableKey(s.modelDbId, s.keyA)).toBe(true);
+    expect(await hasOtherUsableKey(s.modelDbId, s.keyA)).toBe(true);
   });
 
   it('returns false when the only sibling is on cooldown', async () => {
     const s = await setup(1);
     setCooldown('groq', s.modelId, s.keyB, 5 * 60 * 1000);
-    expect(hasOtherUsableKey(s.modelDbId, s.keyA)).toBe(false);
+    expect(await hasOtherUsableKey(s.modelDbId, s.keyA)).toBe(false);
   });
 
   it('returns false when the only sibling is already ruled out this request (skipKeys)', async () => {
     const s = await setup(2);
     const skip = new Set<string>([`groq:${s.modelId}:${s.keyB}`]);
-    expect(hasOtherUsableKey(s.modelDbId, s.keyA, skip)).toBe(false);
+    expect(await hasOtherUsableKey(s.modelDbId, s.keyA, skip)).toBe(false);
   });
 
   it('is symmetric: excluding one key finds the other when it is free, none when it is benched', async () => {
     const s = await setup(3);
-    expect(hasOtherUsableKey(s.modelDbId, s.keyB)).toBe(true); // keyA free
+    expect(await hasOtherUsableKey(s.modelDbId, s.keyB)).toBe(true); // keyA free
     setCooldown('groq', s.modelId, s.keyA, 5 * 60 * 1000);
-    expect(hasOtherUsableKey(s.modelDbId, s.keyB)).toBe(false); // keyA benched, keyB excluded
+    expect(await hasOtherUsableKey(s.modelDbId, s.keyB)).toBe(false); // keyA benched, keyB excluded
   });
 });
 
@@ -112,7 +112,7 @@ describe('one key\'s 429 must not demote the whole model (#454)', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
   });
 
   beforeEach(() => {

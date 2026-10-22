@@ -135,24 +135,24 @@ describe('isFallbackDetailHeaderEnabled', () => {
     await clearDetailSetting();
   });
 
-  it('is off by default — this widens what the surface reveals', () => {
-    expect(isFallbackDetailHeaderEnabled()).toBe(false);
+  it('is off by default — this widens what the surface reveals', async () => {
+    expect(await isFallbackDetailHeaderEnabled()).toBe(false);
   });
 
-  it('honours the settings-table value', () => {
-    setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '1');
-    expect(isFallbackDetailHeaderEnabled()).toBe(true);
+  it('honours the settings-table value', async () => {
+    await setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '1');
+    expect(await isFallbackDetailHeaderEnabled()).toBe(true);
   });
 
-  it('falls back to the env var when no setting is stored', () => {
+  it('falls back to the env var when no setting is stored', async () => {
     process.env.FALLBACK_DETAIL_HEADER = 'true';
-    expect(isFallbackDetailHeaderEnabled()).toBe(true);
+    expect(await isFallbackDetailHeaderEnabled()).toBe(true);
   });
 
-  it('lets the settings table win over the env var, like the failover budget', () => {
-    setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '0');
+  it('lets the settings table win over the env var, like the failover budget', async () => {
+    await setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '0');
     process.env.FALLBACK_DETAIL_HEADER = '1';
-    expect(isFallbackDetailHeaderEnabled()).toBe(false);
+    expect(await isFallbackDetailHeaderEnabled()).toBe(false);
   });
 });
 
@@ -164,10 +164,10 @@ describe('X-Fallback-Detail on the wire', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     await initTestDb();
     app = createApp();
-    key = getUnifiedApiKey();
+    key = await getUnifiedApiKey();
 
     const db = getDb();
-    setRoutingStrategy('priority');
+    await setRoutingStrategy('priority');
     const { encrypted, iv, authTag } = encrypt('detail-header-test-key');
     (await db.run(`
       INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
@@ -179,11 +179,11 @@ describe('X-Fallback-Detail on the wire', () => {
     streamChatCompletion.mockReset();
     (await getDb().run('DELETE FROM requests'));
     (await getDb().run('DELETE FROM rate_limit_cooldowns'));
-    setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '1');
+    await setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '1');
   });
 
-  afterEach(() => {
-    setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '0');
+  afterEach(async () => {
+    await setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '0');
     delete process.env.FALLBACK_DETAIL_HEADER;
   });
 
@@ -207,7 +207,7 @@ describe('X-Fallback-Detail on the wire', () => {
   });
 
   it('stays silent when the setting is off', async () => {
-    setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '0');
+    await setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '0');
     chatCompletion
       .mockRejectedValueOnce(Object.assign(new Error('Groq API error 429: rate limit'), { status: 429 }))
       .mockResolvedValueOnce(GOOD_RESULT);
@@ -254,13 +254,13 @@ describe('X-Fallback-Detail on the wire', () => {
 // Driving setFallbackHeaders directly, rather than steering the router into
 // picking a hostile model, keeps these about the header and not about routing.
 describe('X-Fallback-Detail value safety', () => {
-  function headersFor(records: Parameters<typeof formatAttemptDetail>[0]): Record<string, string> {
+  async function headersFor(records: Parameters<typeof formatAttemptDetail>[0]): Record<string, string> {
     const trace = newRequestTrace();
     trace.records.push(...records);
     const out: Record<string, string> = {};
-    setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '1');
-    runWithRequestTrace(trace, () => {
-      setFallbackHeaders({ setHeader: (n: string, v: string) => { out[n] = v; } }, records.length, undefined);
+    await setSetting(EXPOSE_FALLBACK_DETAIL_SETTING, '1');
+    runWithRequestTrace(trace, async () => {
+      await setFallbackHeaders({ setHeader: (n: string, v: string) => { out[n] = v; } }, records.length, undefined);
     });
     return out;
   }
@@ -269,11 +269,11 @@ describe('X-Fallback-Detail value safety', () => {
     (await getDb().run('DELETE FROM settings WHERE key = ?', [EXPOSE_FALLBACK_DETAIL_SETTING]));
   });
 
-  it('encodes a control-laden model id instead of letting it inject a header line', () => {
+  it('encodes a control-laden model id instead of letting it inject a header line', async () => {
     // #619: a non-ASCII or control-laden id used to make Node throw
     // ERR_INVALID_CHAR after a successful upstream call, and the throw was then
     // booked as a provider failure.
-    const value = headersFor([record({ modelId: 'bad\r\nX-Injected: yes' })])['X-Fallback-Detail'];
+    const value = await headersFor([record({ modelId: 'bad\r\nX-Injected: yes' })])['X-Fallback-Detail'];
 
     expect(value).toMatch(/^[\x20-\x7e]*$/);
     expect(value).not.toContain('\r');
@@ -281,20 +281,20 @@ describe('X-Fallback-Detail value safety', () => {
     expect(value).toContain('%0D%0A'); // encoded in place, not dropped
   });
 
-  it('encodes a non-ASCII model id rather than rejecting the response', () => {
-    const value = headersFor([record({ modelId: '我的模型' })])['X-Fallback-Detail'];
+  it('encodes a non-ASCII model id rather than rejecting the response', async () => {
+    const value = await headersFor([record({ modelId: '我的模型' })])['X-Fallback-Detail'];
 
     expect(value).toMatch(/^[\x20-\x7e]*$/);
     expect(decodeURIComponent(value.slice('groq/'.length).split(' ')[0])).toBe('我的模型');
   });
 
-  it('keeps the whole value inside the header budget even at ten long hops', () => {
+  it('keeps the whole value inside the header budget even at ten long hops', async () => {
     const many = Array.from({ length: 10 }, (_, i) => record({
       ordinal: i,
       modelId: 'm'.repeat(80),
       errorSummary: 'e'.repeat(200),
     }));
 
-    expect(headersFor(many)['X-Fallback-Detail'].length).toBeLessThanOrEqual(2048);
+    expect(await headersFor(many)['X-Fallback-Detail'].length).toBeLessThanOrEqual(2048);
   });
 });

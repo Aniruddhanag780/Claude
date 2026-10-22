@@ -215,7 +215,7 @@ describe('Model management API', () => {
     expect(profileSelection.enabled).toBe(0);
     expect(fallbackSelection.enabled).toBe(0);
 
-    const savedFusionConfig = JSON.parse(await getSetting(FUSION_CONFIG_SETTING)!);
+    const savedFusionConfig = JSON.parse(await await await getSetting(FUSION_CONFIG_SETTING)!);
     expect(savedFusionConfig.models).toEqual([RETAINED_CANONICAL_ID]);
     expect(savedFusionConfig.judge).toBeNull();
   });

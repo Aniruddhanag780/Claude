@@ -302,7 +302,7 @@ describe('search service', () => {
 
     mockFetch(() => json({ results: [{ type: 'text', name: 'L', url: 'https://l', content: 'c' }] }));
     await runSearch('q');
-    expect(await listSearchEngines()[0].searchesThisMonth).toBe(1);
+    expect(await await await listSearchEngines()[0].searchesThisMonth).toBe(1);
     expect(await updateSearchEngine(999_999, { enabled: false })).toBe(false);
   });
 

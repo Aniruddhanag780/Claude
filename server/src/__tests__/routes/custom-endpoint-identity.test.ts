@@ -210,8 +210,8 @@ describe('per-endpoint identity for custom relay models (#651)', () => {
       // The route each relay hands to the failure path carries ITS endpoint, so
       // the retirement heuristic counts corroboration per relay instead of
       // pooling two unrelated relays' 404s into one verdict.
-      const routeA = await routePinnedModel(a.id)!;
-      const routeB = await routePinnedModel(b.id)!;
+      const routeA = await await await routePinnedModel(a.id)!;
+      const routeB = await await await routePinnedModel(b.id)!;
       expect(routeA.endpointScope).toBe(RELAY_A);
       expect(routeB.endpointScope).toBe(RELAY_B);
       routeA.release?.();

@@ -96,9 +96,9 @@ describe('reasoning-only turns fail over on the shared inbound-chat lane (#1184)
   beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     await initTestDb();
-    setSetting('ollama_emulation', 'open-loopback');
+    await setSetting('ollama_emulation', 'open-loopback');
     app = createApp();
-    setRoutingStrategy('priority');
+    await setRoutingStrategy('priority');
     await insertKey('first');
     await insertKey('second');
   });

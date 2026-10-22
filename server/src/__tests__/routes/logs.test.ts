@@ -229,7 +229,7 @@ describe('server log viewer', () => {
     // Seeded from MAX(id), so nothing is handed out twice.
     expect(await currentMaxId()).toBe(beforeMax);
 
-    const next = await recordLogEntry({ level: 'info', message: 'after the restart' })!;
+    const next = await await await recordLogEntry({ level: 'info', message: 'after the restart' })!;
     expect(next.id).toBe(beforeMax + 1);
     expect(ringSnapshot().map(e => e.id)).toEqual([beforeMax, beforeMax + 1]);
   });

@@ -69,16 +69,16 @@ describe('emulation surfaces forward handler rejections to the error handler', (
     failNormalize = true;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     failNormalize = false;
-    setSetting('ollama_emulation', 'off');
+    await setSetting('ollama_emulation', 'off');
     vi.restoreAllMocks();
   });
 
   it('answers 500 on the Gemini generateContent surface', async () => {
     const response = await request(
       app,
-      `/v1beta/models/gemini-2.5-flash:generateContent?key=${getUnifiedApiKey()}`,
+      `/v1beta/models/gemini-2.5-flash:generateContent?key=${await getUnifiedApiKey()}`,
       { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] },
     );
     expect(response.status).toBe(500);
@@ -86,24 +86,24 @@ describe('emulation surfaces forward handler rejections to the error handler', (
   });
 
   it('answers 500 on the Ollama chat surface', async () => {
-    setSetting('ollama_emulation', 'key-required');
+    await setSetting('ollama_emulation', 'key-required');
     const response = await request(
       app,
       '/api/chat',
       { model: 'auto', messages: [{ role: 'user', content: 'hello' }], stream: false },
-      { Authorization: `Bearer ${getUnifiedApiKey()}` },
+      { Authorization: `Bearer ${await getUnifiedApiKey()}` },
     );
     expect(response.status).toBe(500);
     expect(response.body?.error).toBeTruthy();
   });
 
   it('answers 500 on the Ollama generate surface', async () => {
-    setSetting('ollama_emulation', 'key-required');
+    await setSetting('ollama_emulation', 'key-required');
     const response = await request(
       app,
       '/api/generate',
       { model: 'auto', prompt: 'hello', stream: false },
-      { Authorization: `Bearer ${getUnifiedApiKey()}` },
+      { Authorization: `Bearer ${await getUnifiedApiKey()}` },
     );
     expect(response.status).toBe(500);
     expect(response.body?.error).toBeTruthy();
