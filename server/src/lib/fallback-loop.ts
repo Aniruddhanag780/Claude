@@ -57,7 +57,7 @@ import { benchForTools, clearToolRejections, noteToolRejection, toolCapabilityKe
 import { parseProviderReportedSize } from './provider-size-parser.js';
 import { checkKeyHealth, markKeyHealthyFromRequest } from '../services/health.js';
 import { noteModelRetirementSignal } from '../services/model-retirement.js';
-import { getDb, getSetting } from '../db/index.js';
+import { getDb, getSetting, setSetting } from '../db/index.js';
 import { newBreaker, recordBreakerFailure } from './guardrails.js';
 import { getRequestTrace, newRequestTrace, runWithRequestTrace, type AttemptOutcome, type AttemptTraceRecord, type RequestTrace } from './attempt-trace.js';
 import { logRequest, persistRequestAttempts } from './request-log.js';
@@ -194,6 +194,58 @@ export function getFallbackTimeBudgetMs(): number {
     if (Number.isFinite(n) && n >= 0) return n;
   }
   return DEFAULT_FALLBACK_TIME_BUDGET_MS;
+}
+
+// #1347 (PR 3): hedged racing threshold — ms of silence on the FIRST
+// candidate before the router's next pick is started IN PARALLEL. 0 = off,
+// the default: existing installs keep the exact serial behaviour. A hedged
+// request can cost the provider TWO calls (the dashboard control carries that
+// note), so platforms a deployment does not want double-billed opt out with
+// HEDGE_AFTER_MS_<PLATFORM>=0. Resolution order:
+//   HEDGE_AFTER_MS_<PLATFORM> (per-platform, 0 disables that platform)
+//   → ROUTER_HEDGE_AFTER_MS (pins over the dashboard setting)
+//   → the dashboard setting (routing_hedge_after_ms) → 0.
+export const HEDGE_AFTER_MS_SETTING = 'routing_hedge_after_ms';
+export const HEDGE_AFTER_MS_MAX = 600000; // 10 min — longer than any retry budget
+
+function parseHedgeAfterMs(raw: unknown): number | null {
+  if (raw == null) return null;
+  const n = Number(typeof raw === 'string' ? raw.trim() : raw);
+  return Number.isInteger(n) && n >= 0 && n <= HEDGE_AFTER_MS_MAX ? n : null;
+}
+
+export function getHedgeAfterMs(platform: string): number {
+  const perPlatform = process.env[`HEDGE_AFTER_MS_${platform.toUpperCase()}`];
+  if (perPlatform !== undefined && perPlatform.trim() !== '') {
+    // A malformed per-platform pin disables hedging for that platform rather
+    // than silently falling through to the global value.
+    return parseHedgeAfterMs(perPlatform) ?? 0;
+  }
+  const globalRaw = process.env.ROUTER_HEDGE_AFTER_MS ?? getSetting(HEDGE_AFTER_MS_SETTING);
+  return parseHedgeAfterMs(globalRaw) ?? 0;
+}
+
+/** The STORED dashboard value (env ignored) — what the settings API reports. */
+export function getStoredHedgeAfterMs(): number | null {
+  return parseHedgeAfterMs(getSetting(HEDGE_AFTER_MS_SETTING) ?? undefined);
+}
+
+/** #1347 (PR 3): compose the per-attempt hedge signal into a surface's
+ *  existing client/hedge abort signals. `extra` is absent in serial dispatch
+ *  (the common case), in which case the result is exactly the pre-PR signal. */
+export function withHedgeSignal(base: AbortSignal[], extra?: AbortSignal): AbortSignal {
+  return extra ? AbortSignal.any([...base, extra]) : AbortSignal.any(base);
+}
+
+export function setHedgeAfterMs(ms: number | null): void {
+  if (ms === null) {
+    getDb().prepare('DELETE FROM settings WHERE key = ?').run(HEDGE_AFTER_MS_SETTING);
+    return;
+  }
+  if (!Number.isInteger(ms) || ms < 0 || ms > HEDGE_AFTER_MS_MAX) {
+    throw new Error(`Invalid hedge-after-ms value ${ms} (must be an integer 0..${HEDGE_AFTER_MS_MAX})`);
+  }
+  setSetting(HEDGE_AFTER_MS_SETTING, String(ms));
 }
 
 // Mutable per-request skip state threaded through the loop and mutated by
@@ -1227,11 +1279,28 @@ function logRoutingExhaustion(routeErr: any, identity?: FallbackHooks['logIdenti
 
 // What a surface's dispatch() returns to signal the response is finished and the
 // loop must stop:
-//   'done'      — the attempt succeeded and the full response was sent.
-//   'committed' — a stream already flushed real bytes to the client, then hit a
-//                 mid-stream error the surface surfaced honestly; no failover is
-//                 possible, so stop without recording another retry.
-export type DispatchOutcome = 'done' | 'committed';
+//   'done'       — the attempt succeeded and the full response was sent.
+//   'committed'  — a stream already flushed real bytes to the client, then hit a
+//                  mid-stream error the surface surfaced honestly; no failover is
+//                  possible, so stop without recording another retry.
+//   'hedge_lost' — #1347 (PR 3): the attempt lost the attempt-0 hedge race (a
+//                  sibling candidate committed first, or the loop aborted it).
+//                  The surface has already logged a 'canceled' row; the loop
+//                  records NO failure for it. Only produced inside a race — a
+//                  serial dispatch returning it is a contract violation and
+//                  fails loudly like any other bad outcome.
+export type DispatchOutcome = 'done' | 'committed' | 'hedge_lost';
+
+/** #1347 (PR 3): thrown INSIDE a dispatch's first-byte flush closure when the
+ *  hedge commit claim is lost (a sibling attempt committed first). The
+ *  enclosing catch turns it into a 'hedge_lost' outcome — no failure
+ *  bookkeeping for the loser. */
+export class HedgeLostError extends Error {
+  constructor() {
+    super('hedge race lost: sibling attempt committed first');
+    this.name = 'HedgeLostError';
+  }
+}
 
 /** Per-attempt handles the loop hands to dispatch. */
 export interface DispatchContext {
@@ -1240,6 +1309,18 @@ export interface DispatchContext {
    * call, including when hedging is not armed at all. See FallbackHooks.dispatch.
    */
   disarmHedge(): void;
+  // #1347 (PR 3): hedged racing — present only on attempt 0 when
+  // getHedgeAfterMs(platform) > 0 (absent = serial, exactly today's shape).
+  // Aborts THIS attempt when the loop decides it lost the race; the surface
+  // threads it into the composed provider fetch signal and, on the resulting
+  // abort, logs a 'canceled' row and returns 'hedge_lost'.
+  signal?: AbortSignal;
+  // Atomic first-byte claim: the first dispatch to take it before flushing
+  // carries the response. A loser writes NOTHING to the shared response.
+  acquireCommit?: () => boolean;
+  // Called the moment the attempt commits (claim won, first byte flushed);
+  // the loop aborts the sibling here.
+  onCommit?: () => void;
 }
 
 // Per-request exhaustion metadata handed to the exhaustion hooks, so each
@@ -1438,6 +1519,11 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
     }
 
     let hedgeTimer: NodeJS.Timeout | undefined;
+    // #1347 (PR 3): lease release for every route this iteration dispatches —
+    // A always, B once the hedge race starts it. Declared outside the try so
+    // the finally below can free both on every exit.
+    const releaseA = route.release;
+    const hedgeRelease: Array<() => void> = [() => releaseA?.()];
     try {
     // Select the endpoint before checking the budget: a slow endpoint may
     // still have time even after the base budget has expired. Recompute from
@@ -1463,7 +1549,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
     // short REDACTED summary of it rides along — the outcome class alone loses
     // the provider's actual words, which is exactly what the dashboard's
     // drill-down needs to answer "why did this hop fail".
-    const attemptStartedAt = Date.now();
+    let attemptStartedAt = Date.now();
     const traceAttempt = (outcome: AttemptOutcome, err?: any): void => {
       trace.records.push({
         ordinal: trace.records.length,
@@ -1509,14 +1595,76 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
         }, remaining);
       }
     }
+    // #1347 (PR 3): hedged racing — attempt 0 only. When the first candidate
+    // has not committed (flushed its first byte) within hedgeAfterMs, the
+    // router's next pick is started IN PARALLEL; the first to commit carries
+    // the response, the other is aborted and logged 'canceled' (excluded from
+    // every stat/scoring query). Off by default (hedgeAfterMs = 0): with it
+    // off this block is a no-op and the serial dispatch below is exactly
+    // today's behaviour. A hedged request may cost the provider TWO calls —
+    // the dashboard control carries that note, and per-platform opt-out is
+    // HEDGE_AFTER_MS_<PLATFORM>=0.
+    const hedgeAfterMs = attempt === 0 ? getHedgeAfterMs(route.platform) : 0;
+    let flushHedgeB: (() => void) | undefined;
+    // In a both-failed race the attempt index is consumed (0 AND 1), so the
+    // catch below must log/render A under its OWN index (0), not the
+    // post-consumption one.
+    let hedgeConsumedAttempt: number | undefined;
     let outcome: DispatchOutcome;
     try {
-      // #590 (per-key proxy): if THIS key carries its own proxy URL, route the
-      // attempt through it (withKeyProxy → proxyFetch reads the ALS store);
-      // otherwise the global proxy / direct path applies as before. The URL
-      // arrives already decrypted on the route (services/router.ts), so an
-      // attempt costs nothing extra — no query, no decrypt.
-      outcome = await withKeyProxy(route.proxyUrl, () => hooks.dispatch(route, attempt, { disarmHedge }));
+      if (hedgeAfterMs > 0) {
+        outcome = await runHedgedRace(hooks, route, hedgeAfterMs, {
+          disarmHedge,
+          attempts,
+          keyOrdinal,
+          startedAt,
+          trace,
+          hedgeRelease,
+          onDecideB: (b) => {
+            // B carries the response: re-point the shared bookkeeping (catch,
+            // trace, finally) at B exactly as if B were attempt 1.
+            route = b.route;
+            attempt = 1;
+            attemptStartedAt = b.startedAt;
+          },
+          onBothFailed: (b) => {
+            // Both candidates failed without committing: B really failed
+            // upstream, so it earns its log row + cooldown/auth rotation. The
+            // trail/trace entries are deferred to the catch (right after A's
+            // own entry) so the trail keeps chronological order. Attempt
+            // index 1 is consumed — the for-loop's ++ skips to 2.
+            hooks.logFailure(b.route, b.error, 1);
+            if (isKeyAuthError(b.error)) {
+              recordAuthFailure(b.route, hooks.state);
+            } else if (isRetryableError(b.error)) {
+              recordRetryableFailure(b.route, b.error, hooks.state);
+            }
+            flushHedgeB = () => {
+              attempts.push({ platform: b.route.platform, modelId: b.route.modelId, keyOrdinal: keyOrdinal(b.route), errorClass: classifyAttemptError(b.error) });
+              trace.records.push({
+                ordinal: trace.records.length,
+                platform: b.route.platform,
+                modelId: b.route.modelId,
+                keyOrdinal: keyOrdinal(b.route),
+                keyLabel: b.route.keyLabel ?? null,
+                outcome: classifyAttemptError(b.error),
+                startOffsetMs: b.startedAt - startedAt,
+                durationMs: Date.now() - b.startedAt,
+                errorSummary: summarizeAttemptError(b.error?.message),
+              });
+            };
+            hedgeConsumedAttempt = attempt;
+            attempt += 1;
+          },
+        });
+      } else {
+        // #590 (per-key proxy): if THIS key carries its own proxy URL, route
+        // the attempt through it (withKeyProxy → proxyFetch reads the ALS
+        // store); otherwise the global proxy / direct path applies as before.
+        // The URL arrives already decrypted on the route (services/router.ts),
+        // so an attempt costs nothing extra — no query, no decrypt.
+        outcome = await withKeyProxy(route.proxyUrl, () => hooks.dispatch(route, attempt, { disarmHedge }));
+      }
     } catch (err: any) {
       // Client-caused abort: the composed fetch signal fired because OUR
       // client hung up mid-attempt (see newClientAbortError). Not a
@@ -1573,13 +1721,14 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
         traceAttempt('timeout', err);
         return;
       }
-      hooks.logFailure(route, err, attempt);
+      hooks.logFailure(route, err, hedgeConsumedAttempt ?? attempt);
       if (isKeyAuthError(err)) {
         // KEY-fatal, not request-fatal: rotate past the bad key and revalidate
         // it immediately instead of 502-ing while healthy routes sit idle.
         recordAuthFailure(route, hooks.state);
         attempts.push({ platform: route.platform, modelId: route.modelId, keyOrdinal: keyOrdinal(route), errorClass: 'auth' });
         traceAttempt('auth', err);
+        flushHedgeB?.();
         lastError = err;
         if (stopIfBreakerTripped()) return;
         continue;
@@ -1608,6 +1757,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
         const errorClass = classifyAttemptError(err);
         attempts.push({ platform: route.platform, modelId: route.modelId, keyOrdinal: keyOrdinal(route), errorClass });
         traceAttempt(errorClass, err);
+        flushHedgeB?.();
         lastError = err;
         // A still-exempt skipBench failure (format ignored, hidden-reasoning
         // truncation under the streak limit) is model behavior, not provider
@@ -1620,7 +1770,8 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
         continue;
       }
       traceAttempt(classifyAttemptError(err), err);
-      hooks.onFatal(route, err, attempt);
+      flushHedgeB?.();
+      hooks.onFatal(route, err, hedgeConsumedAttempt ?? attempt);
       return;
     }
 
@@ -1649,7 +1800,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
     return;
     } finally {
       if (hedgeTimer) clearTimeout(hedgeTimer);
-      route.release?.();
+      for (const rel of hedgeRelease) rel();
     }
   }
 
@@ -1657,4 +1808,150 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
     exhaustedRetryError(lastError, maxRetries, { attempts }),
     { attempts, timedOut: false },
   );
+}
+
+// #1347 (PR 3): the attempt-0 parallel race, extracted from
+// runFallbackLoopAttempts for unit-testability. A starts immediately; once A
+// is still silent (no first byte) after hedgeAfterMs, B — the router's next
+// pick — starts in parallel. The FIRST dispatch to take the atomic commit
+// claim (before flushing its first byte) carries the response; the sibling is
+// aborted, drained, and swallowed as 'hedge_lost'. The helper returns the
+// decider's outcome ('done'/'committed') or rethrows the decider's error into
+// the caller's normal catch path; when both fail without committing it calls
+// onBothFailed (which bookkeeps B) and throws A's error.
+//
+// Note on provider load: when the race fires, the deployment has made TWO
+// upstream calls for one request — the quota note on the dashboard control is
+// the operator's acknowledgement of that trade.
+async function runHedgedRace(
+  hooks: FallbackHooks,
+  routeA: RouteResult,
+  hedgeAfterMs: number,
+  ctx: {
+    disarmHedge: () => void;
+    attempts: AttemptRecord[];
+    keyOrdinal: (route: RouteResult) => number;
+    startedAt: number;
+    trace: RequestTrace;
+    hedgeRelease: Array<() => void>;
+    onDecideB: (b: { route: RouteResult; startedAt: number }) => void;
+    onBothFailed: (b: { route: RouteResult; error: any; startedAt: number }) => void;
+  },
+): Promise<DispatchOutcome> {
+  // One atomic claim per request: the first dispatch to take it before
+  // flushing its first byte carries the response; a loser writes nothing.
+  let claimed = false;
+  const claim = (): boolean => {
+    if (claimed) return false;
+    claimed = true;
+    return true;
+  };
+
+  type Branch = 'inflight' | 'committed' | 'dead';
+  const st: { a: Branch; b: 'absent' | Branch } = { a: 'inflight', b: 'absent' };
+  let aError: any;
+  let bError: any;
+  let bInfo: { route: RouteResult; controller: AbortController; promise: Promise<DispatchOutcome>; startedAt: number } | undefined;
+  let decided: 'a' | 'b' | 'both-failed' | undefined;
+  let resolveDecided!: (d: 'a' | 'b' | 'both-failed') => void;
+  const decidedP = new Promise<'a' | 'b' | 'both-failed'>(r => { resolveDecided = r; });
+  const decide = (d: 'a' | 'b' | 'both-failed'): void => {
+    if (!decided) {
+      decided = d;
+      resolveDecided(d);
+    }
+  };
+  const reevaluate = (): void => {
+    if (decided) return;
+    if (st.a === 'committed') { decide('a'); return; }
+    if (st.b === 'committed') { decide('b'); return; }
+    if (st.a === 'dead' && st.b === 'dead') { decide('both-failed'); return; }
+    // A dead before B ever started: B never existed — A's failure is the
+    // whole story and the caller's normal catch path handles it.
+    if (st.a === 'dead' && st.b === 'absent') { decide('a'); return; }
+    // Otherwise one branch is still inflight and may still commit.
+  };
+
+  const controllerA = new AbortController();
+  const promiseA = withKeyProxy(routeA.proxyUrl, () => hooks.dispatch(routeA, 0, {
+    disarmHedge: ctx.disarmHedge,
+    signal: controllerA.signal,
+    acquireCommit: () => {
+      const won = claim();
+      if (won) st.a = 'committed';
+      return won;
+    },
+    onCommit: () => {
+      // A is carrying the response: abort B if it is already in flight.
+      if (bInfo && st.b === 'inflight') bInfo.controller.abort();
+      decide('a');
+    },
+  }));
+  promiseA.then(
+    (o) => { if (o === 'hedge_lost') st.a = 'dead'; reevaluate(); },
+    (err) => { aError = err; st.a = 'dead'; reevaluate(); },
+  );
+
+  const timer = setTimeout(() => {
+    try {
+      const routeB = hooks.route(1);
+      // Same candidate again (a pool of one, or the router repeating its top
+      // pick): racing A against A would only double-bill — release B's lease
+      // and let A continue alone.
+      if (routeB.platform === routeA.platform && routeB.modelId === routeA.modelId && routeB.keyId === routeA.keyId) {
+        routeB.release?.();
+        return;
+      }
+      const controllerB = new AbortController();
+      const startedAtB = Date.now();
+      const promiseB = withKeyProxy(routeB.proxyUrl, () => hooks.dispatch(routeB, 1, {
+        disarmHedge: ctx.disarmHedge,
+        signal: controllerB.signal,
+        acquireCommit: () => {
+          const won = claim();
+          if (won) st.b = 'committed';
+          return won;
+        },
+        onCommit: () => {
+          // B is carrying the response: abort A and hand the bookkeeping over.
+          controllerA.abort();
+          ctx.onDecideB({ route: routeB, startedAt: startedAtB });
+          decide('b');
+        },
+      }));
+      bInfo = { route: routeB, controller: controllerB, promise: promiseB, startedAt: startedAtB };
+      st.b = 'inflight';
+      ctx.hedgeRelease.push(() => routeB.release?.());
+      console.log(`[FallbackLoop] hedge: ${routeA.platform}/${routeA.modelId} silent after ${hedgeAfterMs}ms — racing ${routeB.platform}/${routeB.modelId} in parallel (#1347)`);
+      promiseB.then(
+        (o) => { if (o === 'hedge_lost') st.b = 'dead'; reevaluate(); },
+        (err) => { bError = err; st.b = 'dead'; reevaluate(); },
+      );
+    } catch {
+      // route(1) threw (routing exhausted): no second candidate — A alone.
+    }
+  }, hedgeAfterMs);
+
+  const decider = await decidedP;
+  clearTimeout(timer);
+
+  if (decider === 'both-failed') {
+    ctx.onBothFailed({ route: bInfo!.route, error: bError, startedAt: bInfo!.startedAt });
+    // A's failure drives the caller's normal catch path (auth rotation /
+    // failover / fatal) exactly as the serial loop would.
+    throw aError;
+  }
+
+  // Abort + drain the loser so its upstream request stops burning quota and
+  // its 'hedge_lost' (or abort) settle is swallowed before we return.
+  if (decider === 'a' && bInfo && st.b === 'inflight') {
+    bInfo.controller.abort();
+    await bInfo.promise.catch(() => {});
+  }
+  if (decider === 'b') {
+    controllerA.abort();
+    await promiseA.catch(() => {});
+  }
+
+  return decider === 'a' ? await promiseA : await bInfo!.promise;
 }

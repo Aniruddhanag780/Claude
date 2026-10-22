@@ -25,6 +25,7 @@ import {
   setCompressionConfig,
 } from '../services/compression/config.js';
 import { getHeadroomThresholds, setHeadroomThresholds, getTaskWeightShare, setTaskWeightShare, getMinReliabilityFloor, setMinReliabilityFloor, isProviderMomentAttributionEnabled, setProviderMomentAttribution } from '../services/router.js';
+import { getStoredHedgeAfterMs, setHedgeAfterMs, HEDGE_AFTER_MS_MAX } from '../lib/fallback-loop.js';
 import { MCP_ENABLED_SETTING, isMcpServerEnabled } from './mcp.js';
 import { z } from 'zod';
 import { getAppVersion } from '../lib/app-version.js';
@@ -450,6 +451,34 @@ settingsRouter.put('/provider-moment-attribution', (req: Request, res: Response)
   }
   setProviderMomentAttribution(parsed.data.enabled);
   res.json({ enabled: isProviderMomentAttributionEnabled() });
+});
+
+// #1347 (PR 3): hedged racing — ms of silence on the FIRST candidate before
+// the router's next pick is started IN PARALLEL (first to flush a byte wins;
+// the loser is aborted and logged 'canceled'). null/0 = off, the default: a
+// hedged request may bill the provider TWICE, so existing installs keep the
+// serial behaviour until the operator opts in. ROUTER_HEDGE_AFTER_MS pins the
+// value over this setting; HEDGE_AFTER_MS_<PLATFORM>=0 opts one platform out.
+settingsRouter.get('/hedge-after-ms', (_req: Request, res: Response) => {
+  res.json({ ms: getStoredHedgeAfterMs() });
+});
+
+const hedgeAfterMsPutSchema = z.object({
+  ms: z.number().int().min(0).max(HEDGE_AFTER_MS_MAX).nullable().optional(),
+});
+
+settingsRouter.put('/hedge-after-ms', (req: Request, res: Response) => {
+  const parsed = hedgeAfterMsPutSchema.safeParse(req.body);
+  if (!parsed.success || parsed.data.ms === undefined) {
+    res.status(400).json({ error: { message: `Invalid hedge-after-ms: send {"ms": 0..${HEDGE_AFTER_MS_MAX} | null}`, type: 'invalid_request_error' } });
+    return;
+  }
+  try {
+    setHedgeAfterMs(parsed.data.ms);
+    res.json({ ms: getStoredHedgeAfterMs() });
+  } catch (err: any) {
+    res.status(400).json({ error: { message: `Invalid hedge-after-ms: ${err.message}`, type: 'invalid_request_error' } });
+  }
 });
 
 // Update the guardrails. Partial: send just the knob you want to change.
