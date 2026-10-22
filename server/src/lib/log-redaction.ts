@@ -160,15 +160,11 @@ export function installLogRedaction(): () => void {
     if (typeof original !== 'function') continue;
     originals.set(method, original);
     const level = LEVEL_FOR_METHOD[method];
-    console[method] = async (...args: unknown[]) => {
+    console[method] = (...args: unknown[]) => {
       try {
         const redacted = args.map(redactArg);
-        // The dashboard's log viewer taps in HERE, on the redacted args and
-        // before the write, so there is still exactly one console patch in the
-        // process and the buffer can never hold a credential the terminal did
-        // not. recordConsoleLine never throws.
-        await recordConsoleLine(level, redacted);
         original(...redacted);
+        void recordConsoleLine(level, redacted).catch(() => {});
       } catch {
         // Never let redaction swallow a log line.
         original(...args);
