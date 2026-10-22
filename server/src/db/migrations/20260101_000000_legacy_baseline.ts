@@ -286,12 +286,54 @@ function ensureModelsKeyIdColumn(db: Db) {
   }
 }
 
-function seedModels(db: Db) {
-  const count = db.prepare('SELECT COUNT(*) as cnt FROM models').get() as { cnt: number };
-  if (count.cnt > 0) return;
+/**
+ * Rename a model row to the id the provider now serves.
+ *
+ * `models` is unique on (platform, model_id), so a rename that would land on
+ * an id another row already holds cannot be applied: SQLite raises
+ * "UNIQUE constraint failed: models.platform, models.model_id" and the boot
+ * dies with it (#1603). That is the state of a database that already carries
+ * the new id — the catalog syncs it, the default seed below inserts it —
+ * while the old id is still there from an earlier release.
+ *
+ * The row that already carries the new id is the live one, so the stale row
+ * is dropped instead of renamed: the catalog then converges on the same rows
+ * a fresh install has.
+ */
+function renameModel(
+  db: Db,
+  platform: string,
+  oldId: string,
+  newId: string,
+  rename: () => void,
+): void {
+  const stale = db
+    .prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
+    .get(platform, oldId) as { id: number } | undefined;
+  if (!stale) return;
 
+  const taken = db
+    .prepare('SELECT 1 FROM models WHERE platform = ? AND model_id = ?')
+    .get(platform, newId) !== undefined;
+  if (taken) {
+    db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?').run(stale.id);
+    db.prepare('DELETE FROM models WHERE id = ?').run(stale.id);
+    return;
+  }
+
+  rename();
+}
+
+function seedModels(db: Db) {
+  // The default catalog is seeded per model, and the insert ignores a row
+  // that is already there: (platform, model_id) is unique, so the constraint
+  // — not a row count — decides what this database already has. A plain
+  // INSERT aborted the boot with "UNIQUE constraint failed: models.platform,
+  // models.model_id" on any database that already held one of the seeded
+  // pairs, and the count guard skipped the whole seed on any database that
+  // held rows at all, leaving the default models missing.
   const insert = db.prepare(`
-    INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window)
+    INSERT OR IGNORE INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
@@ -335,24 +377,32 @@ function seedModels(db: Db) {
     ['minimax', 'MiniMax-M1', 'MiniMax M1', 5, 8, 'Large', 20, null, 1000000, null, '~30M', 200000],
   ];
 
+  let seeded = 0;
   const insertMany = db.transaction(() => {
     for (const m of models) {
-      insert.run(...m);
+      if (insert.run(...m).changes > 0) seeded++;
     }
   });
   insertMany();
 
-  // Seed default fallback config from models
-  const allModels = db.prepare('SELECT id, intelligence_rank FROM models ORDER BY intelligence_rank ASC').all() as { id: number; intelligence_rank: number }[];
-  const insertFallback = db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)');
+  // Chain rows for the models that do not have one yet — the same backfill
+  // the model migrations below use, so every model is in the chain exactly
+  // once and a chain entry that is already there is left alone.
+  const missing = db.prepare(`
+    SELECT m.id FROM models m
+    LEFT JOIN fallback_config f ON m.id = f.model_db_id
+    WHERE f.id IS NULL ORDER BY m.intelligence_rank ASC
+  `).all() as { id: number }[];
+  const insertFallback = db.prepare('INSERT OR IGNORE INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)');
   const insertFallbacks = db.transaction(() => {
-    for (let i = 0; i < allModels.length; i++) {
-      insertFallback.run(allModels[i].id, i + 1);
+    if (missing.length > 0) {
+      const maxPriority = (db.prepare('SELECT COALESCE(MAX(priority), 0) AS mx FROM fallback_config').get() as { mx: number }).mx;
+      for (let i = 0; i < missing.length; i++) insertFallback.run(missing[i].id, maxPriority + i + 1);
     }
   });
   insertFallbacks();
 
-  console.log(`Seeded ${models.length} models and fallback config`);
+  console.log(`Seeded ${seeded} models and fallback config`);
 }
 
 /**
@@ -372,9 +422,13 @@ function migrateModels(db: Db) {
      WHERE platform = ? AND model_id = ?
   `);
   // DeepSeek R1 (free) -> DeepSeek V3.1 (free)
-  renameStmt.run('deepseek/deepseek-v3.1:free', 'DeepSeek V3.1 (free)', 2, '~6M', 200, 131072, 'Frontier', 'openrouter', 'deepseek/deepseek-r1:free');
+  renameModel(db, 'openrouter', 'deepseek/deepseek-r1:free', 'deepseek/deepseek-v3.1:free', () => {
+    renameStmt.run('deepseek/deepseek-v3.1:free', 'DeepSeek V3.1 (free)', 2, '~6M', 200, 131072, 'Frontier', 'openrouter', 'deepseek/deepseek-r1:free');
+  });
   // GitHub GPT-4o -> GPT-5
-  renameStmt.run('openai/gpt-5', 'GPT-5 (GitHub)', 1, '~18M', null, 128000, 'Frontier', 'github', 'gpt-4o');
+  renameModel(db, 'github', 'openai/gpt-4o', 'openai/gpt-5', () => {
+    renameStmt.run('openai/gpt-5', 'GPT-5 (GitHub)', 1, '~18M', null, 128000, 'Frontier', 'github', 'gpt-4o');
+  });
 
   // 2) Correct stale limits / budgets on existing rows
   db.prepare(`UPDATE models SET rpd_limit = 20, monthly_token_budget = '~3M' WHERE platform = 'google' AND model_id = 'gemini-2.5-flash'`).run();
@@ -466,18 +520,22 @@ function migrateModelsV2(db: Db) {
 
   // GitHub: gpt-5 is in the model catalog but returns "unavailable_model" on free tier
   // inference. Revert to gpt-4o which works. This only runs if the gpt-5 row exists.
-  db.prepare(`
-    UPDATE models
-       SET model_id = 'gpt-4o', display_name = 'GPT-4o', intelligence_rank = 5,
-           size_label = 'Large', context_window = 8000, monthly_token_budget = '~18M'
-     WHERE platform = 'github' AND model_id = 'openai/gpt-5'
-  `).run();
+  renameModel(db, 'github', 'openai/gpt-5', 'gpt-4o', () => {
+    db.prepare(`
+      UPDATE models
+         SET model_id = 'gpt-4o', display_name = 'GPT-4o', intelligence_rank = 5,
+             size_label = 'Large', context_window = 8000, monthly_token_budget = '~18M'
+       WHERE platform = 'github' AND model_id = 'openai/gpt-5'
+    `).run();
+  });
 
   // Groq: scout requires the meta-llama/ publisher prefix
-  db.prepare(`
-    UPDATE models SET model_id = 'meta-llama/llama-4-scout-17b-16e-instruct'
-     WHERE platform = 'groq' AND model_id = 'llama-4-scout-17b-16e-instruct'
-  `).run();
+  renameModel(db, 'groq', 'llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-scout-17b-16e-instruct', () => {
+    db.prepare(`
+      UPDATE models SET model_id = 'meta-llama/llama-4-scout-17b-16e-instruct'
+       WHERE platform = 'groq' AND model_id = 'llama-4-scout-17b-16e-instruct'
+    `).run();
+  });
 
   // Add real OpenRouter :free models that exist in the live catalog
   const insert = db.prepare(`
@@ -591,13 +649,15 @@ function migrateModelsV4(db: Db) {
   applyRemovals();
 
   // 2) Cloudflare: replace Llama 3.1 70B with the current-gen 3.3 70B fp8-fast
-  db.prepare(`
-    UPDATE models
-       SET model_id = '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
-           display_name = 'Llama 3.3 70B fp8-fast (CF)',
-           context_window = 131072
-     WHERE platform = 'cloudflare' AND model_id = '@cf/meta/llama-3.1-70b-instruct'
-  `).run();
+  renameModel(db, 'cloudflare', '@cf/meta/llama-3.1-70b-instruct', '@cf/meta/llama-3.3-70b-instruct-fp8-fast', () => {
+    db.prepare(`
+      UPDATE models
+         SET model_id = '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+             display_name = 'Llama 3.3 70B fp8-fast (CF)',
+             context_window = 131072
+       WHERE platform = 'cloudflare' AND model_id = '@cf/meta/llama-3.1-70b-instruct'
+    `).run();
+  });
 
   // 3) Field corrections verified via primary sources + live probe
   db.prepare(`UPDATE models SET tpm_limit = 12000 WHERE platform = 'groq' AND model_id = 'llama-3.3-70b-versatile'`).run();
@@ -1018,10 +1078,12 @@ function migrateModelsV10(db: Db) {
 function migrateModelsV11(db: Db) {
   // 1) Rename cerebras qwen3-235b → qwen-3-235b-a22b-instruct-2507 if the
   //    old id still exists on this DB. Safe to re-run because of the WHERE.
-  db.prepare(`
-    UPDATE models SET model_id = 'qwen-3-235b-a22b-instruct-2507'
-     WHERE platform = 'cerebras' AND model_id = 'qwen3-235b'
-  `).run();
+  renameModel(db, 'cerebras', 'qwen3-235b', 'qwen-3-235b-a22b-instruct-2507', () => {
+    db.prepare(`
+      UPDATE models SET model_id = 'qwen-3-235b-a22b-instruct-2507'
+       WHERE platform = 'cerebras' AND model_id = 'qwen3-235b'
+    `).run();
+  });
 
   // 2) Re-enable NVIDIA NIM (still has 1,000+ starter credits free-tier).
   db.prepare(`
