@@ -19,8 +19,10 @@ const DEFAULT_SERVER_LOGS_MAX_ROWS = 50_000;
 // further back than the newest row per pool, so the history is diagnostics
 // only — yet a busy install wrote ~15k rows a day and reached 470k rows in a
 // month. Pruned on the daily gate: the delete is a range over created_at.
-const DEFAULT_QUOTA_OBSERVATIONS_RETENTION_DAYS = 30;
-const DEFAULT_QUOTA_OBSERVATIONS_MAX_ROWS = 200_000;
+// A week / 50k rows (#1675): 200k rows with raw_json was ~130 MB of history
+// nobody reads, and the cap is still far above the live pool count.
+const DEFAULT_QUOTA_OBSERVATIONS_RETENTION_DAYS = 7;
+const DEFAULT_QUOTA_OBSERVATIONS_MAX_ROWS = 50_000;
 // search_requests (#1174) is the per-attempt web-search log behind the Search
 // dashboard. Before this it was the one log with no bound at all: every agent
 // web_search (up to 20 per request) appended a row forever. The widest UI
