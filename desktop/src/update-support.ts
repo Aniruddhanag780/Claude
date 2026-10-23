@@ -41,6 +41,23 @@ export function updateSupport(
 
 
 /**
+ * Reject a promise after `ms` milliseconds, so a check that stalls the event
+ * loop (a proxy that never answers, a hung updater feed) becomes an error the
+ * UI can show and retry instead of a spinner that never stops.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+/**
  * Turn the app's outbound proxy URL into what Electron's session.setProxy
  * takes (#1432). The updater runs on Chromium's network stack, which never
  * reads the dashboard proxy or HTTPS_PROXY, so on a network that only lets

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { updateSupport, updaterProxy } from '../update-support.js';
+import { updateSupport, updaterProxy, withTimeout } from '../update-support.js';
 
 const base = { isPackaged: true, execPath: '/Applications/FreeLLMAPI.app/Contents/MacOS/FreeLLMAPI', productName: 'FreeLLMAPI' };
 
@@ -45,5 +45,22 @@ describe('updaterProxy', () => {
 
   it('splits the credentials off for the login event', () => {
     expect(updaterProxy('http://me:p%40ss@proxy.lan:3128')).toEqual({ rules: 'http://proxy.lan:3128', username: 'me', password: 'p@ss' });
+  });
+});
+
+describe('withTimeout', () => {
+  it('resolves when the promise settles before the timeout', async () => {
+    const value = await withTimeout(Promise.resolve('ok'), 50, 'fast operation');
+    expect(value).toBe('ok');
+  });
+
+  it('rejects with a readable message when the timeout fires first', async () => {
+    const never = new Promise((resolve) => setTimeout(resolve, 500));
+    await expect(withTimeout(never, 20, 'slow check')).rejects.toThrow('slow check timed out after 20ms');
+  });
+
+  it('propagates the original error when the promise rejects before timeout', async () => {
+    const fail = Promise.reject(new Error('network died'));
+    await expect(withTimeout(fail, 50, 'broken operation')).rejects.toThrow('network died');
   });
 });
