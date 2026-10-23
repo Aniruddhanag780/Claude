@@ -71,7 +71,10 @@ export function useDesktopUpdater() {
     }
   }, [updater])
 
-  if (!updater || !state || state.phase === 'unsupported') return null
+  // Even an unsupported build (portable zip, dev) is surfaced so the dialog can
+  // explain it and point at the latest GitHub release, instead of falling
+  // through to a check that never resolves.
+  if (!updater || !state) return null
   return {
     state,
     check: () => updater.check().then(next => { setState(next); return next }),
