@@ -331,6 +331,15 @@ describe('non-chat kind inferred from the model id (#1051)', () => {
     expect(n.kind).toBe('image');
   });
 
+  it('keeps vision-chat task metadata as chat, not image or audio generation (#1506)', () => {
+    // Hugging Face style tasks name an input modality; only the bare values
+    // above mean a generation model.
+    for (const type of ['image-text-to-text', 'image-to-text', 'audio-text-to-text', 'any-to-any']) {
+      const [m] = parseModelCatalog({ data: [{ id: 'generic-model-9b', type }] });
+      expect(m.kind, type).toBeUndefined();
+    }
+  });
+
   it("ignores OpenAI's uninformative object:'model'", () => {
     const [m] = parseModelCatalog({ data: [{ id: 'gpt-x', object: 'model' }] });
     expect(m.kind).toBeUndefined();
