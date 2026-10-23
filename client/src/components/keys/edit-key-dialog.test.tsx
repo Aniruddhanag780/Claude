@@ -133,8 +133,10 @@ describe('editing provider credentials', () => {
     mount(<EditKeyDialog apiKey={{ ...key, platform: 'groq', monthlyRequestCap: 100,
       monthlyUsage: { requests: 100, tokens: 0, resetsAt: '2026-11-01T00:00:00.000Z' } }} onOpenChange={onOpenChange} />)
     expect(container.textContent).toContain('Cap reached')
-    container.innerHTML = ''
-    root.unmount()
+    // Tear the first root down properly: clearing innerHTML before unmount
+    // leaves React removing nodes that are no longer children (NOT_FOUND_ERR).
+    act(() => root.unmount())
+    container.remove()
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
