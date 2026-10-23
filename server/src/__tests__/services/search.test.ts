@@ -200,6 +200,15 @@ describe('search service', () => {
       expect(isOnCooldown('brave', 'brave-search', key)).toBe(false);
     });
 
+    it('parks a key whose monthly credit is spent (429 QUOTA_LIMITED) for the long credit cooldown', async () => {
+      const key = addKey('brave');
+      mockFetch(() => json({ error: { code: 'QUOTA_LIMITED', detail: 'Request quota limit exceeded for plan' } }, 429));
+      await expect(runSearch('q', { engine: 'brave-search' })).rejects.toBeInstanceOf(SearchError);
+      const later = Date.now() + 60 * 60_000;
+      vi.spyOn(Date, 'now').mockReturnValue(later);
+      expect(isOnCooldown('brave', 'brave-search', key)).toBe(true);
+    });
+
     it('validates a key with a free no-query request: bad token is invalid, VALIDATION means the key is fine', async () => {
       const brave = new BraveProvider();
       mockFetch(() => json(badKey, 422));
