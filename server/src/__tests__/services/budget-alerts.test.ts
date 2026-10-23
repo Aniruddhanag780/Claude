@@ -1,11 +1,13 @@
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { initDb, getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { logRequest } from '../../lib/request-log.js';
 import { ringSnapshot, clearLogs } from '../../lib/server-logs.js';
 import { setMonthlyBudgetCaps } from '../../services/key-budget.js';
 import {
+  budgetAlertWebhookUrl,
   budgetThresholdCrossings,
+  budgetWebhookPayload,
   firedBudgetAlerts,
   noteBudgetAlerts,
 } from '../../services/budget-alerts.js';
@@ -118,5 +120,34 @@ describe('budget alerts (end to end through the request log)', () => {
 
   it('noteBudgetAlerts never throws on a bogus key id', () => {
     expect(() => noteBudgetAlerts(999_999)).not.toThrow();
+  });
+});
+
+describe('budget alert webhook', () => {
+  const saved = process.env.BUDGET_ALERT_WEBHOOK_URL;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.BUDGET_ALERT_WEBHOOK_URL;
+    else process.env.BUDGET_ALERT_WEBHOOK_URL = saved;
+  });
+
+  it('accepts only http(s) URLs', () => {
+    delete process.env.BUDGET_ALERT_WEBHOOK_URL;
+    expect(budgetAlertWebhookUrl()).toBeNull();
+    process.env.BUDGET_ALERT_WEBHOOK_URL = 'file:///etc/passwd';
+    expect(budgetAlertWebhookUrl()).toBeNull();
+    process.env.BUDGET_ALERT_WEBHOOK_URL = ' https://hooks.example.test/abc ';
+    expect(budgetAlertWebhookUrl()).toBe('https://hooks.example.test/abc');
+  });
+
+  it('payload marks the hard threshold as blocked', () => {
+    const payload = budgetWebhookPayload(3, 'prod', 'groq', [
+      { threshold: 0.8, kind: 'requests', used: 80, cap: 100 },
+      { threshold: 1.0, kind: 'tokens', used: 1000, cap: 1000 },
+    ]);
+    expect(payload.type).toBe('freellmapi.key_budget_threshold');
+    expect(payload.thresholds).toEqual([
+      { kind: 'requests', threshold: 0.8, used: 80, cap: 100, blocked: false },
+      { kind: 'tokens', threshold: 1, used: 1000, cap: 1000, blocked: true },
+    ]);
   });
 });

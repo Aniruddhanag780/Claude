@@ -121,9 +121,85 @@ export function noteBudgetAlerts(keyId: number, now = Date.now()): void {
       );
     }
     setSetting(skey, JSON.stringify([...fired, ...fresh.map(c => `${c.kind}:${c.threshold}`)]));
+    dispatchBudgetWebhook(keyId, label, row?.platform ?? null, fresh, now);
   } catch {
     // Alerting is observational; a failure here must never fail a request.
   }
+}
+
+// ── Webhook destination ────────────────────────────────────────────────────
+//
+// BUDGET_ALERT_WEBHOOK_URL (optional, read per fire so it can be set without
+// a code change but needs a restart-free toggle only via redeploy): a POST
+// target for the same alerts the Logs page shows — the LiteLLM
+// `budget_alerts` webhook shape (Slack/Discord work via a workflow). One
+// JSON body per firing batch; fire-and-forget with a short timeout; failures
+// are logged once and swallowed. The URL is operator configuration, not
+// caller input, so no SSRF surface is added beyond what the proxy already
+// trusts (upstream provider endpoints).
+
+export function budgetAlertWebhookUrl(): string | null {
+  const raw = process.env.BUDGET_ALERT_WEBHOOK_URL?.trim();
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return u.protocol === 'https:' || u.protocol === 'http:' ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Build the webhook payload for one firing batch. Pure so it is testable. */
+export function budgetWebhookPayload(
+  keyId: number,
+  label: string,
+  platform: string | null,
+  crossings: BudgetCrossing[],
+  now = Date.now(),
+) {
+  return {
+    type: 'freellmapi.key_budget_threshold',
+    key_id: keyId,
+    label,
+    platform,
+    month: new Date(now).toISOString().slice(0, 7),
+    resets_at: nextMonthResetAt(now),
+    thresholds: crossings.map(c => ({
+      kind: c.kind,
+      threshold: c.threshold,
+      used: c.used,
+      cap: c.cap,
+      blocked: c.threshold >= 1,
+    })),
+  };
+}
+
+function dispatchBudgetWebhook(
+  keyId: number,
+  label: string,
+  platform: string | null,
+  crossings: BudgetCrossing[],
+  now: number,
+): void {
+  const url = budgetAlertWebhookUrl();
+  if (!url) return;
+  // proxyFetch honours the same outbound proxy the rest of the server uses;
+  // import lazily so unit tests without a DB/proxy config stay cheap.
+  void import('../lib/proxy.js')
+    .then(({ proxyFetch }) =>
+      proxyFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(budgetWebhookPayload(keyId, label, platform, crossings, now)),
+        signal: AbortSignal.timeout(10_000),
+      }),
+    )
+    .then(res => {
+      if (!res.ok) providerLog('warn', `[budget] alert webhook answered ${res.status}`, { event: 'key_budget_webhook' });
+    })
+    .catch(() => {
+      providerLog('warn', '[budget] alert webhook delivery failed', { event: 'key_budget_webhook' });
+    });
 }
 
 /** Test/admin helper: alerts fired for a key in a month (for assertions). */
