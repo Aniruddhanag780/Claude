@@ -27,13 +27,6 @@ function insertKey() {
   keyId = Number(result.lastInsertRowid);
 }
 
-function recordSuccess(tokens: number) {
-  getDb().prepare(
-    `INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error)
-     VALUES ('groq', 'llama', ?, 'success', ?, 0, 10, NULL)`,
-  ).run(keyId, tokens);
-}
-
 function alertEntries() {
   return ringSnapshot().filter(e => e.event === 'key_budget_threshold');
 }
