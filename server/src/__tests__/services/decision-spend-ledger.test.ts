@@ -8,11 +8,11 @@ import { seedDecisionModels } from '../helpers/decision-models.js';
 
 // POST /v1/decisions spends real provider quota on every routing turn, but
 // logDecision only wrote decision_requests. The per-key monthly caps (#1158)
-// and GET /v1/usage read key_monthly_usage, which the
-// requests_key_monthly_usage trigger feeds from `requests` — so a capped key
-// never accrued decision spend and served decisions forever past its cap.
-// This is the rerank (#1621/#1627), moderation (#1625) and search (#1648)
-// gap on the decision surface.
+// and GET /v1/usage read key_monthly_usage, which other surfaces feed through
+// their `requests` rows — so a capped key never accrued decision spend and
+// served decisions forever past its cap. Decisions now settle into the ledger
+// directly, without a `requests` row that would double-count chat turns in
+// the dashboard's request analytics.
 
 const realFetch = globalThis.fetch;
 
@@ -45,7 +45,7 @@ const okResponse = () => new Response(JSON.stringify({
   result: { model: 'clef-flash', answers: ANSWERS, usage: { input_tokens: 219, output_tokens: 0 } },
 }), { status: 200 });
 
-describe('decision spend lands in the requests ledger (#1158)', () => {
+describe('decision spend lands in the monthly ledger (#1158)', () => {
   beforeEach(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
@@ -57,34 +57,31 @@ describe('decision spend lands in the requests ledger (#1158)', () => {
     vi.restoreAllMocks();
   });
 
-  it('a served decision writes a success row and counts toward the monthly ledger', async () => {
+  it('a served decision counts toward the monthly ledger without a requests row', async () => {
     const key = addKey('cloudflare');
     globalThis.fetch = vi.fn(async () => okResponse()) as unknown as typeof fetch;
 
     const out = await runDecision(REQUEST);
     expect(out.provider).toBe('cloudflare');
 
-    const row = getDb().prepare(
-      "SELECT platform, model_id, status, request_type FROM requests WHERE key_id = ?",
-    ).get(key) as any;
-    expect(row).toMatchObject({
-      platform: 'cloudflare', status: 'success', request_type: 'decision',
-    });
-    // The trigger on requests feeds key_monthly_usage, which the caps and
-    // /v1/usage read: the decision is now visible to both.
-    expect(getMonthlyUsage(key).requests).toBe(1);
+    // key_monthly_usage is what the caps and /v1/usage read.
+    const usage = getMonthlyUsage(key);
+    expect(usage.requests).toBe(1);
+    expect(usage.tokens).toBeGreaterThan(0);
+    // The decision stays out of the request analytics (decision_requests
+    // already backs the Decisions page).
+    const rows = getDb().prepare('SELECT COUNT(*) AS n FROM requests WHERE key_id = ?').get(key) as { n: number };
+    expect(rows.n).toBe(0);
   });
 
-  it('a failed attempt logs an error row that does NOT count toward usage', async () => {
+  it('a failed attempt does NOT count toward usage', async () => {
     const key = addKey('cloudflare');
     globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ error: { message: 'boom' } }), { status: 500 })) as unknown as typeof fetch;
 
     await expect(runDecision(REQUEST)).rejects.toBeInstanceOf(DecisionError);
 
-    const row = getDb().prepare(
-      "SELECT status, request_type FROM requests WHERE key_id = ?",
-    ).get(key) as any;
-    expect(row).toMatchObject({ status: 'error', request_type: 'decision' });
+    const row = getDb().prepare('SELECT status FROM decision_requests WHERE key_id = ?').get(key) as any;
+    expect(row).toMatchObject({ status: 'error' });
     expect(getMonthlyUsage(key)).toEqual({ requests: 0, tokens: 0 });
   });
 
