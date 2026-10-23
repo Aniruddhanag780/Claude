@@ -15,13 +15,13 @@
  *     in the settings table keyed by month, so a new UTC month re-arms the
  *     alerts for free and no pruning job is needed (one small row per capped
  *     key per month).
- *   - Destination: a structured event in the dashboard's server-log store
+ *   - Destinations: a structured event in the dashboard's server-log store
  *     (Logs page, event=key_budget_threshold), which the operator already
- *     watches. External destinations (webhook/email) are phase 2.
+ *     watches, plus an optional BUDGET_ALERT_WEBHOOK_URL POST (below).
  *
- * The check runs from the request-log commit hook, so it sees every served
- * surface (chat, embeddings, media, moderation, rerank, search, decisions)
- * exactly once per logged request. It is deliberately cheap on the hot path:
+ * The check runs wherever a success settles into the ledger (the request-log
+ * commit hook, the embedding/media/moderation/rerank/search loggers and the
+ * decision logger), so it sees every served surface once per request. It is deliberately cheap on the hot path:
  * one indexed cap read, and the usage read + state write only happen once a
  * key is actually capped; the settings dedup read only after a threshold is
  * already crossed.
@@ -129,8 +129,7 @@ export function noteBudgetAlerts(keyId: number, now = Date.now()): void {
 
 // ── Webhook destination ────────────────────────────────────────────────────
 //
-// BUDGET_ALERT_WEBHOOK_URL (optional, read per fire so it can be set without
-// a code change but needs a restart-free toggle only via redeploy): a POST
+// BUDGET_ALERT_WEBHOOK_URL (optional, read each time an alert fires): a POST
 // target for the same alerts the Logs page shows — the LiteLLM
 // `budget_alerts` webhook shape (Slack/Discord work via a workflow). One
 // JSON body per firing batch; fire-and-forget with a short timeout; failures

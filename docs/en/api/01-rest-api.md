@@ -516,6 +516,9 @@ viewer as provider logs), naming the key, the cap kind, the usage and the reset
 time. Each threshold fires once per key per UTC month, so a key cannot flood the
 log. This mirrors LiteLLM's budget alerts and OpenRouter's per-key spend-limit
 alert: the warning arrives while requests still flow, before the hard `429`.
+Set `BUDGET_ALERT_WEBHOOK_URL` to also POST each alert as JSON
+(`type: freellmapi.key_budget_threshold`) to a webhook, such as a Slack or
+Discord workflow.
 
 Embeddings additionally relay the upstream providers' own back-off. A provider
 that answers `429` is simply skipped for the next one in the family; only when
