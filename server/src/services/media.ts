@@ -11,12 +11,14 @@ import { getDb } from '../db/index.js';
 import { parseRetryAfterMs } from '../providers/base.js';
 import { RetryHintTracker } from '../lib/retry-hint.js';
 import { secondsUntilNextMonth } from './key-budget.js';
+import { noteBudgetAlerts } from './budget-alerts.js';
 import { getClientContext } from '../lib/client-context.js';
 import { reserveProviderCredential } from './provider-credential.js';
 import { proxyFetch } from '../lib/proxy.js';
 import { bearerAuthHeader } from '../lib/credential.js';
 import { assessProviderUrl } from '../lib/url-guard.js';
 import { isOnCooldown, setCooldown } from './ratelimit.js';
+import { markKeyHealthyFromRequest } from './health.js';
 import { SPEECHIFY_BASE_URL, SPEECHIFY_VERSION } from '../providers/speechify.js';
 import { TYPHOON_BASE_URL } from '../providers/typhoon.js';
 import { ELECTRONHUB_BASE_URL } from '../providers/electronhub.js';
@@ -818,6 +820,12 @@ function logMedia(row: Pick<MediaModelRow, 'platform' | 'model_id' | 'modality'>
       .prepare(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
                 VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)`)
       .run(row.platform, row.model_id, keyId, status, latencyMs, error, row.modality, client.ip, client.userAgent, client.agent);
+    // A served media request is evidence the key works, the same as a served
+    // chat request (#1493) or a served search (#1612): stamp last_healthy_at
+    // and lift an 'unknown'/'error' key out of the pool's cold corner.
+    if (status === 'success' && keyId != null) markKeyHealthyFromRequest(keyId);
+    // Soft budget alert (#1158 follow-on), same hook as the chat path.
+    if (status === 'success' && keyId != null) noteBudgetAlerts(keyId);
   } catch (e) {
     console.error('Failed to log media request:', e);
   }

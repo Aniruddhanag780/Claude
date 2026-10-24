@@ -714,17 +714,23 @@
     "monthlyTokenCapLabel": "ಮಾಸಿಕ ಟೋಕನ್ ಮಿತಿ",
     "capUnlimitedPlaceholder": "ಅಪರಿಮಿತ",
     "capEditHint": "ಮಿತಿಗಳು ಪ್ರತಿ ತಿಂಗಳು 1 ರಂದು 00:00 UTC ನಲ್ಲಿ ಮರುಹೊಂದಿಸುತ್ತವೆ. ಅಪರಿಮಿತಕ್ಕೆ ಖಾಲಿ ಬಿಡಿ.",
+    "keyProxyLabel": "Proxy for this key",
+    "keyProxyHint": "Leave blank to keep the current setting. Requests made with this key use this proxy instead of the global one; local and LAN addresses still connect directly.",
+    "keyProxyRemoved": "The proxy is removed when you save, and this key goes back to the global proxy.",
+    "keyProxyUndo": "Undo",
     "monthlyUsageLine": "ಈ ತಿಂಗಳು {requests} ವಿನಂತಿಗಳು, {tokens} ಟೋಕನ್‌ಗಳು",
     "quotaBalanceHint": "{limit} {metric} ಪೈಕಿ {remaining} ಉಳಿದಿದೆ",
-    "quotaBalanceLeft": "{remaining} ಉಳಿದಿದೆ"
-,
+    "quotaBalanceLeft": "{remaining} ಉಳಿದಿದೆ",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
     "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
     "copyGroupHandle": "Copy group handle",
     "groupHandleCopied": "Copied {handle}",
-    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard",
+    "capUsagePercent": "{used} of {cap} ({pct}%)",
+    "capWarning80": "Over 80% of this cap — the server logs a budget alert at this point.",
+    "capExhaustedWarning": "Cap reached — new requests are rejected until the monthly reset."
   },
   "backups": {
     "title": "Backups",
@@ -872,7 +878,9 @@
     "emptyDescription": "ಸರ್ವರ್ ಬರೆಯುತ್ತಿದ್ದಂತೆ ನಮೂದುಗಳು ಇಲ್ಲಿ ಕಾಣಿಸಿಕೊಳ್ಳುತ್ತವೆ. ಔಟ್‌ಪುಟ್ ನಿರೀಕ್ಷಿಸಿದ್ದರೆ ಮಟ್ಟ, ಪೂರೈಕೆದಾರ ಅಥವಾ ಹುಡುಕಾಟ ಫಿಲ್ಟರ್‌ಗಳನ್ನು ವಿಸ್ತರಿಸಿ.",
     "noLevelsTitle": "ಯಾವುದೇ ಮಟ್ಟ ಆಯ್ಕೆಯಾಗಿಲ್ಲ",
     "noLevelsDescription": "ಲಾಗ್ ಔಟ್‌ಪುಟ್ ನೋಡಲು ಕನಿಷ್ಠ ಒಂದು ಮಟ್ಟವನ್ನು ಆನ್ ಮಾಡಿ.",
-    "loadFailed": "ಸರ್ವರ್ ಲಾಗ್ ಅನ್ನು ಲೋಡ್ ಮಾಡಲಾಗಲಿಲ್ಲ."
+    "loadFailed": "ಸರ್ವರ್ ಲಾಗ್ ಅನ್ನು ಲೋಡ್ ಮಾಡಲಾಗಲಿಲ್ಲ.",
+    "eventFilter": "ಘಟನೆ",
+    "allEvents": "ಎಲ್ಲಾ ಘಟನೆಗಳು"
   },
   "playground": {
     "title": "ಆಟದ ಮೈದಾನ",

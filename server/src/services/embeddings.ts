@@ -9,12 +9,14 @@
 // cross-provider redundancy for free.
 import { getDb, getSetting } from '../db/index.js';
 import { secondsUntilNextMonth } from './key-budget.js';
+import { noteBudgetAlerts } from './budget-alerts.js';
 import { parseRetryAfterMs } from '../providers/base.js';
 import { RetryHintTracker, retryAfterSeconds } from '../lib/retry-hint.js';
 import { getClientContext } from '../lib/client-context.js';
 import { reserveProviderCredential } from './provider-credential.js';
 import { proxyFetch } from '../lib/proxy.js';
 import { bearerAuthHeader } from '../lib/credential.js';
+import { markKeyHealthyFromRequest } from './health.js';
 import { customEndpointKeyIds } from './custom-endpoint.js';
 import type { Db } from '../db/types.js';
 import { SPEKA_BASE_URL } from '../providers/speka.js';
@@ -358,6 +360,9 @@ function logEmbeddingRequest(
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
       VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'embedding', ?, ?, ?)
     `).run(row.platform, row.model_id, keyId, status, inputTokens, latencyMs, error, client.ip, client.userAgent, client.agent);
+    // Soft budget alert (#1158 follow-on): the ledger trigger fired with this
+    // row, so compare the caps once. No-op for uncapped keys.
+    if (status === 'success' && keyId != null) noteBudgetAlerts(keyId);
   } catch (e) {
     console.error('Failed to log embedding request:', e);
   }
@@ -408,6 +413,11 @@ export async function runEmbeddings(model: string | undefined, inputs: string[],
       }
       const tokens = out.inputTokens ?? estimateTokens(inputs);
       logEmbeddingRequest(row, credential.id, 'success', tokens, Date.now() - started, null);
+      // A served embedding is evidence the key works, the same as a served
+      // chat request (#1493) or a served search (#1612): stamp last_healthy_at
+      // and lift an 'unknown'/'error' key. Embedding-only keys (and #1459-era
+      // providers that refuse probes) had no success signal at all otherwise.
+      markKeyHealthyFromRequest(credential.id);
       return {
         family,
         platform: row.platform,

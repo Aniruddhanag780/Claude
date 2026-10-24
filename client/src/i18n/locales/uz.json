@@ -714,17 +714,23 @@
     "monthlyTokenCapLabel": "Oylik token chegarasi",
     "capUnlimitedPlaceholder": "Cheksiz",
     "capEditHint": "Chegaralar har oyning 1-sana 00:00 UTC da tiklanadi. Cheksiz uchun bo‘sh qoldiring.",
+    "keyProxyLabel": "Proxy for this key",
+    "keyProxyHint": "Leave blank to keep the current setting. Requests made with this key use this proxy instead of the global one; local and LAN addresses still connect directly.",
+    "keyProxyRemoved": "The proxy is removed when you save, and this key goes back to the global proxy.",
+    "keyProxyUndo": "Undo",
     "monthlyUsageLine": "Bu oy {requests} so‘rov, {tokens} token",
     "quotaBalanceHint": "{limit} {metric} dan {remaining} qoldi",
-    "quotaBalanceLeft": "{remaining} qoldi"
-,
+    "quotaBalanceLeft": "{remaining} qoldi",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
     "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
     "copyGroupHandle": "Copy group handle",
     "groupHandleCopied": "Copied {handle}",
-    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard",
+    "capUsagePercent": "{used} of {cap} ({pct}%)",
+    "capWarning80": "Over 80% of this cap — the server logs a budget alert at this point.",
+    "capExhaustedWarning": "Cap reached — new requests are rejected until the monthly reset."
   },
   "backups": {
     "title": "Backups",
@@ -872,7 +878,9 @@
     "emptyDescription": "Server yozuvlarni yozgani sari ular shu yerda paydo boʻladi. Natija kutgan boʻlsangiz, daraja, provayder yoki qidiruv filtrlarini kengaytiring.",
     "noLevelsTitle": "Daraja tanlanmagan",
     "noLevelsDescription": "Jurnal chiqishini koʻrish uchun kamida bitta darajani yoqing.",
-    "loadFailed": "Server jurnalini yuklab boʻlmadi."
+    "loadFailed": "Server jurnalini yuklab boʻlmadi.",
+    "eventFilter": "Hodisa",
+    "allEvents": "Barcha hodisalar"
   },
   "playground": {
     "title": "O'yin maydonchasi",

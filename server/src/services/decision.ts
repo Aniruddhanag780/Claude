@@ -5,9 +5,11 @@ import { parseRetryAfterMs, parseStatedRetryMs } from '../providers/base.js';
 import { RetryHintTracker } from '../lib/retry-hint.js';
 import { getClientContext } from '../lib/client-context.js';
 import { proxyFetch } from '../lib/proxy.js';
-import { secondsUntilNextMonth } from './key-budget.js';
+import { recordMonthlyUsage, secondsUntilNextMonth } from './key-budget.js';
+import { noteBudgetAlerts } from './budget-alerts.js';
 import { reserveProviderCredential, type ReservedProviderCredential } from './provider-credential.js';
 import { isOnCooldown, setCooldown } from './ratelimit.js';
+import { markKeyHealthyFromRequest } from './health.js';
 
 // Decision models over the key pool.
 //
@@ -283,6 +285,20 @@ function logDecision(row: DecisionModelRow, keyId: number | null, status: 'ok' |
   } catch (e) {
     console.error('Failed to log decision request:', e);
   }
+  // The per-key monthly caps (#1158) and GET /v1/usage read the
+  // key_monthly_usage ledger. Chat, embeddings, media, rerank, moderation and
+  // search settle into it through their `requests` rows; decisions log to
+  // decision_requests, so a served decision settles its spend directly here.
+  // Not a `requests` row: decisions fire every routing turn, and one there
+  // would double every chat turn in the dashboard's request analytics.
+  if (status === 'ok' && keyId != null) {
+    try {
+      recordMonthlyUsage(keyId, inputTokens);
+      noteBudgetAlerts(keyId);
+    } catch (e) {
+      console.error('Failed to settle decision spend:', e);
+    }
+  }
 }
 
 function coolDown(row: DecisionModelRow, keyId: number, e: DecisionError): void {
@@ -352,6 +368,11 @@ export async function runDecision(body: DecisionRequest, opts: DecisionOptions =
       try {
         const out = await ADAPTERS[row.platform]!(credential, row.model_id, body, opts.signal);
         logDecision(row, credential.id, 'ok', Date.now() - started, questionCount, out.usage.input_tokens, clientAgent, null);
+        // A served decision is evidence the key works, the same as a served
+        // chat request (#1493) or search (#1612). Decision routing fires every
+        // turn, so a decision key that serves fine but once got demoted to
+        // 'error' by a blip had no way back into the pool.
+        markKeyHealthyFromRequest(credential.id);
         return { model: row.model_id, provider: row.platform, answers: out.answers, usage: out.usage };
       } catch (err: any) {
         const e = err instanceof DecisionError ? err : new DecisionError(String(err?.message ?? err), 502);

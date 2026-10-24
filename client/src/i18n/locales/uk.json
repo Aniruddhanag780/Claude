@@ -714,17 +714,23 @@
     "monthlyTokenCapLabel": "Місячний ліміт токенів",
     "capUnlimitedPlaceholder": "Без обмежень",
     "capEditHint": "Ліміти скидаються 1-го числа о 00:00 UTC. Залиште порожнім для безліміту.",
+    "keyProxyLabel": "Proxy for this key",
+    "keyProxyHint": "Leave blank to keep the current setting. Requests made with this key use this proxy instead of the global one; local and LAN addresses still connect directly.",
+    "keyProxyRemoved": "The proxy is removed when you save, and this key goes back to the global proxy.",
+    "keyProxyUndo": "Undo",
     "monthlyUsageLine": "{requests} запитів, {tokens} токенів цього місяця",
     "quotaBalanceHint": "Залишилося {remaining} з {limit} {metric}",
-    "quotaBalanceLeft": "Залишилося {remaining}"
-,
+    "quotaBalanceLeft": "Залишилося {remaining}",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
     "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
     "copyGroupHandle": "Copy group handle",
     "groupHandleCopied": "Copied {handle}",
-    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard",
+    "capUsagePercent": "{used} of {cap} ({pct}%)",
+    "capWarning80": "Over 80% of this cap — the server logs a budget alert at this point.",
+    "capExhaustedWarning": "Cap reached — new requests are rejected until the monthly reset."
   },
   "backups": {
     "title": "Backups",
@@ -872,7 +878,9 @@
     "emptyDescription": "Записи з’являтимуться тут, щойно сервер їх запише. Якщо ви очікували вивід, розширте фільтри за рівнем, постачальником або пошуком.",
     "noLevelsTitle": "Рівні не вибрано",
     "noLevelsDescription": "Увімкніть щонайменше один рівень, щоб бачити вивід журналу.",
-    "loadFailed": "Не вдалося завантажити журнал сервера."
+    "loadFailed": "Не вдалося завантажити журнал сервера.",
+    "eventFilter": "Подія",
+    "allEvents": "Усі події"
   },
   "playground": {
     "title": "Дитячий майданчик",

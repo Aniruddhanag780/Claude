@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { initDb, getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
-import { clearAllCooldowns } from '../../services/ratelimit.js';
+import { clearAllCooldowns, isOnCooldown } from '../../services/ratelimit.js';
+import { BraveProvider } from '../../providers/brave.js';
 import {
   runSearch,
   SearchError,
@@ -14,6 +15,7 @@ import {
 import { SEARCH_PLATFORMS as SHARED_SEARCH_PLATFORMS } from '../../../../shared/types.js';
 import { SEARCH_PLATFORMS } from '../../lib/search-platforms.js';
 import { seedSearchEngines } from '../helpers/search-engines.js';
+import { clearLastHealthyStampState } from '../../services/health.js';
 
 const realFetch = globalThis.fetch;
 
@@ -108,6 +110,23 @@ describe('search service', () => {
     expect(logRows()).toEqual([{ engine_id: 'exa-search', platform: 'exa', status: 'ok', result_count: 2 }]);
   });
 
+  it('a served search marks the key as working; a failed one does not (#1493)', async () => {
+    clearLastHealthyStampState();
+    const good = addKey('exa');
+    getDb().prepare("UPDATE api_keys SET status = 'unknown' WHERE id = ?").run(good);
+    mockFetch(() => json({ results: [{ title: 'A', url: 'https://a', text: 'alpha' }] }));
+    await runSearch('q');
+    expect(getDb().prepare('SELECT status, last_healthy_at FROM api_keys WHERE id = ?').get(good))
+      .toMatchObject({ status: 'healthy', last_healthy_at: expect.any(String) });
+
+    getDb().prepare('DELETE FROM api_keys').run();
+    clearAllCooldowns(Number.MAX_SAFE_INTEGER);
+    const bad = addKey('exa');
+    mockFetch(() => json({ error: 'boom' }, 500));
+    await expect(runSearch('q')).rejects.toBeInstanceOf(SearchError);
+    expect(getDb().prepare('SELECT last_healthy_at FROM api_keys WHERE id = ?').get(bad)).toEqual({ last_healthy_at: null });
+  });
+
   it('passes Tavily topic/answer through and keeps its scores', async () => {
     addKey('tavily');
     const fn = mockFetch(() => json({ answer: '42', results: [{ title: 'T', url: 'https://t', content: 'c', score: 0.83 }] }));
@@ -132,6 +151,75 @@ describe('search service', () => {
     expect(calls(fn)[0][0]).toBe('https://api.linkup.so/v1/search');
     expect(bodyOf(calls(fn)[0])).toMatchObject({ q: 'q', depth: 'standard', outputType: 'sourcedAnswer', maxResults: 5 });
     expect(out).toMatchObject({ answer: 'yes', provider: 'linkup', results: [{ title: 'S', url: 'https://s', content: 'src' }] });
+  });
+
+  describe('Brave (#1641)', () => {
+    const badKey = { error: { code: 'SUBSCRIPTION_TOKEN_INVALID', detail: 'The provided subscription token is invalid.', status: 422 }, type: 'ErrorResponse' };
+    beforeEach(() => {
+      getDb().prepare(`
+        INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
+        VALUES ('brave', 'brave-search', 'Brave Search', 'search', -1, 1, 'free monthly credits', '{}')
+      `).run();
+    });
+
+    it('searches web and news with the subscription token and maps hits', async () => {
+      addKey('brave');
+      let fn = mockFetch(() => json({ web: { results: [{ title: 'A &amp; B', url: 'https://a', description: 'alpha' }, { title: 'no url' }] } }));
+      let out = await runSearch('cats & dogs', { maxResults: 3 });
+      const url = new URL(calls(fn)[0][0]);
+      expect(`${url.origin}${url.pathname}`).toBe('https://api.search.brave.com/res/v1/web/search');
+      expect(url.searchParams.get('q')).toBe('cats & dogs');
+      expect(url.searchParams.get('count')).toBe('3');
+      // Brave decorates matched terms with <strong> unless asked not to;
+      // without this the hits carry raw markup every other engine never emits.
+      expect(url.searchParams.get('text_decorations')).toBe('false');
+      expect(new Headers(calls(fn)[0][1].headers).get('x-subscription-token')).toBe('brave-test-key');
+      expect(out).toMatchObject({ provider: 'brave', engine: 'brave-search', results: [{ title: 'A & B', url: 'https://a', content: 'alpha', score: 1 }] });
+
+      fn = mockFetch(() => json({ results: [{ title: 'N', url: 'https://n', description: 'fresh' }] }));
+      out = await runSearch('q', { topic: 'news' });
+      expect(new URL(calls(fn)[0][0]).pathname).toBe('/res/v1/news/search');
+      expect(out.results).toEqual([{ title: 'N', url: 'https://n', content: 'fresh', score: 1 }]);
+    });
+
+    it('benches a key Brave rejects (422 SUBSCRIPTION_TOKEN_INVALID), but not a key whose request was refused (422 VALIDATION)', async () => {
+      const key = addKey('brave');
+      mockFetch(() => json({ error: { code: 'VALIDATION', detail: 'Unable to validate request parameter(s)', status: 422 } }, 422));
+      await expect(runSearch('q', { engine: 'brave-search' })).rejects.toBeInstanceOf(SearchError);
+      expect(isOnCooldown('brave', 'brave-search', key)).toBe(false);
+
+      mockFetch(() => json(badKey, 422));
+      await expect(runSearch('q', { engine: 'brave-search' })).rejects.toBeInstanceOf(SearchError);
+      expect(isOnCooldown('brave', 'brave-search', key)).toBe(true);
+    });
+
+    it('cools a rate-limited key down only for the one-second burst window', async () => {
+      const key = addKey('brave');
+      mockFetch(() => json({ error: { code: 'RATE_LIMITED', detail: 'Request rate limit exceeded for plan' } }, 429));
+      await expect(runSearch('q', { engine: 'brave-search' })).rejects.toBeInstanceOf(SearchError);
+      expect(isOnCooldown('brave', 'brave-search', key)).toBe(true);
+      const later = Date.now() + 2_000;
+      vi.spyOn(Date, 'now').mockReturnValue(later);
+      expect(isOnCooldown('brave', 'brave-search', key)).toBe(false);
+    });
+
+    it('parks a key whose monthly credit is spent (429 QUOTA_LIMITED) for the long credit cooldown', async () => {
+      const key = addKey('brave');
+      mockFetch(() => json({ error: { code: 'QUOTA_LIMITED', detail: 'Request quota limit exceeded for plan' } }, 429));
+      await expect(runSearch('q', { engine: 'brave-search' })).rejects.toBeInstanceOf(SearchError);
+      const later = Date.now() + 60 * 60_000;
+      vi.spyOn(Date, 'now').mockReturnValue(later);
+      expect(isOnCooldown('brave', 'brave-search', key)).toBe(true);
+    });
+
+    it('validates a key with a free no-query request: bad token is invalid, VALIDATION means the key is fine', async () => {
+      const brave = new BraveProvider();
+      mockFetch(() => json(badKey, 422));
+      expect(await brave.validateKey('bad')).toMatchObject({ valid: false });
+      mockFetch(() => json({ error: { code: 'VALIDATION', detail: 'Unable to validate request parameter(s)', status: 422 } }, 422));
+      expect(await brave.validateKey('good')).toBe(true);
+      expect(brave.supportsKeyPolling).toBe(false);
+    });
   });
 
   describe('Parallel (keyless)', () => {
@@ -212,6 +300,64 @@ describe('search service', () => {
         : json({ results: [{ title: 'T', url: 'https://t', content: 'c' }] }));
       const out = await runSearch('q');
       expect(out.provider).toBe('tavily');
+    });
+  });
+
+  describe('Keenable (keyless)', () => {
+    function seedKeenable(): void {
+      getDb().prepare(`
+        INSERT INTO media_models (platform, model_id, display_name, modality, priority, enabled, quota_label, meta_json)
+        VALUES ('keenable', 'keenable-search', 'Keenable Search', 'search', 5, 1, 'Free, no key needed', '{}')
+      `).run();
+    }
+    const hits = { results: [
+      { url: 'https://a', title: 'A &amp; B', description: '', snippet: 'one', published_at: '2026-05-05T00:00:00Z' },
+      { url: 'https://b', title: '', description: '', snippet: 'x'.repeat(2_000) },
+      { url: '', title: 'dropped', description: '', snippet: 'x' },
+    ] };
+
+    it('searches the public endpoint with the stored sentinel and maps snippets', async () => {
+      seedKeenable();
+      addKey('keenable', 'no-key');
+      expect(searchAvailable()).toBe(true);
+      const fn = mockFetch(() => json(hits));
+      const out = await runSearch('node version');
+      const [url, init] = calls(fn)[0];
+      expect(url).toBe('https://api.keenable.ai/v1/search/public');
+      expect((init.headers as Record<string, string>)['X-Keenable-Title']).toBe('freellmapi');
+      expect((init.headers as Record<string, string>)['X-API-Key']).toBeUndefined();
+      expect(bodyOf(calls(fn)[0])).toEqual({ query: 'node version', max_results: 5 });
+      expect(out).toMatchObject({ provider: 'keenable', engine: 'keenable-search' });
+      expect(out.results).toEqual([
+        { title: 'A & B', url: 'https://a', content: 'one', score: 1 },
+        { title: 'https://b', url: 'https://b', content: `${'x'.repeat(1_500)}…`, score: 0.5 },
+      ]);
+    });
+
+    it('uses the keyed endpoint with X-API-Key when a real key is stored', async () => {
+      seedKeenable();
+      addKey('keenable', 'real-keenable-key');
+      const fn = mockFetch(() => json(hits));
+      const out = await runSearch('q', { maxResults: 1 });
+      const [url, init] = calls(fn)[0];
+      expect(url).toBe('https://api.keenable.ai/v1/search');
+      expect((init.headers as Record<string, string>)['X-API-Key']).toBe('real-keenable-key');
+      expect(bodyOf(calls(fn)[0])).toEqual({ query: 'q', max_results: 1 });
+      expect(out.results).toHaveLength(1);
+    });
+
+    it('cools a rate-limited keyless row down and fails over to the next engine', async () => {
+      seedKeenable();
+      addKey('keenable', 'no-key');
+      addKey('tavily');
+      updateSearchEngine(listSearchEngines().find(e => e.engineId === 'keenable-search')!.id, { priority: 0 });
+      const fn = mockFetch(url => url.startsWith('https://api.keenable.ai')
+        ? json({ error: 'Too many requests' }, 429, { 'retry-after': '30' })
+        : json({ results: [{ title: 'T', url: 'https://t', content: 'c' }] }));
+      expect((await runSearch('q')).provider).toBe('tavily');
+      // The benched Keenable row is skipped on the next search.
+      await runSearch('q2');
+      expect(calls(fn).map(c => new URL(c[0]).host)).toEqual(['api.keenable.ai', 'api.tavily.com', 'api.tavily.com']);
     });
   });
 
@@ -340,5 +486,17 @@ describe('decodeEntities', () => {
     expect(decodeEntities('Tom &amp; Jerry &quot;live&quot; &#x2014; &nbsp;ok')).toBe('Tom & Jerry "live" \u2014  ok');
     expect(decodeEntities('&bogus; stays')).toBe('&bogus; stays');
     expect(decodeEntities('plain')).toBe('plain');
+  });
+  it('leaves lone-surrogate entities verbatim instead of corrupting the string', () => {
+    // Obfuscated-email bait on scraped pages renders as a lone surrogate
+    // entity. String.fromCodePoint happily "decodes" it, producing a string
+    // that is not valid UTF-16: JSON.stringify turns it into U+FFFD escapes
+    // and strict encoders/serialisers choke on it. The entity must survive
+    // untouched, exactly like the out-of-range case (&#x110000;).
+    expect(decodeEntities('contact &#xD800; us')).toBe('contact &#xD800; us');
+    expect(decodeEntities('tail &#xDFFF; end')).toBe('tail &#xDFFF; end');
+    expect(decodeEntities('&#65533;?')).toBe('\uFFFD?'); // real replacement char still decodes
+    expect(decodeEntities('&#x110000; too big')).toBe('&#x110000; too big');
+    expect(decodeEntities('&#x1F600; emoji')).toBe('\u{1F600} emoji');
   });
 });

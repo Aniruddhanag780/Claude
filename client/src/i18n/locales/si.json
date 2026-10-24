@@ -714,17 +714,23 @@
     "monthlyTokenCapLabel": "මාසික ටෝකන් සීමාව",
     "capUnlimitedPlaceholder": "සීමා රහිත",
     "capEditHint": "සීමාවන් සෑම මාසයකම 1 වන දා 00:00 UTC ට යළි සකසයි. සීමා රහිතට හිස්ව තබන්න.",
+    "keyProxyLabel": "Proxy for this key",
+    "keyProxyHint": "Leave blank to keep the current setting. Requests made with this key use this proxy instead of the global one; local and LAN addresses still connect directly.",
+    "keyProxyRemoved": "The proxy is removed when you save, and this key goes back to the global proxy.",
+    "keyProxyUndo": "Undo",
     "monthlyUsageLine": "මෙම මාසය ඉල්ලීම් {requests}, ටෝකන් {tokens}",
     "quotaBalanceHint": "{limit} {metric} න් {remaining} ඉතිරියි",
-    "quotaBalanceLeft": "{remaining} ඉතිරියි"
-,
+    "quotaBalanceLeft": "{remaining} ඉතිරියි",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
     "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
     "copyGroupHandle": "Copy group handle",
     "groupHandleCopied": "Copied {handle}",
-    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard",
+    "capUsagePercent": "{used} of {cap} ({pct}%)",
+    "capWarning80": "Over 80% of this cap — the server logs a budget alert at this point.",
+    "capExhaustedWarning": "Cap reached — new requests are rejected until the monthly reset."
   },
   "backups": {
     "title": "Backups",
@@ -872,7 +878,9 @@
     "emptyDescription": "සේවාදායකය ලියන පරිදි ඇතුළත් කිරීම් මෙහි දිස්වේ. ප්‍රතිදානයක් අපේක්ෂා කළේ නම් මට්ටම, සපයන්නා හෝ සෙවුම් පෙරහන් පුළුල් කරන්න.",
     "noLevelsTitle": "මට්ටම් තෝරා නැත",
     "noLevelsDescription": "ලොග ප්‍රතිදානය බැලීමට අවම වශයෙන් එක් මට්ටමක් සක්‍රීය කරන්න.",
-    "loadFailed": "සේවාදායක ලොගය පූරණය කළ නොහැකි විය."
+    "loadFailed": "සේවාදායක ලොගය පූරණය කළ නොහැකි විය.",
+    "eventFilter": "සිදුවීම",
+    "allEvents": "සිදුවීම් සියල්ල"
   },
   "playground": {
     "title": "ක්රීඩා පිටිය",
