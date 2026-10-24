@@ -1,5 +1,4 @@
 import { getDb, getSetting, setSetting } from '../db/index.js';
-import { isCloudflareAccountDailyBlocked } from './cloudflare-daily-quota.js';
 import { getProvider, hasProvider, resolveProvider } from '../providers/index.js';
 import { decrypt } from '../lib/crypto.js';
 import { decryptProxyUrl } from '../lib/key-proxy.js';
@@ -1687,8 +1686,6 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
       continue;
     }
 
-    if (entry.platform === 'cloudflare' && isCloudflareAccountDailyBlocked(decryptedKey)) { note('cooldown'); continue; }
-
     const resolvedProvider = entry.platform === 'custom'
       ? resolveProvider('custom', key.base_url)
       : provider;
@@ -1757,8 +1754,8 @@ export function hasOtherUsableKey(modelDbId: number, excludingKeyId: number, ski
 
   const limits = { rpm: m.rpm_limit, rpd: m.rpd_limit, tpm: m.tpm_limit, tpd: m.tpd_limit };
   const keys = db.prepare(
-    "SELECT id, model_scope_json, encrypted_key, iv, auth_tag FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
-  ).all(m.platform) as { id: number; model_scope_json: string | null; encrypted_key: string; iv: string; auth_tag: string }[];
+    "SELECT id, model_scope_json FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
+  ).all(m.platform) as { id: number; model_scope_json: string | null }[];
 
   // Keys of the model's own custom endpoint (#212, #619); a key belonging to a
   // DIFFERENT endpoint cannot serve it, so it doesn't count as an alternative.
@@ -1775,10 +1772,6 @@ export function hasOtherUsableKey(modelDbId: number, excludingKeyId: number, ski
     if (skipKeys?.has(`${m.platform}:${m.model_id}:${k.id}`)) continue;
     if (isOnCooldown(m.platform, m.model_id, k.id)) continue;
     if (!canUseProvider(m.platform, k.id)) continue;
-    if (m.platform === 'cloudflare') {
-      try { if (isCloudflareAccountDailyBlocked(cachedDecrypt(k.id, k.encrypted_key, k.iv, k.auth_tag))) continue; }
-      catch { continue; }
-    }
     if (!canUseProviderMinute(m.platform, k.id)) continue;
     if (!canMakeRequest(m.platform, m.model_id, k.id, limits)) continue;
     // A per-minute token spike on the failed key doesn't mean a fresh key lacks

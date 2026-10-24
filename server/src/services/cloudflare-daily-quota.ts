@@ -1,29 +1,71 @@
-import { createHash } from 'node:crypto';
-import { getSetting, setSetting } from '../db/index.js';
+import { getDb } from '../db/index.js';
+import { decrypt } from '../lib/crypto.js';
+import { setCooldown, type CooldownSource } from './ratelimit.js';
 
-const DAY_MS = 86_400_000;
-const PREFIX = 'cloudflare_daily_quota:';
+// Cloudflare Workers AI meters its free 10K neurons/day per ACCOUNT: every
+// @cf/* model and every API token of one account draw on the same pool. The
+// normal daily-quota bench only parks the one model+key that hit the 429, so
+// the router kept walking the account's sibling models and tokens into the
+// same "daily free allocation" wall all day.
+//
+// When that 429 arrives we bench every enabled Cloudflare model on every key
+// of the same account, with the same duration and provenance the failing route
+// just got (cooldownDecisionForError: next UTC midnight, an explicit
+// Retry-After, the operator's ceiling). They are ordinary cooldown rows, so
+// they show on the Keys page, "Clear cooldowns" lifts them, and keys of a
+// different Cloudflare account stay available for fallback.
 
-function accountSetting(apiKey: string): string | null {
+/** Account id of a Cloudflare key ("account_id:api_token"), or null. */
+export function cloudflareAccountId(apiKey: string): string | null {
   const colon = apiKey.indexOf(':');
   if (colon <= 0 || colon === apiKey.length - 1) return null;
-  // Account identity, not token identity. Never persist the raw account ID or token.
-  return PREFIX + createHash('sha256').update(apiKey.slice(0, colon).toLowerCase()).digest('hex');
+  return apiKey.slice(0, colon).toLowerCase();
 }
 
-export function isCloudflareAccountDailyBlocked(apiKey: string, now = Date.now()): boolean {
-  const key = accountSetting(apiKey);
-  return key !== null && Number(getSetting(key) ?? 0) > now;
+/** Only a Workers AI daily *neurons* 429 means the whole account is spent. */
+export function isCloudflareNeuronsExhausted(err: { status?: number; message?: string } | null | undefined): boolean {
+  const msg = err?.message ?? '';
+  return err?.status === 429 && /daily free allocation/i.test(msg) && /neurons/i.test(msg);
 }
 
-/** Only a verified Workers AI daily *neurons* 429 blocks the whole account. */
-export function recordCloudflareAccountDailyExhaustion(apiKey: string, err: { status?: number; message?: string; retryAfterMs?: number }, now = Date.now()): boolean {
-  if (err?.status !== 429 || !/daily free allocation/i.test(err.message ?? '') || !/neurons/i.test(err.message ?? '')) return false;
-  const key = accountSetting(apiKey);
-  if (!key) return false;
-  const nextUtcMidnight = Math.floor(now / DAY_MS) * DAY_MS + DAY_MS;
-  const retryAfter = Number.isFinite(err.retryAfterMs) && (err.retryAfterMs ?? 0) > 0 ? err.retryAfterMs! : 0;
-  const until = Math.max(nextUtcMidnight, now + retryAfter, Number(getSetting(key) ?? 0));
-  setSetting(key, String(until));
-  return true;
+/**
+ * Bench the whole Cloudflare account behind `apiKey` after a daily neurons
+ * 429. Returns the number of model+key cooldowns written (0 when the error is
+ * not a neurons exhaustion or the key has no account id).
+ */
+export function benchCloudflareAccount(
+  apiKey: string,
+  err: { status?: number; message?: string } | null | undefined,
+  durationMs: number,
+  source: CooldownSource,
+): number {
+  if (!isCloudflareNeuronsExhausted(err)) return 0;
+  const account = cloudflareAccountId(apiKey);
+  if (!account) return 0;
+
+  const db = getDb();
+  const keys = db.prepare(
+    "SELECT id, encrypted_key, iv, auth_tag FROM api_keys WHERE platform = 'cloudflare' AND enabled = 1",
+  ).all() as { id: number; encrypted_key: string; iv: string; auth_tag: string }[];
+  const keyIds = keys.filter(k => {
+    try {
+      return cloudflareAccountId(decrypt(k.encrypted_key, k.iv, k.auth_tag)) === account;
+    } catch {
+      return false; // undecryptable row: not ours to bench
+    }
+  }).map(k => k.id);
+  if (keyIds.length === 0) return 0;
+
+  const models = db.prepare(
+    "SELECT model_id FROM models WHERE platform = 'cloudflare' AND enabled = 1",
+  ).all() as { model_id: string }[];
+
+  let benched = 0;
+  for (const keyId of keyIds) {
+    for (const { model_id } of models) {
+      setCooldown('cloudflare', model_id, keyId, durationMs, source);
+      benched++;
+    }
+  }
+  return benched;
 }
