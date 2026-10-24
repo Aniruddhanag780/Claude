@@ -22,8 +22,9 @@ import { convertDocumentBlock, documentRejectionMessage } from '../lib/anthropic
 import { isClientAbortError, newClientAbortError, newHedgeAbortError, isUpstreamClassificationOutput } from '../lib/error-classify.js';
 import { logRequest } from '../lib/request-log.js';
 import { extractApiToken, timingSafeStringEqual, getStickyModel, setStickyModel } from './proxy.js';
-import { runFallbackLoop, newFallbackState, fallbackRoutingTokens, recordUpstreamSuccess, type ExhaustionBody, setFallbackHeaders, setExhaustionHeaders, type AttemptRecord, type FallbackState } from '../lib/fallback-loop.js';
+import { runFallbackLoop, newFallbackState, fallbackRoutingTokens, recordUpstreamSuccess, type ExhaustionBody, setFallbackHeaders, setExhaustionHeaders, type AttemptRecord, type FallbackState, REASONING_HOLD_MAX_MS } from '../lib/fallback-loop.js';
 import { routedViaValue } from '../lib/header-value.js';
+import { startStreamKeepalive, streamKeepaliveMs } from '../lib/stream-keepalive.js';
 import { applyTokenBudget, tokenBudgetMessage } from '../lib/guardrails.js';
 import { resolveAnthropicModel, claudeFamilyDiscoveryEntries } from '../services/anthropic-map.js';
 import { isUnifyEnabled, getModelGroups, resolveRequestedIdForDispatch } from '../services/model-groups.js';
@@ -880,11 +881,7 @@ async function streamCompletion(
 
   const ensureMessageStart = () => {
     if (messageStarted) return;
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Routed-Via', routedViaValue(route.platform, route.modelId));
-    setFallbackHeaders(res, ctx.attempt, ctx.attemptLog);
+    sendSseHeaders();
     // Committed: the answer is on its way, so the retry budget must no longer
     // cancel this attempt (it could not fail over now anyway).
     ctx.disarmHedge();
@@ -899,6 +896,37 @@ async function streamCompletion(
     messageStarted = true;
   };
 
+  // Send the SSE headers once. Split out of ensureMessageStart so the
+  // #1642 keep-alive can commit the response with the protocol's own content-
+  // free `ping` event while the reasoning buffer is still filling, without
+  // sending message_start early.
+  let headersSentEarly = false;
+  const sendSseHeaders = () => {
+    if (headersSentEarly) return;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Routed-Via', routedViaValue(route.platform, route.modelId));
+    setFallbackHeaders(res, ctx.attempt, ctx.attemptLog);
+    headersSentEarly = true;
+  };
+
+  // #1642: optional heartbeat for the silent reasoning window. The Anthropic
+  // streaming protocol carries a native ping event, so no fake frame is
+  // needed. Once it fires the attempt is committed to the wire and can no
+  // longer fail over invisibly — that is the trade STREAM_KEEPALIVE_MS opts
+  // into (off by default).
+  let streamSettled = false;
+  const keepaliveStop = startStreamKeepalive(streamKeepaliveMs(),
+    () => streamSettled,
+    () => {
+      sendSseHeaders();
+      // Bytes on the wire = the response can no longer fail over invisibly;
+      // stop the retry budget from cancelling it.
+      ctx.disarmHedge();
+      writeSse(res, 'ping', { type: 'ping' });
+    });
+
   // Reasoning output (delta.reasoning_content from providers / the <think>
   // extractor, delta.reasoning from Ollama-style upstreams) is buffered and
   // emitted as one complete thinking block right before the first text/tool
@@ -906,6 +934,7 @@ async function streamCompletion(
   // point where it was: a stream that produces ONLY reasoning and dies still
   // fails over invisibly, exactly like the OpenAI surface's preamble hold.
   let reasoningBuf = '';
+  let quietSince = Date.now(); // last time the client heard from this attempt
   const flushThinking = () => {
     if (reasoningBuf.length === 0) return;
     const idx = nextIndex++;
@@ -969,6 +998,12 @@ async function streamCompletion(
       // `reasoning`); the shared <think> extractor emits reasoning_content.
       const reasoningDelta = choice.delta?.reasoning_content ?? choice.delta?.reasoning;
       if (typeof reasoningDelta === 'string' && reasoningDelta.length > 0) reasoningBuf += reasoningDelta;
+      // #1642: long reasoning with nothing streamed yet: commit and ping.
+      if (reasoningBuf.length > 0 && !textBlockOpen && Date.now() - quietSince >= REASONING_HOLD_MAX_MS) {
+        ensureMessageStart();
+        writeSse(res, 'ping', { type: 'ping' });
+        quietSince = Date.now();
+      }
 
       const text = typeof choice.delta?.content === 'string' ? choice.delta.content : '';
       if (text.length === 0) continue;
@@ -1034,10 +1069,11 @@ async function streamCompletion(
     // Opt-in schema verdict, same rule as the non-streaming surface above and
     // as /chat/completions: this is the surface the silent failure hurt most,
     // and Claude Code streams. Placed after the dialect rescue so a rescued
-    // call is judged too, and gated on `!messageStarted` — once message_start
-    // has gone out there is no failing over, and tearing the SSE stream down
-    // would be worse for the client than a tool_use the schema dislikes.
-    if (isToolArgumentValidationEnabled() && !messageStarted && completedCalls.length > 0) {
+    // call is judged too, and gated on `!textBlockOpen`: once text has gone
+    // out there is no failing over, and tearing the SSE stream down would be
+    // worse for the client than a tool_use the schema dislikes. A #1642 early
+    // commit sent only pings, so a bad call there ends in the catch's error event.
+    if (isToolArgumentValidationEnabled() && !textBlockOpen && completedCalls.length > 0) {
       const invalid = invalidToolCallReasons(
         completedCalls.map(c => ({ function: { name: c.name, arguments: c.arguments } })),
         schemas,
@@ -1045,9 +1081,10 @@ async function streamCompletion(
       if (invalid.length > 0) throw invalidToolArgumentsError(route.displayName, invalid);
     }
 
-    // Nothing usable came out — fail over (message_start was never sent, so the
-    // client never saw this attempt).
-    if (!messageStarted && completedCalls.length === 0) {
+    // Nothing usable came out — fail over (normally message_start was never sent,
+    // so the client never saw this attempt; after a #1642 early commit the
+    // catch below turns this into the mid-stream error event).
+    if (!textBlockOpen && completedCalls.length === 0) {
       // Disconnect before the commit point: the pump loop broke with nothing
       // accumulated because the CLIENT left, not because the provider failed —
       // benching a healthy model+key for it was wrong. StreamAlreadyStarted
@@ -1107,7 +1144,10 @@ async function streamCompletion(
     // stops the ladder without benching or an error log row (the socket is
     // gone; nothing to render).
     if (isClientAbortError(err)) throw err;
-    if (messageStarted) {
+    // messageStarted = real content went out. headersSentEarly also counts: a
+    // #1642 keep-alive ping flushed the SSE headers, so this attempt is on the
+    // wire and can no longer fail over invisibly.
+    if (messageStarted || headersSentEarly) {
       // Real payload already reached the client — finish the SSE response
       // honestly instead of leaving Claude Code hanging, and stop the retry loop.
       writeSse(res, 'error', { type: 'error', error: { type: 'api_error', message: `Provider error (${route.displayName}): stream interrupted` } });
@@ -1117,6 +1157,11 @@ async function streamCompletion(
     }
     // Headers never sent — bubble to the outer loop for failover.
     throw err;
+  } finally {
+    // #1642: this attempt is over whichever path it left by — the keep-alive
+    // interval must not outlive it.
+    streamSettled = true;
+    keepaliveStop();
   }
 }
 

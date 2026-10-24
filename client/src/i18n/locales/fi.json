@@ -720,15 +720,17 @@
     "keyProxyUndo": "Undo",
     "monthlyUsageLine": "{requests} pyyntöä, {tokens} tokenia tässä kuussa",
     "quotaBalanceHint": "{remaining}/{limit} {metric} jäljellä",
-    "quotaBalanceLeft": "{remaining} jäljellä"
-,
+    "quotaBalanceLeft": "{remaining} jäljellä",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
     "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
     "copyGroupHandle": "Copy group handle",
     "groupHandleCopied": "Copied {handle}",
-    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard",
+    "capUsagePercent": "{used} of {cap} ({pct}%)",
+    "capWarning80": "Over 80% of this cap — the server logs a budget alert at this point.",
+    "capExhaustedWarning": "Cap reached — new requests are rejected until the monthly reset."
   },
   "backups": {
     "title": "Backups",
@@ -876,7 +878,9 @@
     "emptyDescription": "Merkinnät ilmestyvät tähän sitä mukaa kun palvelin kirjoittaa niitä. Laajenna taso-, palveluntarjoaja- tai hakusuodattimia, jos odotit tulostetta.",
     "noLevelsTitle": "Ei valittuja tasoja",
     "noLevelsDescription": "Valitse vähintään yksi taso nähdäksesi lokitulosteen.",
-    "loadFailed": "Palvelimen lokia ei voitu ladata."
+    "loadFailed": "Palvelimen lokia ei voitu ladata.",
+    "eventFilter": "Tapahtuma",
+    "allEvents": "Kaikki tapahtumat"
   },
   "playground": {
     "title": "Leikkipaikka",

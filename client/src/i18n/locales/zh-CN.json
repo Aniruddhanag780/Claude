@@ -727,7 +727,10 @@
     "groupHandleHint": "在模型 id 后加 #{handle} 可只路由到该分组,例如 custom:<model>#{handle}",
     "copyGroupHandle": "复制分组标识",
     "groupHandleCopied": "已复制 {handle}",
-    "groupHandleCopyFailed": "无法复制到剪贴板"
+    "groupHandleCopyFailed": "无法复制到剪贴板",
+    "capUsagePercent": "{used} of {cap} ({pct}%)",
+    "capWarning80": "Over 80% of this cap — the server logs a budget alert at this point.",
+    "capExhaustedWarning": "Cap reached — new requests are rejected until the monthly reset."
   },
   "backups": {
     "title": "备份",
@@ -875,7 +878,9 @@
     "emptyDescription": "服务器写入日志时，条目会显示在这里。如果预期会有输出，请放宽级别、提供方或搜索筛选条件。",
     "noLevelsTitle": "未选择级别",
     "noLevelsDescription": "至少启用一个级别才能查看日志输出。",
-    "loadFailed": "无法加载服务器日志。"
+    "loadFailed": "无法加载服务器日志。",
+    "eventFilter": "事件",
+    "allEvents": "全部事件"
   },
   "playground": {
     "title": "试验场",

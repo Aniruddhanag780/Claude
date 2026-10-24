@@ -720,15 +720,17 @@
     "keyProxyUndo": "Undo",
     "monthlyUsageLine": "{requests} Anfragen, {tokens} Tokens diesen Monat",
     "quotaBalanceHint": "{remaining} von {limit} {metric} übrig",
-    "quotaBalanceLeft": "{remaining} übrig"
-,
+    "quotaBalanceLeft": "{remaining} übrig",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
     "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
     "copyGroupHandle": "Copy group handle",
     "groupHandleCopied": "Copied {handle}",
-    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard",
+    "capUsagePercent": "{used} of {cap} ({pct}%)",
+    "capWarning80": "Over 80% of this cap — the server logs a budget alert at this point.",
+    "capExhaustedWarning": "Cap reached — new requests are rejected until the monthly reset."
   },
   "backups": {
     "title": "Backups",
@@ -876,7 +878,9 @@
     "emptyDescription": "Einträge erscheinen hier, sobald der Server sie schreibt. Erweitern Sie die Filter für Ebene, Anbieter oder Suche, wenn Sie eine Ausgabe erwartet haben.",
     "noLevelsTitle": "Keine Ebene ausgewählt",
     "noLevelsDescription": "Schalten Sie mindestens eine Ebene ein, um die Protokollausgabe zu sehen.",
-    "loadFailed": "Das Serverprotokoll konnte nicht geladen werden."
+    "loadFailed": "Das Serverprotokoll konnte nicht geladen werden.",
+    "eventFilter": "Ereignis",
+    "allEvents": "Alle Ereignisse"
   },
   "playground": {
     "title": "Spielplatz",

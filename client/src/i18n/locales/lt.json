@@ -720,15 +720,17 @@
     "keyProxyUndo": "Undo",
     "monthlyUsageLine": "{requests} užklausos, {tokens} žetonai šį mėnesį",
     "quotaBalanceHint": "Liko {remaining} iš {limit} {metric}",
-    "quotaBalanceLeft": "Liko {remaining}"
-,
+    "quotaBalanceLeft": "Liko {remaining}",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
     "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
     "copyGroupHandle": "Copy group handle",
     "groupHandleCopied": "Copied {handle}",
-    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard",
+    "capUsagePercent": "{used} of {cap} ({pct}%)",
+    "capWarning80": "Over 80% of this cap — the server logs a budget alert at this point.",
+    "capExhaustedWarning": "Cap reached — new requests are rejected until the monthly reset."
   },
   "backups": {
     "title": "Backups",
@@ -876,7 +878,9 @@
     "emptyDescription": "Įrašai atsiras čia, kai serveris juos užrašys. Jei tikėjotės rezultatų, išplėskite lygio, tiekėjo ar paieškos filtrus.",
     "noLevelsTitle": "Nepasirinktas nė vienas lygis",
     "noLevelsDescription": "Įjunkite bent vieną lygį, kad matytumėte žurnalo įrašus.",
-    "loadFailed": "Nepavyko įkelti serverio žurnalo."
+    "loadFailed": "Nepavyko įkelti serverio žurnalo.",
+    "eventFilter": "Įvykis",
+    "allEvents": "Visi įvykiai"
   },
   "playground": {
     "title": "Žaidimų aikštelė",

@@ -720,15 +720,17 @@
     "keyProxyUndo": "Undo",
     "monthlyUsageLine": "Arịrịọ {requests}, token {tokens} ọnwa a",
     "quotaBalanceHint": "{remaining} n'ime {limit} {metric} fọdụrụ",
-    "quotaBalanceLeft": "{remaining} fọdụrụ"
-,
+    "quotaBalanceLeft": "{remaining} fọdụrụ",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
     "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
     "copyGroupHandle": "Copy group handle",
     "groupHandleCopied": "Copied {handle}",
-    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard",
+    "capUsagePercent": "{used} of {cap} ({pct}%)",
+    "capWarning80": "Over 80% of this cap — the server logs a budget alert at this point.",
+    "capExhaustedWarning": "Cap reached — new requests are rejected until the monthly reset."
   },
   "backups": {
     "title": "Backups",
@@ -876,7 +878,9 @@
     "emptyDescription": "Ihe ndekọ na-apụta ebe a ka sava na-ede ha. Gbasaa nzacha ọkwa, onye na-eweta ma ọ bụ ọchụchọ ma ọ bụrụ na ị tụrụ anya nsonaazụ.",
     "noLevelsTitle": "Ahọrọghị ọkwa ọ bụla",
     "noLevelsDescription": "Gbanye ma ọ dịkarịa ala otu ọkwa ka ị hụ ihe ndekọ.",
-    "loadFailed": "Enweghị ike ibugo ndekọ sava."
+    "loadFailed": "Enweghị ike ibugo ndekọ sava.",
+    "eventFilter": "Ihe omume",
+    "allEvents": "Ihe omume niile"
   },
   "playground": {
     "title": "Ebe egwuregwu",

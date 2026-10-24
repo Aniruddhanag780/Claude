@@ -720,15 +720,17 @@
     "keyProxyUndo": "Undo",
     "monthlyUsageLine": "በዚህ ወር {requests} ጥያቄዎች፣ {tokens} ቶከኖች",
     "quotaBalanceHint": "ከ{limit} {metric} {remaining} ቀርቷል",
-    "quotaBalanceLeft": "{remaining} ቀርቷል"
-,
+    "quotaBalanceLeft": "{remaining} ቀርቷል",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
     "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
     "copyGroupHandle": "Copy group handle",
     "groupHandleCopied": "Copied {handle}",
-    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard",
+    "capUsagePercent": "{used} of {cap} ({pct}%)",
+    "capWarning80": "Over 80% of this cap — the server logs a budget alert at this point.",
+    "capExhaustedWarning": "Cap reached — new requests are rejected until the monthly reset."
   },
   "backups": {
     "title": "Backups",
@@ -876,7 +878,9 @@
     "emptyDescription": "አገልጋዩ ሲጽፋቸው ግቤቶች እዚህ ይታያሉ። ውጤት የጠበቁ ከሆነ የደረጃ፣ የአቅራቢ ወይም የፍለጋ ማጣሪያዎችን ያስፉ።",
     "noLevelsTitle": "ምንም ደረጃ አልተመረጠም",
     "noLevelsDescription": "የመዝገብ ውጤትን ለማየት ቢያንስ አንድ ደረጃ ያብሩ።",
-    "loadFailed": "የአገልጋዩን መዝገብ መጫን አልተቻለም።"
+    "loadFailed": "የአገልጋዩን መዝገብ መጫን አልተቻለም።",
+    "eventFilter": "ክስተት",
+    "allEvents": "ሁሉም ክስተቶች"
   },
   "playground": {
     "title": "የመጫወቻ ሜዳ",

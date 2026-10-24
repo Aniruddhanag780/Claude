@@ -45,6 +45,26 @@ describe('key parser', () => {
     ]);
   });
 
+  it('drops an opening quote whose closing quote was lost', () => {
+    // Editor auto-quoting or a truncated paste yields `KEY="sk-abc` — the
+    // credential must not import with the `"` glued to its front.
+    expect(parseDotEnv('OPENAI_API_KEY="sk-abc123')).toEqual([
+      { key: 'OPENAI_API_KEY', value: 'sk-abc123' },
+    ]);
+    expect(parseDotEnv("GROQ_API_KEY='gsk-abc123")).toEqual([
+      { key: 'GROQ_API_KEY', value: 'gsk-abc123' },
+    ]);
+    // ...and the same line with a trailing inline comment.
+    expect(parseDotEnv('OPENAI_API_KEY="sk-abc123 # primary')).toEqual([
+      { key: 'OPENAI_API_KEY', value: 'sk-abc123' },
+    ]);
+    // The end-to-end import path: the value feeds the router as-is.
+    const result = parseKeysFromFile('GROQ_API_KEY="gsk_te...7890', '.env');
+    expect(result.keys).toEqual([
+      expect.objectContaining({ rawKey: 'GROQ_API_KEY=gsk_te...7890', platform: 'groq' }),
+    ]);
+  });
+
   it('parses flat JSON string values', () => {
     expect(parseJson(JSON.stringify({ MISTRAL_API_KEY: 'mist-test', PORT: 3001 }))).toEqual([
       { key: 'MISTRAL_API_KEY', value: 'mist-test' },
@@ -241,6 +261,18 @@ describe('key parser', () => {
       { key: 'GROQ_KEY', value: 'gsk-abc', platform: 'groq', label: 'work, primary' },
       { key: 'GOOGLE_KEY', value: 'AIza-test', platform: 'google', label: 'say "hi"' },
     ]);
+  });
+
+  it('strips the formula-guard quote from base_url as well as the label', () => {
+    // What GET /api/keys/export?format=csv writes when a custom endpoint's
+    // base_url opens with '=' — the importer has to undo the guard on the
+    // fourth column too, or the endpoint re-imports as a broken "'=..." URL.
+    const csv = 'platform,key,label,base_url\n' +
+      '"custom","sk-local","\'=HYPERLINK(""x"")","\'=HYPERLINK(""http://evil"")"\n';
+    const rows = parseCsv(csv);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.label).toBe('=HYPERLINK("x")');
+    expect(rows[0]!.baseUrl).toBe('=HYPERLINK("http://evil")');
   });
 
   it('round-trips a full export through parseKeysFromFile', () => {

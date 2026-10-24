@@ -720,15 +720,17 @@
     "keyProxyUndo": "Undo",
     "monthlyUsageLine": "{requests} permintaan, {tokens} token bulan ini",
     "quotaBalanceHint": "Baki {remaining} daripada {limit} {metric}",
-    "quotaBalanceLeft": "Baki {remaining}"
-,
+    "quotaBalanceLeft": "Baki {remaining}",
     "groupLabel": "Group",
     "groupLabelPlaceholder": "e.g. Relays, Work…",
     "groupLabelHint": "Optional: endpoints in the same group are listed together, and a request can stay inside the group with custom:<model>#<group>. Leave blank for the default Custom group.",
     "groupHandleHint": "Add #{handle} after a model id to route only to this group, e.g. custom:<model>#{handle}",
     "copyGroupHandle": "Copy group handle",
     "groupHandleCopied": "Copied {handle}",
-    "groupHandleCopyFailed": "Couldn't copy to the clipboard"
+    "groupHandleCopyFailed": "Couldn't copy to the clipboard",
+    "capUsagePercent": "{used} of {cap} ({pct}%)",
+    "capWarning80": "Over 80% of this cap — the server logs a budget alert at this point.",
+    "capExhaustedWarning": "Cap reached — new requests are rejected until the monthly reset."
   },
   "backups": {
     "title": "Backups",
@@ -876,7 +878,9 @@
     "emptyDescription": "Entri akan muncul di sini apabila pelayan menulisnya. Luaskan penapis aras, penyedia atau carian jika anda menjangkakan ada output.",
     "noLevelsTitle": "Tiada aras dipilih",
     "noLevelsDescription": "Hidupkan sekurang-kurangnya satu aras untuk melihat output log.",
-    "loadFailed": "Tidak dapat memuatkan log pelayan."
+    "loadFailed": "Tidak dapat memuatkan log pelayan.",
+    "eventFilter": "Acara",
+    "allEvents": "Semua acara"
   },
   "playground": {
     "title": "Taman Permainan",

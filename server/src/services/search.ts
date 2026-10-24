@@ -6,6 +6,7 @@ import { proxyFetch } from '../lib/proxy.js';
 import { isSearchPlatform } from '../lib/search-platforms.js';
 import { TAVILY_BASE_URL } from '../providers/tavily.js';
 import { SERPSEARCH_BASE_URL } from '../providers/serpsearch.js';
+import { BRAVE_BASE_URL, BRAVE_BAD_KEY_CODE } from '../providers/brave.js';
 import { EXA_BASE_URL } from '../providers/exa.js';
 import { FIRECRAWL_BASE_URL } from '../providers/firecrawl.js';
 import { LINKUP_BASE_URL } from '../providers/linkup.js';
@@ -14,6 +15,7 @@ import { KEENABLE_APP_TITLE, KEENABLE_BASE_URL } from '../providers/keenable.js'
 import { isAnonymousCredential } from '../lib/credential.js';
 import { randomUUID } from 'node:crypto';
 import { secondsUntilNextMonth } from './key-budget.js';
+import { noteBudgetAlerts } from './budget-alerts.js';
 import { reserveProviderCredential, type ReservedProviderCredential } from './provider-credential.js';
 import { isOnCooldown, setCooldown } from './ratelimit.js';
 import { markKeyHealthyFromRequest } from './health.js';
@@ -315,6 +317,36 @@ const ADAPTERS: Record<string, Adapter> = {
     }));
     return { results: keepHits(hits).slice(0, n) };
   },
+  // Brave: a bad key is a 422 carrying BRAVE_BAD_KEY_CODE (mapped to 401 so
+  // coolDown benches it), a QUOTA_LIMITED 429 is spent credit (mapped to 402),
+  // and any other 429 is its 1-second burst window.
+  brave: async (cred, query, opts, n) => {
+    const news = opts.topic === 'news';
+    const url = new URL(`${BRAVE_BASE_URL}/${news ? 'news' : 'web'}/search`);
+    url.searchParams.set('q', query);
+    url.searchParams.set('count', String(n));
+    let parsed: { web?: { results?: unknown }; results?: unknown } | null;
+    try {
+      parsed = await upstream(url.toString(), 'brave', {
+        method: 'GET', redirect: 'error', headers: { 'X-Subscription-Token': cred.key, Accept: 'application/json' },
+      }, opts.signal) as typeof parsed;
+    } catch (e) {
+      if (!(e instanceof SearchError)) throw e;
+      if (e.status === 422 && e.message.includes(BRAVE_BAD_KEY_CODE)) throw new SearchError(e.message, 401);
+      // A 429 for a spent monthly allowance (QUOTA_LIMITED) is the credits-
+      // spent case, not a burst: park the key like a 402 instead of retrying
+      // it every second until the month resets.
+      if (e.status === 429 && /quota/i.test(e.message)) throw new SearchError(e.message, 402);
+      // Brave sends no Retry-After; its burst window is one second.
+      if (e.status === 429) throw new SearchError(e.message, 429, undefined, e.retryAfterMs ?? 1_000);
+      throw e;
+    }
+    const rows = news ? parsed?.results : parsed?.web?.results;
+    const hits = (Array.isArray(rows) ? rows : []).filter((r): r is Record<string, unknown> => !!r && typeof r === 'object').map(r => ({
+      title: str(r.title), url: str(r.url), content: str(r.description),
+    }));
+    return { results: keepHits(hits).slice(0, n) };
+  },
   tavily: (cred, query, opts, n) => tavilyShaped(`${TAVILY_BASE_URL}/search`, 'tavily', cred, query, opts, n),
 
   custom: (cred, query, opts, n) => {
@@ -460,6 +492,9 @@ function logSearch(row: SearchEngineRow, keyId: number | null, status: 'ok' | 'e
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
       VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'search', ?, ?, ?)
     `).run(row.platform, row.model_id, keyId, status === 'ok' ? 'success' : 'error', estimatedTokens, latencyMs, error, client.ip, client.userAgent, client.agent ?? clientAgent);
+    // Soft budget alert (#1158 follow-on): the ledger trigger fired with this
+    // row, so compare the caps once. No-op for uncapped keys.
+    if (status === 'ok' && keyId != null) noteBudgetAlerts(keyId);
   } catch (e) {
     console.error('Failed to log search request to requests table:', e);
   }
