@@ -209,6 +209,7 @@ npx freellmapi setup-claude --url http://localhost:3001 --api-key <统一密钥>
 | Continue | `setup-continue` | `/v1` |
 | Aider | `setup-aider` | `/v1` |
 | OpenCode | `setup-opencode` | `/v1` |
+| AtomCode | `setup-atomcode` | `/v1` |
 | Goose | `setup-goose` | `/v1` |
 | Qwen Code | `setup-qwen` | `/v1`（或原生 `/v1beta`） |
 | Roo / Kilo / Crush | `setup-roo` / `setup-kilo` / `setup-crush` | `/v1` |
