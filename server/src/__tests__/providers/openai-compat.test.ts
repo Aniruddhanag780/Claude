@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import dns from 'node:dns';
-import { OpenAICompatProvider, inBandCreditsError } from '../../providers/openai-compat.js';
+import { OpenAICompatProvider, inBandCreditsError, isOpencodeAiHost } from '../../providers/openai-compat.js';
 
 describe('OpenAICompatProvider', () => {
   let provider: OpenAICompatProvider;
@@ -1277,5 +1277,193 @@ describe('pinned tool_choice retry on custom endpoints (#1548)', () => {
     const bodies = upstream(badRequest);
     await expect(groq.chatCompletion('k', messages, 'm', { tools: [moveNote], tool_choice: pinned })).rejects.toThrow('Groq API error 400');
     expect(bodies).toHaveLength(1);
+  });
+});
+
+describe('x-opencode-session header for opencode.ai endpoints (#1639)', () => {
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  // The custom-platform SSRF guard resolves public hosts before every
+  // request; answer with a public address so no real DNS is needed.
+  beforeEach(() => {
+    vi.spyOn(dns.promises, 'lookup').mockResolvedValue([{ address: '203.0.113.10', family: 4 }] as any);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function sseResponse(frames: string[]): any {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (const frame of frames) controller.enqueue(encoder.encode(frame));
+        controller.close();
+      },
+    });
+    return { ok: true, body: stream, headers: new Headers() };
+  }
+
+  async function collect<T>(gen: AsyncGenerator<T>): Promise<T[]> {
+    const out: T[] = [];
+    for await (const chunk of gen) out.push(chunk);
+    return out;
+  }
+
+  /** Custom endpoint whose host is opencode.ai: isOpencodeAiHost() is
+   * protocol-agnostic and the SSRF guard resolves it (mocked to a public
+   * address above), so the session UUID must be minted per instance. */
+  const opencodeCustom = (name: string) => new OpenAICompatProvider({
+    platform: 'custom' as const,
+    name,
+    baseUrl: 'https://opencode.ai/zen/v1',
+  });
+
+  /** Stub fetch at the wire layer and record the header object of every
+   * request the provider builds. Non-streaming calls resolve a JSON 200;
+   * streaming calls resolve an SSE stream. */
+  function recordRequests(): Record<string, string>[] {
+    const seen: Record<string, string>[] = [];
+    vi.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      seen.push((init as any).headers as Record<string, string>);
+      const body = JSON.parse((init as any).body as string);
+      if (body.stream) {
+        return sseResponse([
+          'data: {"id":"s1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+          'data: {"id":"s1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\n',
+          'data: [DONE]\n\n',
+        ]);
+      }
+      return {
+        ok: true,
+        json: () => Promise.resolve({
+          id: 'x', object: 'chat.completion', created: 1, model: 'm',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+      } as any;
+    });
+    return seen;
+  }
+
+  it('opencode.ai base URL: non-streaming request carries a UUID x-opencode-session header', async () => {
+    const seen = recordRequests();
+    const p = opencodeCustom('OpenCode Go');
+
+    await p.chatCompletion('k', [{ role: 'user', content: 'hi' }], 'm');
+
+    expect(seen).toHaveLength(1);
+    const value = seen[0]['x-opencode-session'];
+    expect(value).toBeDefined();
+    expect(value).toMatch(UUID_RE);
+    // Pre-fix headers are preserved alongside it.
+    expect(seen[0]['Authorization']).toBe('Bearer k');
+    expect(seen[0]['Content-Type']).toBe('application/json');
+  });
+
+  it('opencode.ai base URL: the same session UUID is sent on every request from the same instance', async () => {
+    const seen = recordRequests();
+    const p = opencodeCustom('OpenCode Go');
+
+    await p.chatCompletion('k', [{ role: 'user', content: 'first' }], 'm');
+    await p.chatCompletion('k', [{ role: 'user', content: 'second' }], 'm');
+
+    expect(seen).toHaveLength(2);
+    const first = seen[0]['x-opencode-session'];
+    const second = seen[1]['x-opencode-session'];
+    expect(first).toMatch(UUID_RE);
+    expect(second).toBe(first);
+  });
+
+  it('opencode.ai base URL: the streaming path carries the same session UUID', async () => {
+    const seen = recordRequests();
+    const p = opencodeCustom('OpenCode Go');
+
+    await p.chatCompletion('k', [{ role: 'user', content: 'hi' }], 'm');
+    const chunks = await collect(p.streamChatCompletion('k', [{ role: 'user', content: 'hi' }], 'm'));
+    expect(chunks.length).toBeGreaterThan(0);
+
+    expect(seen).toHaveLength(2);
+    const nonStream = seen[0]['x-opencode-session'];
+    const stream = seen[1]['x-opencode-session'];
+    expect(nonStream).toMatch(UUID_RE);
+    expect(stream).toBe(nonStream);
+  });
+
+  it('opencode.ai base URL: two instances get independent session UUIDs', async () => {
+    const seen = recordRequests();
+    const a = opencodeCustom('A');
+    const b = opencodeCustom('B');
+
+    await a.chatCompletion('k', [{ role: 'user', content: 'hi' }], 'm');
+    await b.chatCompletion('k', [{ role: 'user', content: 'hi' }], 'm');
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]['x-opencode-session']).toMatch(UUID_RE);
+    expect(seen[1]['x-opencode-session']).toMatch(UUID_RE);
+    expect(seen[0]['x-opencode-session']).not.toBe(seen[1]['x-opencode-session']);
+  });
+
+  it('any other base URL host: NO x-opencode-session header, headers byte-for-byte pre-fix', async () => {
+    const seen: Record<string, string>[] = [];
+    vi.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      seen.push((init as any).headers);
+      const body = JSON.parse((init as any).body);
+      if (body.stream) {
+        return sseResponse([
+          'data: {"id":"s1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\n',
+          'data: [DONE]\n\n',
+        ]);
+      }
+      return {
+        ok: true,
+        json: () => Promise.resolve({
+          id: 'x', object: 'chat.completion', created: 1, model: 'm',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+      } as any;
+    });
+
+    const p = new OpenAICompatProvider({
+      platform: 'custom',
+      name: 'TestProvider',
+      baseUrl: 'https://example.com/v1',
+      extraHeaders: { 'X-Custom': 'test' },
+    });
+
+    await p.chatCompletion('my-key', [{ role: 'user', content: 'test' }], 'test-model');
+    await collect(p.streamChatCompletion('my-key', [{ role: 'user', content: 'test' }], 'test-model'));
+
+    expect(seen).toHaveLength(2);
+    for (const headers of seen) {
+      expect(headers).not.toHaveProperty('x-opencode-session');
+      // Exact pre-fix header set and values.
+      expect(Object.keys(headers).sort()).toEqual(['Authorization', 'Content-Type', 'X-Custom']);
+      expect(headers['Authorization']).toBe('Bearer my-key');
+      expect(headers['Content-Type']).toBe('application/json');
+      expect(headers['X-Custom']).toBe('test');
+    }
+  });
+
+  // Host-check edge cases for isOpencodeAiHost itself (the predicate that
+  // mints the session UUID): exact opencode.ai host only, protocol-agnostic,
+  // subdomains and look-alikes excluded, invalid URLs rejected.
+  it('isOpencodeAiHost: exact opencode.ai host matches on any valid scheme', () => {
+    expect(isOpencodeAiHost('https://opencode.ai/zen/v1')).toBe(true);
+    expect(isOpencodeAiHost('http://opencode.ai/v1')).toBe(true);
+  });
+
+  it('isOpencodeAiHost: subdomains, parent domains and look-alikes do NOT match', () => {
+    expect(isOpencodeAiHost('https://zen.opencode.ai/v1')).toBe(false);
+    expect(isOpencodeAiHost('https://com.opencode.ai/v1')).toBe(false);
+    expect(isOpencodeAiHost('https://opencode.ai.evil.example.com/v1')).toBe(false);
+    expect(isOpencodeAiHost('https://opencode.aimalicious.com/v1')).toBe(false);
+  });
+
+  it('isOpencodeAiHost: invalid / non-URL input returns false, never throws', () => {
+    expect(isOpencodeAiHost('not a url')).toBe(false);
+    expect(isOpencodeAiHost('')).toBe(false);
+    expect(isOpencodeAiHost('opencode.ai')).toBe(false);
   });
 });
