@@ -70,9 +70,12 @@ function resolveModelDbId(
 //
 // In addition to the raw row, we update two durable aggregates so analytics
 // totals survive the raw-row prune (REQUEST_ANALYTICS_MAX_ROWS):
-//   - request_hourly: per-hour bucket counts and tokens (max window = 30d).
+//   - request_hourly: per-hour bucket counts and tokens; its age bound follows
+//     the raw table's retention (see services/request-retention.ts), so it backs
+//     every window the dashboard offers, "all time" included.
 //   - settings: lifetime totals (total_requests, total_input_tokens, total_output_tokens)
-//     plus first_request_at (set on the first ever logged request).
+//     plus first_request_at (set on the first ever logged request). These never
+//     prune, so they are the exact all-time headline.
 // All upserts run in the same transaction so the aggregates never disagree
 // with the raw row count.
 export function logRequest(
