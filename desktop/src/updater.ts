@@ -15,7 +15,7 @@
 import { app, BrowserWindow, dialog, Notification, shell } from 'electron';
 import electronUpdater from 'electron-updater';
 import { dt, type NativeLocale } from './i18n.js';
-import { updateSupport, updaterProxy, type UpdateState } from './update-support.js';
+import { updateSupport, updaterProxy, withTimeout, type UpdateState } from './update-support.js';
 
 export type { UpdateState };
 
@@ -24,6 +24,10 @@ const { autoUpdater } = electronUpdater;
 const RELEASES_URL = 'https://github.com/tashfeenahmed/freellmapi/releases/latest';
 const BACKGROUND_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const FIRST_BACKGROUND_CHECK_MS = 60 * 1000;
+// A check that stalls the event loop (a proxy that never answers, a hung
+// updater feed) must become an error the UI can show and retry, not a spinner
+// that never stops.
+const CHECK_TIMEOUT_MS = 30_000;
 
 export interface UpdaterHooks {
   /** The dashboard's opt-in (settings table `update_check_enabled`). */
@@ -75,7 +79,11 @@ async function useAppProxy(): Promise<void> {
   if (url === appliedProxy) return;
   const proxy = updaterProxy(url);
   try {
-    await autoUpdater.netSession.setProxy(proxy ? { proxyRules: proxy.rules } : { mode: 'system' });
+    await withTimeout(
+      autoUpdater.netSession.setProxy(proxy ? { proxyRules: proxy.rules } : { mode: 'system' }),
+      CHECK_TIMEOUT_MS,
+      'applying the proxy to the update session',
+    );
     proxyCredentials = { username: proxy?.username ?? '', password: proxy?.password ?? '' };
     appliedProxy = url;
   } catch (err) {
@@ -172,7 +180,7 @@ export function checkForUpdates(): Promise<UpdateState> {
   }
   if (!inFlight) stage = 'check';
   inFlight ??= useAppProxy()
-    .then(() => autoUpdater.checkForUpdates())
+    .then(() => withTimeout(autoUpdater.checkForUpdates(), CHECK_TIMEOUT_MS, 'checking for updates'))
     .then(() => state)
     .catch((err) => {
       setState({ phase: 'error', during: 'check', message: message(err) });
@@ -188,7 +196,7 @@ export async function downloadUpdate(): Promise<UpdateState> {
   setState({ phase: 'downloading', version: state.version, percent: 0 });
   try {
     await useAppProxy();
-    await autoUpdater.downloadUpdate();
+    await withTimeout(autoUpdater.downloadUpdate(), CHECK_TIMEOUT_MS, 'downloading the update');
   } catch (err) {
     setState({ phase: 'error', during: 'download', message: message(err) });
   }

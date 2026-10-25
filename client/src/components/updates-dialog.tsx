@@ -129,6 +129,27 @@ function UpdatesContent() {
           return <Status icon="busy" title={t('keys.checking')} />
         case 'current':
           return <Status icon="ok" title={t('settings.upToDate')} />
+        case 'unsupported':
+          // Portable zip / dev build: the app cannot replace itself, so the
+          // only path to a newer version is the latest GitHub release.
+          return (
+            <Status
+              icon="info"
+              title={t('settings.notGitInstall')}
+              detail={releaseNotes}
+              action={(
+                <a
+                  href={RELEASES_URL}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className={buttonVariants({ size: 'sm' })}
+                >
+                  {t('settings.downloadUpdate')}
+                  <ArrowUpRight aria-hidden />
+                </a>
+              )}
+            />
+          )
         case 'available':
           return (
             <Status

@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react'
 
+/** A check that stalls the bridge must not freeze the dialog on "Checking". */
+const BRIDGE_TIMEOUT_MS = 30_000
+
 /** Mirrors desktop/src/update-support.ts — the main process's updater state. */
 export type DesktopUpdateState =
   | { phase: 'unsupported'; reason: 'dev' | 'package' }
@@ -29,6 +32,18 @@ export function hasDesktopUpdater(): boolean {
   return bridge() !== null
 }
 
+/** Reject a promise after `ms` milliseconds, so a stalled bridge leaves the
+ *  dialog rather than freezing it on "Checking" forever. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value) },
+      (error) => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
+
 /** Starts a desktop update check; the new state arrives through the hook. */
 export function checkDesktopUpdates(): Promise<DesktopUpdateState> | null {
   return bridge()?.check() ?? null
@@ -46,7 +61,9 @@ export function useDesktopUpdater() {
   useEffect(() => {
     if (!updater) return
     let cancelled = false
-    void updater.state().then(next => { if (!cancelled) setState(next) })
+    void withTimeout(updater.state(), BRIDGE_TIMEOUT_MS, 'reading the updater state')
+      .then(next => { if (!cancelled) setState(next) })
+      .catch(() => { /* leave the hook null; the dialog falls through */ })
     const unsubscribe = updater.subscribe(next => setState(next))
     return () => {
       cancelled = true
@@ -54,7 +71,10 @@ export function useDesktopUpdater() {
     }
   }, [updater])
 
-  if (!updater || !state || state.phase === 'unsupported') return null
+  // Even an unsupported build (portable zip, dev) is surfaced so the dialog can
+  // explain it and point at the latest GitHub release, instead of falling
+  // through to a check that never resolves.
+  if (!updater || !state) return null
   return {
     state,
     check: () => updater.check().then(next => { setState(next); return next }),
