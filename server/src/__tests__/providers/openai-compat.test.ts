@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import dns from 'node:dns';
-import { OpenAICompatProvider, inBandCreditsError } from '../../providers/openai-compat.js';
+import { OpenAICompatProvider, inBandCreditsError, isOpencodeEndpoint } from '../../providers/openai-compat.js';
 
 describe('OpenAICompatProvider', () => {
   let provider: OpenAICompatProvider;
@@ -1277,5 +1277,89 @@ describe('pinned tool_choice retry on custom endpoints (#1548)', () => {
     const bodies = upstream(badRequest);
     await expect(groq.chatCompletion('k', messages, 'm', { tools: [moveNote], tool_choice: pinned })).rejects.toThrow('Groq API error 400');
     expect(bodies).toHaveLength(1);
+  });
+});
+
+// #1639: OpenCode endpoints (opencode.ai — the Zen gateway /zen/v1 and the Go
+// tier /zen/go/v1) reject chat requests without an x-opencode-session header
+// with 400, while GET /models keeps answering — so keys look healthy and never
+// serve. The adapter now sends one stable UUID per provider instance on both
+// chat paths and leaves the catalog/health path alone.
+describe('OpenAICompatProvider x-opencode-session header (#1639)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function jsonOk(): any {
+    return {
+      ok: true,
+      json: () => Promise.resolve({
+        id: 'id', object: 'chat.completion', created: 1, model: 'm',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      }),
+    };
+  }
+
+  it('sends x-opencode-session on chat completions to opencode.ai and keeps it stable', async () => {
+    const provider = new OpenAICompatProvider({
+      platform: 'custom', name: 'Custom (OpenAI-compatible)', baseUrl: 'https://opencode.ai/zen/go/v1',
+    });
+    const seen: Array<Record<string, string> | undefined> = [];
+    vi.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      seen.push((init as RequestInit).headers as Record<string, string>);
+      return jsonOk();
+    });
+    await provider.chatCompletion('key', [{ role: 'user', content: 'hi' }], 'm');
+    await provider.chatCompletion('key', [{ role: 'user', content: 'again' }], 'm');
+    expect(seen).toHaveLength(2);
+    const first = seen[0]?.['x-opencode-session'];
+    expect(first).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(seen[1]?.['x-opencode-session']).toBe(first);
+  });
+
+  it('sends x-opencode-session on the streaming path too', async () => {
+    const provider = new OpenAICompatProvider({
+      platform: 'custom', name: 'Custom (OpenAI-compatible)', baseUrl: 'https://opencode.ai/zen/v1',
+    });
+    let header: Record<string, string> | undefined;
+    vi.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      header = (init as RequestInit).headers as Record<string, string>;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode('data: {"id":"id","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}\n\n'));
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        },
+      });
+      return { ok: true, body: stream, headers: new Headers() } as any;
+    });
+    for await (const _chunk of provider.streamChatCompletion('key', [{ role: 'user', content: 'hi' }], 'm')) {
+      // drain
+    }
+    expect(header?.['x-opencode-session']).toMatch(/^[0-9a-f-]{36}$/i);
+  });
+
+  it('does not send the header to non-OpenCode endpoints', async () => {
+    const provider = new OpenAICompatProvider({
+      platform: 'custom', name: 'Custom (OpenAI-compatible)', baseUrl: 'https://api.example.com/v1',
+    });
+    let header: Record<string, string> | undefined;
+    vi.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      header = (init as RequestInit).headers as Record<string, string>;
+      return jsonOk();
+    });
+    await provider.chatCompletion('key', [{ role: 'user', content: 'hi' }], 'm');
+    expect(header?.['x-opencode-session']).toBeUndefined();
+  });
+
+  it('isOpencodeEndpoint matches opencode.ai and its subdomains only', () => {
+    expect(isOpencodeEndpoint('https://opencode.ai/zen/v1')).toBe(true);
+    expect(isOpencodeEndpoint('https://opencode.ai/zen/go/v1')).toBe(true);
+    expect(isOpencodeEndpoint('https://api.opencode.ai/v1')).toBe(true);
+    expect(isOpencodeEndpoint('https://api.example.com/v1')).toBe(false);
+    expect(isOpencodeEndpoint('https://notopencode.ai.example.com/v1')).toBe(false);
+    expect(isOpencodeEndpoint('')).toBe(false);
   });
 });

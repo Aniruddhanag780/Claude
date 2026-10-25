@@ -636,26 +636,41 @@ register(new OpenAICompatProvider({
 // custom providers get the same extended timeout as Ollama Cloud.
 const CUSTOM_PROVIDER_TIMEOUT_MS = 120000;
 
+// One custom-provider instance per distinct base URL. resolveProvider() runs
+// per request, and per-instance state that should stay stable across requests
+// (the x-opencode-session UUID OpenCode endpoints require per conversation,
+// #1639) would otherwise rotate on every call. Caching by trimmed base URL
+// keeps the instance — and its session id — sticky while still picking up
+// base-URL edits immediately. Bounded by the number of distinct custom base
+// URLs, which is a small user-configured set.
+const customProviderCache = new Map<string, OpenAICompatProvider>();
+
 export function getProvider(platform: Platform): BaseProvider | undefined {
   return providers.get(platform);
 }
 
 /**
  * Resolve the provider for a route. Built-in platforms return their registered
- * singleton; the 'custom' platform builds a fresh OpenAICompatProvider bound to
- * the caller-supplied base URL (stored per api_keys row). Returns undefined for
- * a custom provider with no base URL configured.
+ * singleton; the 'custom' platform returns an OpenAICompatProvider bound to
+ * the caller-supplied base URL (stored per api_keys row), one cached instance
+ * per distinct base URL. Returns undefined for a custom provider with no base
+ * URL configured.
  */
 export function resolveProvider(platform: Platform, baseUrl?: string | null): BaseProvider | undefined {
   if (platform === 'custom') {
     const trimmed = baseUrl?.trim();
     if (!trimmed) return undefined;
-    return new OpenAICompatProvider({
-      platform: 'custom',
-      name: 'Custom (OpenAI-compatible)',
-      baseUrl: trimmed,
-      timeoutMs: CUSTOM_PROVIDER_TIMEOUT_MS,
-    });
+    let instance = customProviderCache.get(trimmed);
+    if (!instance) {
+      instance = new OpenAICompatProvider({
+        platform: 'custom',
+        name: 'Custom (OpenAI-compatible)',
+        baseUrl: trimmed,
+        timeoutMs: CUSTOM_PROVIDER_TIMEOUT_MS,
+      });
+      customProviderCache.set(trimmed, instance);
+    }
+    return instance;
   }
   return providers.get(platform);
 }

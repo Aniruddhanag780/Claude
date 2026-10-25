@@ -5,6 +5,7 @@ import type {
   ChatToolCall,
   Platform,
 } from '@freellmapi/shared/types.js';
+import { randomUUID } from 'node:crypto';
 import { BaseProvider, providerHttpError, type CompletionOptions, type KeyValidationResult } from './base.js';
 import { extendedBodyParams, resolveMaxTokens } from '../lib/sampling-params.js';
 import { rescueInlineToolCalls } from '../lib/tool-call-rescue.js';
@@ -26,6 +27,10 @@ export { isAnonymousCredential } from '../lib/credential.js';
  * api.moonshot.cn, api.kimi.com and their subdomains). */
 const MOONSHOT_HOST_SUFFIXES = ['moonshot.ai', 'moonshot.cn', 'kimi.com'];
 
+/** Hosts that are OpenCode's own API (opencode.ai — both the Zen gateway
+ * /zen/v1 and the Go tier /zen/go/v1 live on it). */
+const OPENCODE_HOST_SUFFIXES = ['opencode.ai'];
+
 /**
  * Whether a base URL points at Moonshot's own API. Moonshot documents an
  * assistant-message `partial: true` prefill flag that no other OpenAI-compatible
@@ -42,6 +47,26 @@ export function isMoonshotEndpoint(baseUrl: string): boolean {
     return false;
   }
   return MOONSHOT_HOST_SUFFIXES.some((d) => host === d || host.endsWith(`.${d}`));
+}
+
+/**
+ * Whether a base URL points at OpenCode's own API (opencode.ai or a
+ * subdomain). Since 2026-09-05 OpenCode rejects chat requests that do not
+ * carry an `x-opencode-session` header with HTTP 400 "Request is missing
+ * x-opencode-session", while `GET /models` keeps answering without it — so
+ * keys validate as healthy and then never serve a chat (#1639). Any stable
+ * UUID per conversation satisfies the check, so one stable UUID per provider
+ * instance is enough. Returns false for anything that does not parse as a
+ * URL.
+ */
+export function isOpencodeEndpoint(baseUrl: string): boolean {
+  let host: string;
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return OPENCODE_HOST_SUFFIXES.some((d) => host === d || host.endsWith(`.${d}`));
 }
 
 /**
@@ -116,6 +141,13 @@ export class OpenAICompatProvider extends BaseProvider {
   /** True only for a custom endpoint whose host is Moonshot's own API; see
    * isMoonshotEndpoint(). Gates the assistant `partial` prefill flag (#1038). */
   private readonly forwardsPartial: boolean;
+  /** Stable session UUID sent as x-opencode-session on chat requests to
+   * OpenCode endpoints; see isOpencodeEndpoint() (#1639). Generated once per
+   * provider instance — any stable UUID per conversation satisfies OpenCode,
+   * and treating this gateway's traffic as one long conversation keeps the
+   * header stable without per-request bookkeeping. Empty for non-OpenCode
+   * endpoints. */
+  private readonly opencodeSession: string;
   /** Optional provider-reported quota endpoint (#1403). */
   private readonly quotaProbe?: QuotaProbeSpec;
 
@@ -141,7 +173,17 @@ export class OpenAICompatProvider extends BaseProvider {
     this.keyless = opts.keyless ?? false;
     this.forceSingleToolCall = opts.forceSingleToolCall ?? false;
     this.forwardsPartial = opts.platform === 'custom' && isMoonshotEndpoint(opts.baseUrl);
+    this.opencodeSession = isOpencodeEndpoint(opts.baseUrl) ? randomUUID() : '';
     this.quotaProbe = opts.quotaProbe;
+  }
+
+  /** Extra headers for chat-completion requests. OpenCode endpoints need the
+   * stable x-opencode-session header on every chat call (#1639); everything
+   * else gets none beyond the configured extras. */
+  private chatHeaders(): Record<string, string> {
+    return this.opencodeSession
+      ? { ...this.extraHeaders, 'x-opencode-session': this.opencodeSession }
+      : this.extraHeaders;
   }
 
   /** Resolve the parallel_tool_calls flag to send upstream. For providers that
@@ -332,7 +374,7 @@ export class OpenAICompatProvider extends BaseProvider {
       headers: {
         ...this.authHeader(apiKey),
         'Content-Type': 'application/json',
-        ...this.extraHeaders,
+        ...this.chatHeaders(),
       },
       body: JSON.stringify({
         model: modelId,
@@ -463,7 +505,7 @@ export class OpenAICompatProvider extends BaseProvider {
       headers: {
         ...this.authHeader(apiKey),
         'Content-Type': 'application/json',
-        ...this.extraHeaders,
+        ...this.chatHeaders(),
       },
       body: JSON.stringify({
         model: modelId,
