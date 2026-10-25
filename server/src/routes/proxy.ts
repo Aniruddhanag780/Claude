@@ -1539,6 +1539,8 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
         false,
         state.skipPlatforms.size > 0 ? state.skipPlatforms : undefined,
         outputReserve,
+        undefined,
+        resolvedChain?.strategyOverride,
       );
     },
     dispatch: async (route, attempt, ctx) => {
@@ -2493,7 +2495,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // model picks which preset (Smartest / Fastest / Balanced / Most reliable)
   // this turn routes with. Skipped when the client pinned a model or the
   // conversation is sticky to one. Any doubt routes as Balanced.
-  const routingPick = await applyDecisionRouting(messages, { pinned: pinnedModelId != null || preferredModel != null, signal: clientAbort.signal });
+  const routingPick = await applyDecisionRouting(messages, { pinned: pinnedModelId != null || preferredModel != null, preset: resolvedChain?.strategyOverride, signal: clientAbort.signal });
   if (routingPick && !res.headersSent) res.setHeader('X-FreeLLM-Routing-Strategy', routingStrategyHeader(routingPick));
 
   await runFallbackLoop({
@@ -2515,7 +2517,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       // header; otherwise a bounded rule derives it (tools present / code
       // markers). undefined keeps the preset weights untouched.
       const taskType = resolveTaskType(req, tools, messages);
-      return routeRequest(routingEstimate, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? resolvedChain?.chain, samplingParams.response_format !== undefined, state.skipPlatforms.size > 0 ? state.skipPlatforms : undefined, outputReserve, taskType);
+      return routeRequest(routingEstimate, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? resolvedChain?.chain, samplingParams.response_format !== undefined, state.skipPlatforms.size > 0 ? state.skipPlatforms : undefined, outputReserve, taskType, resolvedChain?.strategyOverride);
     },
     dispatch: async (route, attempt, ctx) => {
     const contextBudget = routeOutputBudget(route, estimatedInputTokens);
