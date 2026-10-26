@@ -1291,6 +1291,10 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy, sampled = true
 export interface ResolvedChain {
   chain: ChainRow[];
   strategyKey: string;
+  /** For a global-axis alias (auto:fast & co): the strategy the alias ranks by.
+   *  routeRequest takes it as a per-request override so the alias's ordering
+   *  survives instead of being re-sorted by the global strategy (#1628). */
+  strategyOverride?: RoutingStrategy;
 }
 
 const GLOBAL_SORT_ALIASES: Record<string, string> = {
@@ -1298,6 +1302,17 @@ const GLOBAL_SORT_ALIASES: Record<string, string> = {
   fast: 'fast', fastest: 'fast', speed: 'fast',
   cheap: 'cheap', cheapest: 'cheap', price: 'cheap', budget: 'cheap',
   reliable: 'reliable', reliability: 'reliable',
+  balanced: 'balanced',
+};
+
+/** Which bandit strategy each global-sort axis ranks by (#122). Shared by
+ *  getChainByGlobalSort (chain building) and ResolvedChain.strategyOverride
+ *  (per-request re-ranking in routeRequest, #1628) so the two can't drift. */
+const GLOBAL_AXIS_STRATEGIES: Record<string, RoutingStrategy> = {
+  smart: 'smartest',
+  fast: 'fastest',
+  cheap: 'balanced',
+  reliable: 'reliable',
   balanced: 'balanced',
 };
 
@@ -1398,14 +1413,7 @@ function getChainByGlobalSort(db: Db, globalAxis: string): ChainRow[] {
     WHERE m.enabled = 1 AND ${chainEnabled}
   `).all(...(profileId != null ? [profileId] : [])) as ChainRow[];
 
-  const strategyMap: Record<string, RoutingStrategy> = {
-    'smart': 'smartest',
-    'fast': 'fastest',
-    'cheap': 'balanced',
-    'reliable': 'reliable',
-    'balanced': 'balanced'
-  };
-  const strat = strategyMap[globalAxis] || 'balanced';
+  const strat = GLOBAL_AXIS_STRATEGIES[globalAxis] || 'balanced';
   
   return orderChain(allEnabled, strat);
 }
@@ -1459,7 +1467,7 @@ export function resolveRoutingChain(modelString: string | undefined): ResolvedCh
       err.status = 400;
       throw err;
     }
-    return { chain, strategyKey: `auto:${globalAxis}` };
+    return { chain, strategyKey: `auto:${globalAxis}`, strategyOverride: GLOBAL_AXIS_STRATEGIES[globalAxis] };
   }
 
   const chain = getChainByProfileName(db, suffix);
@@ -2149,10 +2157,12 @@ export function resolveFusionCandidate(modelId: string): FusionCandidate | null 
   return null;
 }
 
-export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requireVision = false, requireTools = false, skipModels?: Set<number>, prefetchedChain?: ChainRow[], requireStructured = false, skipPlatforms?: Set<string>, exactOutputReserve = 0, task?: 'code' | 'chat'): RouteResult {
+export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requireVision = false, requireTools = false, skipModels?: Set<number>, prefetchedChain?: ChainRow[], requireStructured = false, skipPlatforms?: Set<string>, exactOutputReserve = 0, task?: 'code' | 'chat', strategyOverride?: RoutingStrategy): RouteResult {
   const db = getDb();
 
-  const strategy = effectiveRoutingStrategy();
+  // A global-axis alias (auto:fast & co) ranks by ITS axis, not the global
+  // strategy: the alias is an explicit per-request steer (#1628).
+  const strategy = strategyOverride ?? effectiveRoutingStrategy();
   if (strategy !== 'priority') refreshStatsCache(db);
 
   const chain = (prefetchedChain ?? getActiveChain(db)).filter(e => e.enabled);

@@ -3,7 +3,7 @@ import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
-import { resolveRoutingChain, setRoutingStrategy, getOrderedFusionChain } from '../../services/router.js';
+import { resolveRoutingChain, setRoutingStrategy, getOrderedFusionChain, refreshStatsCache } from '../../services/router.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 
 let app: Express;
@@ -251,5 +251,83 @@ describe('disabled models are never routed (#634)', () => {
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('model_not_found');
     });
+  });
+});
+
+// #1628: `auto:<axis>` aliases are documented to steer a single request's
+// ordering by their axis. routeRequest used to re-sort the alias's prefetched
+// chain with the GLOBAL strategy, discarding the axis (Manual mode survived by
+// accident: equal priorities + stable sort). The alias's axis now rides into
+// routeRequest as a per-request strategy override.
+describe('auto:<axis> aliases rank by their own axis (#1628)', () => {
+  // Seed the decay-weighted stats routeRequest scores from, mirroring the rows
+  // the proxy's request log writes. Enough samples that the Thompson reliability
+  // draw is tight for both models (identical histories), so the axis under test
+  // — not the draw — decides. tokPerSec = output_tokens*1000/latency_ms
+  // (see refreshStatsCache).
+  function seedStats(modelId: string, out: number, latencyMs: number, ttfbMs: number): void {
+    const db = getDb();
+    const keyRow = db.prepare("SELECT id FROM api_keys WHERE platform = 'groq'").get() as { id: number } | undefined;
+    const ins = db.prepare(`
+      INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, ttfb_ms, created_at)
+      VALUES ('groq', ?, ?, 'success', 10, ?, ?, ?, ?)
+    `);
+    const now = new Date().toISOString();
+    for (let i = 0; i < 100; i++) ins.run(modelId, keyRow?.id ?? null, out, latencyMs, ttfbMs, now);
+  }
+
+  // Cross the axes on the file's two-model fixture: alpha = smart but slow,
+  // beta = fast but dumber. Under a global smartest, alpha must win; under the
+  // alias's own fastest, beta must win.
+  function crossTheAxes(): void {
+    const db = getDb();
+    db.prepare('UPDATE models SET intelligence_rank = 1 WHERE model_id = ?').run('alpha-model');
+    db.prepare('UPDATE models SET intelligence_rank = 10 WHERE model_id = ?').run('beta-model');
+    seedStats('alpha-model', 2, 2000, 1500);   // 1 tok/s, slow first byte
+    seedStats('beta-model', 100, 1000, 50);    // 100 tok/s, fast first byte
+    // Earlier tests in this file may have populated the module-level stats
+    // cache from THEIR (request-free) DB; the TTL early-return would then
+    // serve it stale. Force a rebuild against the freshly seeded rows.
+    refreshStatsCache(db, true);
+  }
+
+  it('carries the axis strategy into ResolvedChain', () => {
+    expect(resolveRoutingChain('auto:smart').strategyOverride).toBe('smartest');
+    expect(resolveRoutingChain('auto:fast').strategyOverride).toBe('fastest');
+    expect(resolveRoutingChain('auto:cheap').strategyOverride).toBe('balanced');
+    expect(resolveRoutingChain('auto:reliable').strategyOverride).toBe('reliable');
+    expect(resolveRoutingChain('auto:balanced').strategyOverride).toBe('balanced');
+    expect(resolveRoutingChain('auto').strategyOverride).toBeUndefined();
+    expect(resolveRoutingChain(undefined).strategyOverride).toBeUndefined();
+  });
+
+  it('/v1/chat/completions: auto:fast serves the fast model under a global smartest', async () => {
+    crossTheAxes();
+    setRoutingStrategy('smartest');
+
+    // Plain auto follows the global strategy: the smart (slow) model wins.
+    const plain = await request('POST', '/v1/chat/completions', {
+      messages: [{ role: 'user', content: 'hello' }],
+    }, authHeaders());
+    expect(plain.status).toBe(200);
+    expect(lastServedModel()).toBe('alpha-model');
+
+    // The alias steers its own request: the fast (dumber) model wins.
+    const alias = await request('POST', '/v1/chat/completions', {
+      model: 'auto:fast', messages: [{ role: 'user', content: 'hello' }],
+    }, authHeaders());
+    expect(alias.status).toBe(200);
+    expect(lastServedModel()).toBe('beta-model');
+  });
+
+  it('/v1/responses: auto:fast serves the fast model under a global smartest', async () => {
+    crossTheAxes();
+    setRoutingStrategy('smartest');
+
+    const res = await request('POST', '/v1/responses', {
+      model: 'auto:fast', input: 'hello',
+    }, authHeaders());
+    expect(res.status).toBe(200);
+    expect(lastServedModel()).toBe('beta-model');
   });
 });
